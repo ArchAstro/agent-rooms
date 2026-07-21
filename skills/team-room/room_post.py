@@ -651,7 +651,7 @@ def resolve_sender_for_token(token: str) -> str:
     uid = (me or {}).get("id") or (me or {}).get("user_id")
     if uid:
         return uid
-    die("could not resolve an identity for the token; run scripts/room-post login instead", 3)
+    die("could not resolve an identity for the token; run `room-post login` instead", 3)
 
 
 def load_session():
@@ -667,7 +667,7 @@ def load_session():
         die(
             "the Team Room has no login on this machine yet. Run once "
             "(opens your browser for one click; separate from any archagent "
-            "CLI login):\n  scripts/room-post login\nUntil then, "
+            "CLI login):\n  room-post login\nUntil then, "
             "continuing without coordination.",
             3,
         )
