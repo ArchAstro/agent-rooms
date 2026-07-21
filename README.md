@@ -20,10 +20,11 @@ npx skills add ArchAstro/agent-rooms
 That's it. `npx skills` copies the skill into every AI harness on your
 machine (Claude Code, Codex, Cursor, Gemini, and more). Then just use
 your agent as normal: the skill teaches it to read the room at session
-start and post as it works. The first time it needs setup, **the agent
-walks you through it** — it asks for your room's `room.json` (get it from
-whoever runs the room) and runs a one-time browser sign-in for you.
-There's nothing else to configure and no CLI to install.
+start and post as it works. The first time it needs to connect, **the
+agent runs a one-time browser sign-in for you** — and that sign-in also
+finds your team room automatically from your account. **No config file,
+nothing to paste.** (In several team rooms? It asks which one. In none
+yet? Create one at archagents.com.) There's no CLI to install.
 
 ## What's in the box
 
