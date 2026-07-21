@@ -131,12 +131,24 @@ def init_room(config_path: str):
     print("next: room-post login (one browser click), then room-post doctor")
 
 
-# `init` and `--help` must run WITHOUT a room configured (that's the whole
-# point of init). Every other command loads config eagerly and fails loud
-# if it's missing. In init-mode the derived globals are empty and unused.
-_NO_CONFIG_CMDS = {"init", "--help", "-h", "help"}
-_INIT_MODE = len(sys.argv) > 1 and sys.argv[1] in _NO_CONFIG_CMDS
-_ROOM_CFG = {} if _INIT_MODE else _room_config()
+# Product constants for the ArchAgents SaaS. A customer's "team room" is a
+# team + thread inside this one app, so these are the same for everyone —
+# the publishable key is public by definition. Only the thread and team are
+# team-specific, and those come from your login (see discover_rooms). Other
+# tiers (staging) or self-hosts override all of this via `init --config`.
+DEFAULT_SERVER = "https://platform.archastro.ai"
+DEFAULT_PORTAL = "https://archagents.com"
+DEFAULT_APP_SLUG = "agentnetwork"
+DEFAULT_PUBLISHABLE_KEY = "pk_dap_032Tk6YGrHp2cnyxwABnMS_Q6M9BsvOr8HKuIkLZNRWVTCTnApNHiRY"
+
+# These commands must run WITHOUT a room configured: init writes config,
+# login/discover create it from your identity, help needs nothing. They
+# load config if it happens to exist (e.g. `login <mirror>` needs the
+# mirror list) but never fail when it's absent. Every other command loads
+# config eagerly and fails loud if it's missing.
+_SOFT_CONFIG_CMDS = {"init", "login", "discover", "--help", "-h", "help"}
+_soft = len(sys.argv) > 1 and sys.argv[1] in _SOFT_CONFIG_CMDS
+_ROOM_CFG = {} if (_soft and _room_config_path() is None) else _room_config()
 THREAD_ID = _ROOM_CFG.get("thread_id", "")
 ROOM_SOURCE_ID = _ROOM_CFG.get("source_id") or ""
 ROOM_TEAM_ID = _ROOM_CFG.get("team_id", "")
@@ -769,6 +781,107 @@ def http_get(url: str, token: str) -> dict:
         return json.load(resp)
 
 
+# --- Zero-config room discovery -------------------------------------------
+# After you log in, the tool finds your team room from your own identity —
+# no room.json to supply. A "team room" is a thread titled "team room" on a
+# team you belong to. This preserves the fail-loud rule (it never guesses a
+# room you don't belong to; on ambiguity it asks) while removing the config
+# step for the common one-team case.
+
+def _bootstrap_token() -> str | None:
+    """A usable access token for discovery, without needing a room.json:
+    a static TEAM_ROOM_TOKEN, else the login session (refreshed against the
+    default server if expired)."""
+    tok = static_token()
+    if tok:
+        return tok
+    try:
+        creds = json.load(open(ROOM_CREDS_PATH))
+        key = next(iter(creds["orgSessions"]))
+        s = creds["orgSessions"][key]
+        if (s.get("expiresAt") or 0) / 1000 < time.time() + EXPIRY_SKEW_SECONDS:
+            s = refresh_session(creds, key, ROOM_CREDS_PATH, server=DEFAULT_SERVER)
+        return s["accessToken"]
+    except Exception:
+        return None
+
+
+def discover_rooms(server: str, token: str, pub_key: str) -> list:
+    """Team rooms the caller can join: [(team_name, team_id, thread_id)]."""
+    def get(path):
+        req = urllib.request.Request(
+            f"{server}{path}",
+            headers={"Authorization": f"Bearer {token}",
+                     "x-archastro-api-key": pub_key})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.load(r)
+
+    rooms = []
+    try:
+        teams = get("/api/v1/teams?page_size=50").get("data") or []
+    except Exception:
+        return rooms
+    for t in teams:
+        tid = t.get("id")
+        if not tid:
+            continue
+        try:
+            threads = get(f"/api/v1/teams/{tid}/threads").get("data") or []
+        except Exception:
+            continue
+        for th in threads:
+            if (th.get("title") or "").lower() == "team room" and th.get("id"):
+                rooms.append((t.get("name") or tid, tid, th["id"]))
+    return rooms
+
+
+def _write_room_json(team_id: str, thread_id: str, server: str, pub_key: str):
+    cfg = {
+        "thread_id": thread_id,
+        "team_id": team_id,
+        "server": server,
+        "portal": DEFAULT_PORTAL,
+        "app_slug": DEFAULT_APP_SLUG,
+        "publishable_key": pub_key,
+    }
+    os.makedirs(os.path.dirname(ROOM_CONFIG_PATH), exist_ok=True)
+    with open(ROOM_CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+    os.chmod(ROOM_CONFIG_PATH, 0o600)
+
+
+def discover_and_configure(token: str, chosen_team: str | None = None):
+    """Find and persist the caller's team room. Zero-config for the common
+    single-room case; prints choices when there are several. A room.json
+    beside the script or ROOM_JSON env still wins and is left alone."""
+    if os.environ.get("ROOM_JSON", "").strip():
+        return
+    beside = os.path.join(os.path.dirname(os.path.abspath(__file__)), "room.json")
+    if os.path.exists(beside):
+        return  # a repo pinned its own room; don't override it
+    # ROOM_SERVER / ROOM_PUBLISHABLE_KEY override the product defaults for a
+    # non-prod tier or a self-host (and for tests). Normal users set nothing.
+    server = os.environ.get("ROOM_SERVER") or PRODUCTION_SERVER or DEFAULT_SERVER
+    pub_key = (os.environ.get("ROOM_PUBLISHABLE_KEY")
+               or _ROOM_CFG.get("publishable_key") or DEFAULT_PUBLISHABLE_KEY)
+    rooms = discover_rooms(server, token, pub_key)
+    if chosen_team:
+        rooms = [r for r in rooms if r[1] == chosen_team]
+    if not rooms:
+        print("no team room found for your account yet. Ask whoever runs "
+              "your team's room to add you, or create one at "
+              f"{DEFAULT_PORTAL}.")
+        return
+    if len(rooms) == 1:
+        name, tid, thid = rooms[0]
+        _write_room_json(tid, thid, server, pub_key)
+        print(f"joined team room: {name}")
+        return
+    print("you're in several team rooms — pick one and re-run:")
+    for name, tid, _ in rooms:
+        print(f"  room-post discover --team {tid}   # {name}")
+
+
 def upsert_presence(session, post_type: str, headline: str):
     """One living row per human/worktree, refreshed by every post.
     Best-effort: presence must never break posting."""
@@ -1126,9 +1239,11 @@ def login(mirror: dict | None = None):
     import urllib.parse
     import webbrowser
 
-    portal = mirror["portal"] if mirror else PORTAL_URL
-    slug = mirror["app_slug"] if mirror else ROOM_APP_SLUG
-    server_url = mirror["server"] if mirror else PRODUCTION_SERVER
+    # No config yet on a first login: fall back to the product defaults so
+    # you can authenticate before you have a room, then discover it.
+    portal = mirror["portal"] if mirror else (PORTAL_URL or DEFAULT_PORTAL)
+    slug = mirror["app_slug"] if mirror else (ROOM_APP_SLUG or DEFAULT_APP_SLUG)
+    server_url = mirror["server"] if mirror else (PRODUCTION_SERVER or DEFAULT_SERVER)
     creds_path = (
         os.path.join(MIRRORS_DIR, f"{mirror['name']}.json")
         if mirror
@@ -1206,6 +1321,14 @@ def login(mirror: dict | None = None):
         f"at {creds_path}. Posting now works regardless of archagent's "
         "environment."
     )
+    # First login with no room configured: find your team room from your
+    # identity and save it, so there's nothing else to set up.
+    if not mirror and _room_config_path() is None:
+        try:
+            discover_and_configure(result["access_token"])
+        except Exception as e:
+            print(f"(couldn't auto-detect your room: {e}. If you have a "
+                  "room.json, run: room-post init --config <path>)")
 
 
 def inbox():
@@ -1404,6 +1527,14 @@ def main():
         if not cfg:
             die("usage: room-post init --config <room.json>")
         init_room(cfg)
+        return
+    if cmd == "discover":
+        rest = sys.argv[2:]
+        team = rest[rest.index("--team") + 1] if "--team" in rest else None
+        tok = _bootstrap_token()
+        if not tok:
+            die("sign in first: room-post login", 3)
+        discover_and_configure(tok, chosen_team=team)
         return
     if cmd == "subscribe":
         subscribe_repo()
