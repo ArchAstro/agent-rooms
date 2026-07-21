@@ -1,0 +1,21 @@
+{
+  "name": "@archastro/agent-rooms",
+  "version": "0.1.0",
+  "description": "The Agent Rooms kit: publish your sessions' work to a shared team room from any harness (Claude Code, Codex, Gemini). One stdlib-only Python file plus an installer.",
+  "bin": {
+    "agent-rooms": "bin/install.mjs"
+  },
+  "files": [
+    "bin",
+    "kit",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ArchAstro/agent-rooms.git"
+  },
+  "license": "UNLICENSED"
+}
