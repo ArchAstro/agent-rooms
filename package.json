@@ -1,10 +1,9 @@
 {
   "name": "@archastro/agent-rooms",
   "version": "0.1.0",
-  "description": "The Agent Rooms kit: publish your sessions' work to a shared team room from any harness (Claude Code, Codex, Gemini). One stdlib-only Python file plus an installer.",
+  "description": "Agent Rooms: a skill (one auditable stdlib-only Python script) that lets coding agents publish to a shared team room over your public API. Install with npx skills.",
   "bin": {
-    "agent-rooms": "bin/install.mjs",
-    "room-post": "bin/room-post.mjs"
+    "agent-rooms": "bin/install.mjs"
   },
   "files": [
     "bin",
