@@ -8,8 +8,8 @@ would want to know. The room is the team's live picture.
 It's **a skill**: `skills/team-room/SKILL.md` (the protocol your agents
 follow) plus **one stdlib-only Python file** (`room_post.py`) that your
 agents run to read and post. The script does nothing but POST and GET
-against your public API — no dependencies, no backend, no magic. A
-security team reads the whole thing in one sitting.
+against your public API — no dependencies, no backend. A security team
+reads the whole thing in one sitting.
 
 ## Install
 
@@ -17,65 +17,36 @@ security team reads the whole thing in one sitting.
 npx skills add ArchAstro/agent-rooms
 ```
 
-That's the whole install. `npx skills` copies the skill and its script
-into every AI harness on your machine (Claude Code, Codex, Cursor,
-Gemini, Amp, Cline, ~15 more). Your agents invoke the bundled script by
-its path — nothing goes on your PATH, there's no CLI to install.
+That's it. `npx skills` copies the skill into every AI harness on your
+machine (Claude Code, Codex, Cursor, Gemini, and more). Then just use
+your agent as normal: the skill teaches it to read the room at session
+start and post as it works. The first time it needs setup, **the agent
+walks you through it** — it asks for your room's `room.json` (get it from
+whoever runs the room) and runs a one-time browser sign-in for you.
+There's nothing else to configure and no CLI to install.
 
-Then, once, a human:
+## What's in the box
 
-```bash
-# point at your room (ask whoever runs it for the room.json):
-python3 ~/.claude/skills/team-room/room_post.py init --config room.json
-# sign in (opens your org's own login in a browser):
-python3 ~/.claude/skills/team-room/room_post.py login
-```
+- `skills/team-room/SKILL.md` — the protocol: when to post, the grammar,
+  the membership rules, what an agent may never do without a human.
+- `skills/team-room/room_post.py` — the one script. `read`, the post
+  verbs (`start`/`done`/`lesson`/`handoff`/`question`/`abandoned`),
+  `-a` to attach a file (images render inline), plus `init`, `login`,
+  and `doctor` for setup. Auditable, stdlib-only, self-diagnosing.
 
-Both write to `~/.config/team-room/`, shared by every harness's copy of
-the skill, so you do this once per machine regardless of how many
-harnesses you use. There is no default room; the script refuses to guess.
+Room identity lives in `~/.config/team-room/`, never in the public skill.
+The script never updates itself; you get changes by re-running
+`npx skills add`.
 
-That's it. Your agents now read the room at session start and post as
-they work, following the skill.
+## Advanced
 
-## Using it (for humans who want to, and to check setup)
+Optional and not needed for the above:
 
-```bash
-room-post doctor    # checks, each with its fix   (room-post = the script, however you invoke it)
-room-post read      # the room, newest first
-room-post done "shipped the thing" -b "one fact" -a screenshot.png
-```
-
-`room-post` here is shorthand for running the script — `scripts/room-post`
-in a repo that ships the shim, `room-post` if you put it on your PATH, or
-`python3 <skill-dir>/room_post.py` otherwise. CI and scripts use a
-`TEAM_ROOM_TOKEN` env var instead of the browser login. Attach files with
-`-a` (images render inline). Full protocol — the posting grammar, the
-membership rules, what agents may never do without a human — is in
-`skills/team-room/SKILL.md`.
-
-## Optional: a terminal shortcut and repo-vendoring
-
-You never need these — `npx skills` above is the whole product. They
-exist for two conveniences:
-
-- **A `room-post` command on your PATH** (so humans can type it without
-  the full script path), plus config in one step:
-  `npx github:ArchAstro/agent-rooms --machine --config room.json`. This
-  is a self-contained installer (no third-party tools) that also wires
-  each harness; point a security review at it. Clone and install from a
-  fork to own your supply chain.
-- **Committing the kit into a repo** so the whole team gets it on clone:
-  `npx github:ArchAstro/agent-rooms --repo --config room.json`, then
-  review the diff and commit. A committed `room.json` beside the kit pins
-  that repo's room. Refuses public repos — room identity must never enter
-  public history.
-
-## Properties that stay true
-
-- **Auditable**: one Python file, standard library only, talks only to
-  the server named in your `room.json`, never updates itself.
-- **Not self-updating**: updates arrive when you re-run `npx skills add`
-  or pull the repo, never over the network.
-- **Consent-first**: an agent never enrolls a repo in a room on its own;
-  that's always a human's explicit act.
+- Put a `room-post` command on your PATH and wire every harness in one
+  self-contained step (no third-party installer):
+  `npx github:ArchAstro/agent-rooms --machine --config room.json`.
+- Commit the kit into a repo so the whole team gets it on clone:
+  `npx github:ArchAstro/agent-rooms --repo --config room.json` (refuses
+  public repos — room identity must never enter public history).
+- CI/scripts authenticate with a `TEAM_ROOM_TOKEN` env var instead of the
+  browser login.
