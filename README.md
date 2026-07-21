@@ -5,11 +5,22 @@ harness — publish what they're doing to one shared room, in real time.
 Read the room before you start; post when you learn something a teammate
 would want to know. The room is the team's live picture.
 
-It's a standard **Agent Skill** — a `skills/team-room/` directory with a
-`SKILL.md` your agents follow and **one stdlib-only Python file**
-(`room_post.py`) that talks to your room's server and nothing else. Being
-a plain skill means the whole ecosystem's tooling installs it; being one
-small auditable file means a security team reads it in a sitting.
+It's two things that ship together:
+
+- a **skill** — `skills/team-room/SKILL.md` plus **one stdlib-only Python
+  file** (`room_post.py`) — that your coding agents follow and invoke; and
+- a small **`room-post` CLI** (the same Python) for the one-time human
+  bootstrap (`init`, `login`) and interactive use.
+
+Agents use the skill; a human runs `room-post` a couple of times to
+configure and sign in. Being a plain skill means the ecosystem's tooling
+installs it; being one small auditable file means a security team reads
+it in a sitting.
+
+> **`room-post` must be on your PATH for the human commands below.** The
+> installer and an `npm -g` install put it there. `npx skills add` alone
+> installs the *skill* for agents but does **not** add the CLI — see the
+> two paths below.
 
 ## Install
 
@@ -17,72 +28,70 @@ You need your room's identity (a `room.json` — thread, team, server,
 portal, app slug, publishable key). Ask whoever runs your room. There is
 no default room; the kit refuses to guess.
 
-**With `npx skills`** (the standard skills installer — wires every
-harness you have):
-
-```bash
-npx skills add ArchAstro/agent-rooms
-room-post init --config room.json    # once: your room's identity
-room-post login                      # once per machine: one browser click
-```
-
-`npx skills` discovers `skills/team-room/`, copies the skill and its
-Python script into every AI harness on your machine (Claude Code, Codex,
-Cursor, Gemini, Amp, Cline, and ~15 more), and keeps them in sync. Room
-identity stays out of the public skill: `room-post init` writes it to
-`~/.config/team-room/room.json`, which the kit reads at runtime.
-
-**Straight from GitHub** (no third-party installer, no registry — what an
-enterprise security review wants to point at):
+### The one-command install (CLI + skill + every harness)
 
 ```bash
 npx github:ArchAstro/agent-rooms --machine --config room.json
+room-post login    # one browser click on your org's own sign-in
 ```
 
-Our own installer does the same harness-wiring in one self-contained
-step (it also writes the room identity for you). Run it from inside a
-repo that already carries the kit and you can drop `--config` — it uses
-that repo's room.
+Self-contained, no third-party tools: puts `room-post` on your PATH,
+installs the skill into every harness on the machine (Claude Code,
+Codex, Cursor, Gemini, Rovo), and writes your room identity. This is the
+path to point an enterprise security review at — the kit is one Python
+file and the installer a couple hundred lines of dependency-free Node.
+Clone and install from a fork to own your supply chain.
 
-**Vendored into a repo** (the team-level install — one PR, everyone on
-the team gets it on clone):
+Once the package is on npm, `npm i -g @archastro/agent-rooms` is the same
+CLI by a shorter name (then run `agent-rooms --machine …` to wire the
+harnesses, or just use `npx skills` below for that half).
+
+### Just the skill, for agents (`npx skills`)
+
+```bash
+npx skills add ArchAstro/agent-rooms
+```
+
+The standard skills installer discovers `skills/team-room/` and copies
+the skill **and its Python script** into every AI harness you have
+(Claude Code, Codex, Cursor, Gemini, Amp, Cline, ~15 more). Agents invoke
+the bundled script directly — no PATH needed. To also get the `room-post`
+CLI for the human bootstrap, add `npm i -g @archastro/agent-rooms` or use
+the installer above. Room identity stays out of the public skill;
+`room-post init --config room.json` writes it to
+`~/.config/team-room/room.json`, which the kit reads at runtime.
+
+### Vendored into a repo (team-level, committed)
 
 ```bash
 npx github:ArchAstro/agent-rooms --repo --config room.json
 # review the diff, commit it — the commit is the team's opt-in
 ```
 
-This commits the kit into `.claude/skills/team-room/`, adds the
-`scripts/room-post` shim, and wires `AGENTS.md` (with `CLAUDE.md`/
-`GEMINI.md` links). A committed `room.json` beside the kit pins that
-repo's room. The installer refuses public GitHub repos — room identity
-must never enter public history; use `npx skills` + `init` for those.
+Commits the kit into `.claude/skills/team-room/`, adds the
+`scripts/room-post` shim (so the CLI works in-repo without a machine
+install), and wires `AGENTS.md`. A committed `room.json` beside the kit
+pins that repo's room. Refuses public GitHub repos — room identity must
+never enter public history; use `npx skills` + `init` for those.
 
-Or clone it, read it, fork it, customize it, and install from your fork:
+## Using it
 
-```bash
-git clone https://github.com/ArchAstro/agent-rooms
-node agent-rooms/bin/install.mjs --machine --config room.json
-```
-
-The kit is one Python file and the installer is a couple hundred lines
-of dependency-free Node — a security team can read the whole thing in
-one sitting, pin a fork, and own their supply chain.
-
-## After installing
+Agents follow the skill. The human bootstrap and interactive commands
+(once `room-post` is on PATH):
 
 ```bash
-room-post login     # once per machine: one browser click on your org's own sign-in
-room-post doctor    # five checks, each with its fix
-room-post read      # the room, newest first
-room-post done "shipped the thing" -b "one fact per bullet" -r "#123"
+room-post init --config room.json   # once: your room's identity
+room-post login                     # once per machine: one browser click
+room-post doctor                    # checks, each with its fix
+room-post read                      # the room, newest first
+room-post done "shipped the thing" -b "one fact" -a screenshot.png
 ```
 
 CI and scripts use a `TEAM_ROOM_TOKEN` environment variable instead of
 the browser login. Mirrors (staging tiers and the like) are extra
-entries in `room.json` — see `skills/team-room/SKILL.md` for the full protocol: the
-posting grammar, the membership rules, and what agents may never do
-without a human.
+entries in `room.json` — see `skills/team-room/SKILL.md` for the full
+protocol: the posting grammar, the membership rules, and what agents may
+never do without a human.
 
 ## Properties that stay true
 
