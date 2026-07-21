@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "description": "The Agent Rooms kit: publish your sessions' work to a shared team room from any harness (Claude Code, Codex, Gemini). One stdlib-only Python file plus an installer.",
   "bin": {
-    "agent-rooms": "bin/install.mjs"
+    "agent-rooms": "bin/install.mjs",
+    "room-post": "bin/room-post.mjs"
   },
   "files": [
     "bin",
