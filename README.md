@@ -86,7 +86,10 @@ without a human.
 - **Auditable**: one Python file, standard library only, talks only to
   the server named in your `room.json`, never updates itself.
 - **Versioned, not self-updating**: updates arrive when you re-run the
-  installer or pull the repo, never over the network.
+  installer or pull the repo, never over the network. The installer
+  writes a content-hash manifest and `room-post doctor` verifies it, so
+  every change to an installed kit is visible — local edits and forks
+  included — and never silent.
 - **Consent-first**: joining a repo to a room is always an explicit
   human act — a reviewed commit, or `room-post subscribe` run by a
   person. Agents are instructed, and the tool enforces, that they never
