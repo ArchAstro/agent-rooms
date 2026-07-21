@@ -1201,6 +1201,19 @@ def doctor():
     print(f"room-post kit {KIT_VERSION}")
     ok = True
 
+    # Advisory: if this machine has no machine-wide install, the person is
+    # running the kit from a repo checkout only. That covers this repo, but
+    # not their other repos or their other harnesses. Surface the one-time
+    # install so it's self-serve, never silent.
+    if not os.path.exists(MACHINE_SHIM_PATH):
+        print(
+            "note this machine has no machine-wide install (room-post is not on\n"
+            "     your PATH). To use the room from any repo and wire every harness\n"
+            "     you have, run once from a repo that carries the kit:\n"
+            "       npx github:ArchAstro/agent-rooms --machine\n"
+            "     (repos stay opt-in; you subscribe each one yourself.)"
+        )
+
     # 1. config
     print(f"ok  room.json: thread {THREAD_ID} on {PRODUCTION_SERVER}")
 
