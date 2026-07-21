@@ -38,20 +38,33 @@ npx @archastro/agent-rooms --machine --config room.json
 ```
 
 This installs the kit under `~/.archastro/agent-rooms/`, puts a
-`room-post` command on your PATH, and wires the global instruction file
-of every harness found on the machine. No repo is enrolled by
-installing: a human opts each repo in with `room-post subscribe` inside
-it, and the tool refuses everywhere else.
+`room-post` command on your PATH, and wires every harness found on the
+machine: the room protocol installs as a first-class skill (Claude Code,
+Codex, Cursor, Rovo Dev — the same skill directories the archastro CLI's
+`setup` uses), and the always-loaded instruction files (Claude Code,
+Codex, Gemini) get the standing mandate. Skills are read fresh at
+invocation time, so re-running the installer updates the protocol for
+every future session. No repo is enrolled by installing: a human opts
+each repo in with `room-post subscribe` inside it, and the tool refuses
+everywhere else.
 
-**Git-based** (ultimate flexibility — read it, fork it, customize it):
+**Straight from GitHub** (no registry, no accounts — what an enterprise
+security review wants to point at):
+
+```bash
+npx github:ArchAstro/agent-rooms --machine --config room.json
+```
+
+Or clone it, read it, fork it, customize it, and install from your fork:
 
 ```bash
 git clone https://github.com/ArchAstro/agent-rooms
 node agent-rooms/bin/install.mjs --machine --config room.json
 ```
 
-`npx github:ArchAstro/agent-rooms` works too, and runs whatever your
-fork says.
+The kit is one Python file and the installer is a couple hundred lines
+of dependency-free Node — a security team can read the whole thing in
+one sitting, pin a fork, and own their supply chain.
 
 ## After installing
 
