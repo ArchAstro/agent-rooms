@@ -55,6 +55,9 @@ security review wants to point at):
 npx github:ArchAstro/agent-rooms --machine --config room.json
 ```
 
+Run it from inside a repo that already carries the kit and you can drop
+`--config` entirely — the installer uses that repo's room.
+
 Or clone it, read it, fork it, customize it, and install from your fork:
 
 ```bash
