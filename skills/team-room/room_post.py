@@ -26,6 +26,8 @@ config out of their tree, e.g. open-source). Everything else is refused.
   type:  start | done | lesson | handoff | question | abandoned
   -b     one fact per bullet (repeatable); 3+ facts belong in bullets
   -r     PR/issue number (#123 -> markdown link), URL, or plain repo path
+  -a     attach a file (repeatable): a screenshot renders inline, any
+         other file attaches as a download chip. Max 10 files, 5MB each.
   --dry-run  print the assembled message instead of posting
 
 Auth, in order:
@@ -38,7 +40,9 @@ Auth, in order:
 The archagent CLI's login is never read or touched.
 """
 
+import base64
 import json
+import mimetypes
 import os
 import subprocess
 import sys
@@ -47,53 +51,97 @@ import time
 import urllib.error
 import urllib.request
 
-# Room identity comes from room.json beside this file — the join kit
-# writes it, and THIS repo commits its own (we consume the kit we ship).
+# Room identity (room.json) is resolved in order, so the SAME script works
+# whether it's committed inside a repo or installed as a generic public
+# skill (via `npx skills`, which cannot carry org-specific identity):
+#   1. ROOM_JSON env var         — explicit override (CI, tests)
+#   2. beside this script        — a committed room.json pins THIS repo's
+#                                  room, so a vendored kit is self-contained
+#   3. ~/.config/team-room/room.json — machine config, written by
+#                                  `room-post init`; the path a public
+#                                  skill install uses
 # A malformed or partial file is a hard error, never a silent fallback:
 # the failure mode of "fall back to some default room" is posting one
 # team's traffic into another team's thread.
 _ROOM_KEYS = ("thread_id", "team_id", "server", "portal", "app_slug", "publishable_key")
+ROOM_CONFIG_PATH = os.path.expanduser("~/.config/team-room/room.json")
+
+
+def _room_config_path() -> str | None:
+    env = os.environ.get("ROOM_JSON", "").strip()
+    if env:
+        return env
+    beside = os.path.join(os.path.dirname(os.path.abspath(__file__)), "room.json")
+    if os.path.exists(beside):
+        return beside
+    if os.path.exists(ROOM_CONFIG_PATH):
+        return ROOM_CONFIG_PATH
+    return None
 
 
 def _room_config() -> dict:
-    cfg_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "room.json"
-    )
-    try:
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-    except FileNotFoundError:
+    cfg_path = _room_config_path()
+    if cfg_path is None:
         print(
-            "room_post: no room.json next to this script — this checkout "
-            "isn't joined to a room. Generate one (thread_id, team_id, "
-            "server, portal, app_slug) or re-run the join kit.",
+            "room_post: not joined to a room yet. No room.json beside this\n"
+            "script, no ROOM_JSON env var, and no ~/.config/team-room/room.json.\n"
+            "If you installed via a skill, run once:\n"
+            "  room-post init --config <room.json>   (ask whoever runs your room)\n"
+            "There is no default room.",
             file=sys.stderr,
         )
         sys.exit(4)
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
     except Exception as e:
-        print(f"room_post: room.json is unreadable: {e}", file=sys.stderr)
+        print(f"room_post: {cfg_path} is unreadable: {e}", file=sys.stderr)
         sys.exit(4)
     if not isinstance(cfg, dict):
-        print("room_post: room.json must be a JSON object", file=sys.stderr)
+        print(f"room_post: {cfg_path} must be a JSON object", file=sys.stderr)
         sys.exit(4)
     missing = [
         k for k in _ROOM_KEYS if not isinstance(cfg.get(k), str) or not cfg[k]
     ]
     if missing:
         print(
-            f"room_post: room.json is missing keys: {', '.join(missing)}",
+            f"room_post: {cfg_path} is missing keys: {', '.join(missing)}",
             file=sys.stderr,
         )
         sys.exit(4)
     return cfg
 
 
-_ROOM_CFG = _room_config()
-THREAD_ID = _ROOM_CFG["thread_id"]
+def init_room(config_path: str):
+    """Write machine-level room identity to ~/.config/team-room/room.json.
+    The step a skill install needs (the skill is generic; identity is
+    org-specific and lives in machine config, never in the public skill)."""
+    try:
+        cfg = json.load(open(config_path))
+    except Exception as e:
+        die(f"can't read --config '{config_path}': {e}")
+    missing = [k for k in _ROOM_KEYS if not cfg.get(k)]
+    if missing:
+        die(f"config is missing keys: {', '.join(missing)}")
+    os.makedirs(os.path.dirname(ROOM_CONFIG_PATH), exist_ok=True)
+    with open(ROOM_CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+    os.chmod(ROOM_CONFIG_PATH, 0o600)
+    print(f"room identity saved to {ROOM_CONFIG_PATH}")
+    print("next: room-post login (one browser click), then room-post doctor")
+
+
+# `init` and `--help` must run WITHOUT a room configured (that's the whole
+# point of init). Every other command loads config eagerly and fails loud
+# if it's missing. In init-mode the derived globals are empty and unused.
+_NO_CONFIG_CMDS = {"init", "--help", "-h", "help"}
+_INIT_MODE = len(sys.argv) > 1 and sys.argv[1] in _NO_CONFIG_CMDS
+_ROOM_CFG = {} if _INIT_MODE else _room_config()
+THREAD_ID = _ROOM_CFG.get("thread_id", "")
 ROOM_SOURCE_ID = _ROOM_CFG.get("source_id") or ""
-ROOM_TEAM_ID = _ROOM_CFG["team_id"]
+ROOM_TEAM_ID = _ROOM_CFG.get("team_id", "")
 PRESENCE_SCHEMA = "team-presence"
-PRODUCTION_SERVER = _ROOM_CFG["server"]
+PRODUCTION_SERVER = _ROOM_CFG.get("server", "")
 KIT_VERSION = "2026.07.21"
 ROOM_APP_NAME = "ArchAgents"
 MAX_HEADLINE = 300
@@ -127,8 +175,8 @@ def extract_addressee(headline: str):
     m = re.search(r"@([A-Za-z][\w.-]{0,30})", headline.split("\n")[0])
     return m.group(1).lower() if m else None
 
-PORTAL_URL = _ROOM_CFG["portal"]
-ROOM_APP_SLUG = _ROOM_CFG["app_slug"]
+PORTAL_URL = _ROOM_CFG.get("portal", "")
+ROOM_APP_SLUG = _ROOM_CFG.get("app_slug", "")
 ROOM_CREDS_PATH = os.path.expanduser("~/.config/team-room/credentials.json")
 ROOM_TOKEN_PATH = os.path.expanduser("~/.config/team-room/token")
 ROOM_LOCK_PATH = os.path.expanduser("~/.config/team-room/.lock")
@@ -296,7 +344,7 @@ def parse_args(argv):
     post_type, headline = argv[0], argv[1]
     if post_type not in PREFIXES:
         die(f"unknown type '{post_type}' ({'|'.join(PREFIXES)})")
-    bullets, refs, dry, answers, no_meta = [], [], False, None, False
+    bullets, refs, dry, answers, no_meta, attach = [], [], False, None, False, []
     rest = list(argv[2:])
     while rest:
         a = rest.pop(0)
@@ -308,6 +356,10 @@ def parse_args(argv):
             if not rest:
                 die("-r needs a value")
             refs.append(rest.pop(0))
+        elif a in ("-a", "--attach"):
+            if not rest:
+                die("-a needs a file path (a screenshot, a doc, any file)")
+            attach.append(rest.pop(0))
         elif a == "--answers":
             if not rest:
                 die("--answers needs a message id (from `inbox`)")
@@ -329,7 +381,40 @@ def parse_args(argv):
             f"headline is {len(headline)} chars with no bullets. Lead with one "
             "sentence and pass the facts as -b bullets."
         )
-    return post_type, headline, bullets, refs, dry, answers, no_meta, addressee
+    return post_type, headline, bullets, refs, dry, answers, no_meta, addressee, attach
+
+
+# The developer message endpoint accepts up to 10 uploads, 5 MB each.
+MAX_UPLOADS = 10
+MAX_UPLOAD_BYTES = 5_000_000
+
+
+def build_uploads(paths: list) -> list:
+    """Read each file into the {name, mime_type, content} upload shape the
+    thread-message endpoint takes. Images render inline in the room;
+    anything else attaches as a download chip. Fail loud on a bad path or
+    an over-limit file."""
+    if not paths:
+        return []
+    if len(paths) > MAX_UPLOADS:
+        die(f"too many attachments ({len(paths)}); max is {MAX_UPLOADS} per post")
+    uploads = []
+    for p in paths:
+        try:
+            with open(p, "rb") as f:
+                data = f.read()
+        except OSError as e:
+            die(f"can't read attachment '{p}': {e}")
+        if len(data) > MAX_UPLOAD_BYTES:
+            die(f"attachment '{p}' is {len(data) // 1000}kB; max is "
+                f"{MAX_UPLOAD_BYTES // 1_000_000}MB per file")
+        mime = mimetypes.guess_type(p)[0] or "application/octet-stream"
+        uploads.append({
+            "name": os.path.basename(p),
+            "mime_type": mime,
+            "content": base64.b64encode(data).decode("ascii"),
+        })
+    return uploads
 
 
 def human_name() -> str:
@@ -898,7 +983,7 @@ def board():
         )
 
 
-def post(message: str, metadata: dict | None = None):
+def post(message: str, metadata: dict | None = None, uploads: list | None = None):
     creds, key, creds_path, session = authed_session()
     url = (
         f"{PRODUCTION_SERVER}/protected/api/v1/developer/apps/"
@@ -908,6 +993,8 @@ def post(message: str, metadata: dict | None = None):
         body = {"content": message, "user": session["userId"]}
         if metadata:
             body["metadata"] = metadata
+        if uploads:
+            body["uploads"] = uploads
         msg = http_json(url, body, token=session["accessToken"])
     except urllib.error.HTTPError as e:
         if e.code == 401 and not session.get("static"):
@@ -954,7 +1041,7 @@ def _mirror_session(m: dict) -> dict | None:
     return session
 
 
-def mirror_fanout(message: str, metadata: dict | None):
+def mirror_fanout(message: str, metadata: dict | None, uploads: list | None = None):
     """Best-effort copy of a post to each configured mirror tier. The
     prod post already succeeded; nothing here may fail the command, so
     every problem becomes one quiet line and we move on."""
@@ -973,6 +1060,8 @@ def mirror_fanout(message: str, metadata: dict | None):
             body = {"content": message, "user": session["userId"]}
             if metadata:
                 body["metadata"] = metadata
+            if uploads:
+                body["uploads"] = uploads
             http_json(
                 f"{m['server']}/protected/api/v1/developer/apps/"
                 f"{session['appId']}/threads/{m['thread_id']}/messages",
@@ -1307,6 +1396,15 @@ def doctor():
 
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "init":
+        cfg = None
+        rest = sys.argv[2:]
+        if rest and rest[0] == "--config" and len(rest) > 1:
+            cfg = rest[1]
+        if not cfg:
+            die("usage: room-post init --config <room.json>")
+        init_room(cfg)
+        return
     if cmd == "subscribe":
         subscribe_repo()
         return
@@ -1396,8 +1494,10 @@ def main():
         answers,
         no_meta,
         addressee,
+        attach,
     ) = parse_args(sys.argv[1:])
     message = build_message(post_type, headline, bullets, refs)
+    uploads = build_uploads(attach)
     if no_meta:
         # Protocol fields still attach (they ARE the post's meaning);
         # only the derived exhaust (branch, areas, head) is suppressed.
@@ -1417,15 +1517,18 @@ def main():
             metadata = None  # exhaust enrichment must never block a post
     if dry:
         print(message)
+        if uploads:
+            print("attachments: " + ", ".join(
+                f"{u['name']} ({u['mime_type']})" for u in uploads))
         if metadata:
             print("metadata: " + json.dumps(metadata, indent=2))
         return
-    session = post(message, metadata)
+    session = post(message, metadata, uploads)
     try:
         upsert_presence(session, post_type, framed_headline(post_type, headline))
     except Exception:
         pass  # presence is best-effort; the post already succeeded
-    mirror_fanout(message, metadata)
+    mirror_fanout(message, metadata, uploads)
 
 
 if __name__ == "__main__":

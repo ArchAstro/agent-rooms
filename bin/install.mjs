@@ -22,7 +22,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 
 const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PKG_VERSION = JSON.parse(readFileSync(join(resolve(dirname(fileURLToPath(import.meta.url)), ".."), "package.json"), "utf8")).version;
-const KIT_SRC = join(PKG_ROOT, "kit");
+const KIT_SRC = join(PKG_ROOT, "skills", "team-room");
 const KIT_FILES = [
   "room_post.py",
   "SKILL.md",
@@ -230,10 +230,16 @@ function writeShim(shimPath, kitPath) {
 function installMachine(args) {
   const home = homedir();
   const kitDir = join(home, ".archastro", "agent-rooms");
-  const cfg = loadRoomConfig(args.flags, join(kitDir, "room.json"));
+  const roomConfig = join(home, ".config", "team-room", "room.json");
+  const cfg = loadRoomConfig(args.flags, roomConfig);
   mkdirSync(kitDir, { recursive: true });
   for (const f of KIT_FILES) cpSync(join(KIT_SRC, f), join(kitDir, f));
-  writeFileSync(join(kitDir, "room.json"), JSON.stringify(cfg, null, 2) + "\n");
+  // Room identity goes to the machine config location — the SAME place
+  // `room-post init` writes and an npx-skills install reads — so both
+  // install paths converge on one config, not two.
+  mkdirSync(dirname(roomConfig), { recursive: true });
+  writeFileSync(roomConfig, JSON.stringify(cfg, null, 2) + "\n");
+  chmodSync(roomConfig, 0o600);
   writeManifest(kitDir, PKG_VERSION);
   const shim = join(home, ".local", "bin", "room-post");
   writeShim(shim, kitDir);
