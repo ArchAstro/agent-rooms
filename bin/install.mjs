@@ -76,6 +76,16 @@ function loadRoomConfig(flags, fallbackPath) {
     console.log(`keeping existing room config: ${fallbackPath}`);
     return JSON.parse(readFileSync(fallbackPath, "utf8"));
   }
+  // Run from inside a repo that already carries the kit (e.g. your
+  // team's main repo) and the room config is right there — use it.
+  const cwdTop = gitTopLevel(process.cwd());
+  if (cwdTop) {
+    const inRepo = join(cwdTop, ".claude", "skills", "team-room", "room.json");
+    if (existsSync(inRepo)) {
+      console.log(`using room config from this repo: ${inRepo}`);
+      return JSON.parse(readFileSync(inRepo, "utf8"));
+    }
+  }
   fail(
     "no room identity given. Pass --config <room.json> or the flags\n" +
       `  ${ROOM_KEYS.map((k) => "--" + k.replaceAll("_", "-") + " <value>").join(" ")}\n` +
