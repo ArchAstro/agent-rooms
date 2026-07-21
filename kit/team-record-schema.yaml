@@ -1,0 +1,76 @@
+kind: CustomObjectSchema
+name: Team Record
+description: One row per distilled team record (finding, rule, or pointer).
+  The durable output of the room and its tributaries. Envelope carries
+  evidence, ring, lifespan, and supersedes lineage; status flips are the
+  human gate.
+lookup_key: team-record
+row_key:
+  - record_id
+search_fields:
+  - title
+  - body
+  - kind
+json_schema:
+  type: object
+  properties:
+    record_id:
+      type: string
+      description: "stable slug, e.g. git-stash-shared-worktrees"
+    shape:
+      type: string
+      description: finding | rule | pointer
+    kind:
+      type: string
+      description: "free string, e.g. gotcha, root-cause, design-decision, how-it-works, contract-change, craft-technique"
+    status:
+      type: string
+      description: draft | approved | rejected | superseded | retired
+    title:
+      type: string
+    body:
+      type: string
+      description: 1-4 plain sentences; lunch-table wording
+    evidence:
+      type: array
+      items:
+        type: string
+      description: "msg ids, PR refs (#1234), file paths, issue refs, urls"
+    ring:
+      type: string
+      description: "internal | customer:<org-slug> | public; ring changes require human approval"
+    impact_tier:
+      type: string
+      description: none | gotcha | ga-blocker | customer-breaking
+    impact:
+      type: string
+      description: who it hurts, in plain words
+    lifespan:
+      type: string
+      description: invariant | snapshot
+    review_by:
+      type: string
+      description: "ISO date; required when lifespan=snapshot"
+    author:
+      type: string
+    approver:
+      type: string
+    supersedes:
+      type: string
+      description: record_id this replaces
+    superseded_by:
+      type: string
+    source:
+      type: string
+      description: "room | mirror:<channel> | pr | incident | assay-backfill"
+    times_seen:
+      type: integer
+    times_enforced:
+      type: integer
+  required:
+    - record_id
+    - shape
+    - kind
+    - status
+    - title
+    - body
