@@ -137,8 +137,11 @@ IDENTITY_CACHE_PATH = os.path.expanduser("~/.config/team-room/identity.json")
 # Machine tier: a copy of this kit outside any repo, for repos that must
 # not carry room config in their tree (open-source). Which repos may use
 # it lives in one plain-text file, one absolute repo path per line.
-MACHINE_KIT_DIR = os.path.expanduser("~/.archastro/team-room")
+MACHINE_KIT_DIR = os.path.expanduser("~/.archastro/agent-rooms")
 MACHINE_REGISTRY = os.path.join(MACHINE_KIT_DIR, "subscribed-repos")
+# Pre-spinout installs kept their registry under ~/.archastro/team-room;
+# honor it so upgrading doesn't silently unsubscribe anyone's repos.
+LEGACY_REGISTRY = os.path.expanduser("~/.archastro/team-room/subscribed-repos")
 MACHINE_SHIM_PATH = os.path.expanduser("~/.local/bin/room-post")
 
 # Mirrors: optional extra rooms (other deployment tiers) that receive a
@@ -181,11 +184,14 @@ def _repo_top() -> str:
 
 
 def _subscriptions() -> set:
-    try:
-        with open(MACHINE_REGISTRY, "r", encoding="utf-8") as f:
-            return {line.strip() for line in f if line.strip()}
-    except OSError:
-        return set()
+    subs = set()
+    for path in (MACHINE_REGISTRY, LEGACY_REGISTRY):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                subs |= {line.strip() for line in f if line.strip()}
+        except OSError:
+            pass
+    return subs
 
 
 def enforce_membership():
