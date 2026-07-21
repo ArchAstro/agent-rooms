@@ -124,13 +124,80 @@ One sentence headline; each further fact its own -b bullet. Never post
 secrets, tokens, or customer data. Full protocol: ${kitDir}/SKILL.md`;
 }
 
+// Harness registry. Mirrors the archastro/archagent CLI's setup command
+// (src/ts/developer-platform-cli/src/utils/harness.ts) so both installers
+// agree on where skills live per harness — plus Gemini, which the CLI
+// registry doesn't know yet.
+//
+// `instructions` is the always-loaded global file that carries the room
+// mandate (skills are invoked at the model's discretion; the mandate to
+// read the room every session has to live somewhere always loaded).
+// `skillsDir` is where the SKILL itself installs, first-class, so
+// harnesses that read skills fresh at invocation time always see the
+// current protocol.
 function detectHarnesses() {
   const home = homedir();
   const found = [];
-  if (existsSync(join(home, ".claude"))) found.push({ name: "Claude Code", file: join(home, ".claude", "CLAUDE.md") });
-  if (existsSync(join(home, ".codex"))) found.push({ name: "Codex", file: join(home, ".codex", "AGENTS.md") });
-  if (existsSync(join(home, ".gemini"))) found.push({ name: "Gemini", file: join(home, ".gemini", "GEMINI.md") });
+  if (existsSync(join(home, ".claude")))
+    found.push({
+      name: "Claude Code",
+      instructions: join(home, ".claude", "CLAUDE.md"),
+      skillsDir: join(home, ".claude", "skills", "team-room"),
+    });
+  if (existsSync(join(home, ".codex")))
+    found.push({
+      name: "Codex",
+      instructions: join(home, ".codex", "AGENTS.md"),
+      skillsDir: join(home, ".codex", "skills", "team-room"),
+    });
+  if (existsSync(join(home, ".gemini")))
+    found.push({
+      name: "Gemini",
+      instructions: join(home, ".gemini", "GEMINI.md"),
+      skillsDir: null, // no native skills dir; the instruction block carries it
+    });
+  if (existsSync(join(home, ".cursor")))
+    found.push({
+      name: "Cursor",
+      instructions: null, // no global instruction-file convention
+      skillsDir: join(home, ".cursor", "plugins", "local", "agent-rooms", "skills", "team-room"),
+      cursorPluginRoot: join(home, ".cursor", "plugins", "local", "agent-rooms"),
+    });
+  if (existsSync(join(home, ".rovodev")))
+    found.push({
+      name: "Rovo Dev",
+      instructions: null,
+      // Rovo namespaces third-party skills with the archagent- prefix
+      // (ROVO_SKILL_PREFIX in the CLI); follow it.
+      skillsDir: join(home, ".rovodev", "skills", "archagent-team-room"),
+      rovoRename: "archagent-team-room",
+    });
   return found;
+}
+
+/**
+ * Install the SKILL.md into one harness's skills directory, machine
+ * flavor: command references become the PATH-installed `room-post`, and
+ * Rovo copies get their frontmatter name rewritten to the prefixed dir
+ * name (same transform the CLI's setup applies).
+ */
+function installSkill(h) {
+  if (!h.skillsDir) return false;
+  let text = readFileSync(join(KIT_SRC, "SKILL.md"), "utf8");
+  text = text.replaceAll("scripts/room-post", "room-post");
+  if (h.rovoRename)
+    text = text.replace(/^name:\s*.*$/m, `name: ${h.rovoRename}`);
+  mkdirSync(h.skillsDir, { recursive: true });
+  writeFileSync(join(h.skillsDir, "SKILL.md"), text);
+  if (h.cursorPluginRoot) {
+    const metaDir = join(h.cursorPluginRoot, ".cursor-plugin");
+    mkdirSync(metaDir, { recursive: true });
+    writeFileSync(
+      join(metaDir, "plugin.json"),
+      JSON.stringify({ name: "agent-rooms", version: "0.1.0", description: "Agent Rooms team-room skill" }, null, 2) + "\n"
+    );
+  }
+  return true;
 }
 
 function writeShim(shimPath, kitPath) {
@@ -154,11 +221,18 @@ function installMachine(args) {
 
   const harnesses = detectHarnesses();
   for (const h of harnesses) {
-    upsertMarkedBlock(h.file, MACHINE_SECTION);
-    console.log(`wired ${h.name}: ${h.file}`);
+    const wired = [];
+    if (h.instructions) {
+      upsertMarkedBlock(h.instructions, MACHINE_SECTION);
+      wired.push("instructions");
+    }
+    if (installSkill(h)) wired.push("skill");
+    console.log(`wired ${h.name}: ${wired.join(" + ")}`);
   }
   if (harnesses.length === 0)
-    console.log("no harnesses detected (~/.claude, ~/.codex, ~/.gemini) — kit installed, instruction wiring skipped");
+    console.log(
+      "no harnesses detected (~/.claude, ~/.codex, ~/.gemini, ~/.cursor, ~/.rovodev) — kit installed, harness wiring skipped"
+    );
 
   console.log(`\nkit: ${kitDir}`);
   console.log(`command: ${shim}  (ensure ~/.local/bin is on PATH)`);
