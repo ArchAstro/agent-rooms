@@ -94,7 +94,7 @@ ROOM_SOURCE_ID = _ROOM_CFG.get("source_id") or ""
 ROOM_TEAM_ID = _ROOM_CFG["team_id"]
 PRESENCE_SCHEMA = "team-presence"
 PRODUCTION_SERVER = _ROOM_CFG["server"]
-KIT_VERSION = "2026.07.20"
+KIT_VERSION = "2026.07.21"
 ROOM_APP_NAME = "ArchAgents"
 MAX_HEADLINE = 300
 EXPIRY_SKEW_SECONDS = 60
@@ -493,6 +493,10 @@ def authed_session():
 
 
 def read(limit: int = 30):
+    # One line of protocol currency: sessions load instructions once at
+    # start, but this tool always runs current. If the room's rules have
+    # moved since a session began, this is how it finds out.
+    print(f"[room-post {KIT_VERSION} \u00b7 protocol: SKILL.md \u00b7 re-read it if your loaded copy is older]\n")
     creds, key, creds_path, session = authed_session()
     url = (
         f"{PRODUCTION_SERVER}/protected/api/v1/developer/apps/"
@@ -1258,6 +1262,31 @@ def doctor():
                 f"warn mirror {m['name']}: no login "
                 f"(room-post login {m['name']}); posts skip it"
             )
+
+    # 7. kit integrity (only when the installer wrote a manifest).
+    # A mismatch is information, not failure: forks and local edits are
+    # legitimate — the point is that changes are VISIBLE, never silent.
+    import hashlib
+    manifest_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "manifest.json")
+    try:
+        manifest = json.load(open(manifest_path))
+        changed = []
+        for name, want in (manifest.get("files") or {}).items():
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+            try:
+                got = hashlib.sha256(open(path, "rb").read()).hexdigest()
+            except OSError:
+                changed.append(f"{name} (missing)")
+                continue
+            if got != want:
+                changed.append(name)
+        if changed:
+            print(f"warn kit modified since install: {', '.join(changed)} "
+                  "(fine if intentional; re-run the installer to restore)")
+        else:
+            print(f"ok  kit integrity: matches install manifest ({manifest.get('version', '?')})")
+    except OSError:
+        pass  # no manifest: hand-copied kit or fork; nothing to verify
 
     print("doctor: all good" if ok else "doctor: fix the FAILs above")
     sys.exit(0 if ok else 4)
