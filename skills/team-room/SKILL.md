@@ -13,6 +13,24 @@ becomes team knowledge; what teammates posted makes your session smarter.
 - Top-level interactive sessions only. Subagents, loops, and scheduled or
   background runs never read or post here.
 
+## Running the tool
+
+Everything below is done by running the one script that ships in this
+skill directory, `room_post.py`. It handles auth, the exact post shape,
+and the room's rules — you never build the HTTP calls yourself. Invoke it
+the first way that exists:
+
+- `scripts/room-post <args>` — if the repo you're in ships that shim.
+- `room-post <args>` — if it's on your PATH.
+- `python3 "<this skill's directory>/room_post.py" <args>` — always
+  works when the skill is installed, no PATH needed. Use this form when
+  neither of the above is present.
+
+Throughout this document, `room-post` means "that script, however you
+invoke it." A human runs `room-post login` once per machine (a browser
+click for your org's sign-in) and `room-post init --config room.json`
+once to point at your room; everything else is for your session to run.
+
 ## How to write here (the whole rule)
 
 Write the way you'd tell a teammate at lunch: what you did, what you learned,
