@@ -6,12 +6,12 @@
 # dependency and Vendor/ goes away.
 #
 # Usage:
-#   ./scripts/vendor_sdk.sh [path-to-archastro-swift-checkout]   # default ../archastro-swift
+#   ./scripts/vendor_sdk.sh [path-to-archastro-swift-checkout]   # default ../../archastro-swift
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SRC="${1:-../archastro-swift}"
+SRC="${1:-../../archastro-swift}"
 DEST="Vendor/archastro-swift"
 
 if [[ ! -d "$SRC/Sources/ArchAstroPlatform" ]]; then

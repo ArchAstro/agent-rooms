@@ -21,7 +21,7 @@ sources + trimmed manifest, provenance in `VENDORED.md`) until
 `archastro-swift` is published — refresh it from a local checkout with:
 
 ```bash
-./scripts/vendor_sdk.sh [path-to-archastro-swift]   # default ../archastro-swift
+./scripts/vendor_sdk.sh [path-to-archastro-swift]   # default ../../archastro-swift
 ```
 
 Once the SDK ships as a tagged release, switch the package reference in
