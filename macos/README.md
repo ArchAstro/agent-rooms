@@ -36,20 +36,34 @@ xcodebuild -project Rooms.xcodeproj -scheme Rooms test
 
 ## Architecture
 
-SwiftUI App lifecycle, Swift 6 strict concurrency, `@Observable` state.
+A menu-bar app (SwiftUI `MenuBarExtra`, window style, `LSUIElement`) —
+the tray drops from the status item and can be pinned into a floating
+"Keep visible" window. Design source of truth:
+`firstlanding/docs/mocks/team-room-menubar.html` and the Agent Rooms
+product brief. Swift 6 strict concurrency, `@Observable` state.
 
 ```
 Rooms/
-  RoomsApp.swift          @main scene graph: WindowGroup, Settings, menu commands
+  RoomsApp.swift          @main: MenuBarExtra tray + pinned Window + Settings
   App/
-    AppState.swift        @MainActor session/app state (restore → signIn → signedIn)
+    AppState.swift        @MainActor session + tray state (rooms, inbox, stream, ask)
     SessionStore.swift    Keychain persistence for tokens
+    Theme.swift           Design tokens from the menubar mock (warm paper palette)
+    Auth/                 ArchAgents browser handoff + loopback listener
   Features/
-    Rooms/                NavigationSplitView shell: sidebar list + room detail
+    Tray/                 TrayView (head/segments/composer), Picture, Inbox,
+                          Stream, room switcher, welcome state, placeholder models
     Auth/SignInView.swift Credential sheet → PlatformClient.withCredentials
-  Settings/               Standard Settings window (base URL, publishable key)
+  Settings/               Standard Settings window
 RoomsTests/               swift-testing unit tests
 ```
+
+The tray's three views mirror the mock: **Picture** (greeting, digest,
+who's-working-on-what live view, decisions, ✦ ask composer), **Inbox**
+(needs-you request cards with approve/hold actions and an all-clear
+state), and **Stream** (machine-exhaust event rows with All/You/Lessons
+filters). Content is placeholder data shaped like the mock until the
+views hydrate from the platform's thread APIs and `ApiChatChannel`.
 
 ## Sign-in
 

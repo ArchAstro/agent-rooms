@@ -1,49 +1,35 @@
 import SwiftUI
 
+/// Rooms lives in the menu bar: the tray panel drops from the status
+/// item, and "Keep visible" moves it into a floating window — per
+/// docs/mocks/team-room-menubar.html.
 @main
 struct RoomsApp: App {
     @State private var appState = AppState()
 
     var body: some Scene {
-        WindowGroup {
-            ContentView()
+        MenuBarExtra {
+            TrayView()
                 .environment(appState)
-                .task { await appState.restoreSession() }
+        } label: {
+            Image(systemName: "bubble.left.and.bubble.right.fill")
+            if appState.isSignedIn && appState.inboxCount > 0 {
+                Text("\(appState.inboxCount)")
+            }
         }
-        .defaultSize(width: 1000, height: 680)
-        .commands {
-            SidebarCommands()
-            RoomsCommands(appState: appState)
+        .menuBarExtraStyle(.window)
+
+        // The pinned "Keep visible" panel.
+        Window("Rooms", id: "rooms-panel") {
+            TrayView(isPinned: true)
+                .environment(appState)
         }
+        .windowResizability(.contentSize)
+        .defaultPosition(.topTrailing)
 
         Settings {
             SettingsView()
                 .environment(appState)
-        }
-    }
-}
-
-/// App-level menu commands.
-struct RoomsCommands: Commands {
-    let appState: AppState
-
-    var body: some Commands {
-        CommandGroup(replacing: .newItem) {
-            Button("New Room") {
-                // Room creation lands with the rooms feature; the menu item
-                // exists so the shell exercises command wiring end-to-end.
-            }
-            .keyboardShortcut("n", modifiers: [.command])
-            .disabled(!appState.isSignedIn)
-        }
-
-        CommandGroup(after: .appSettings) {
-            Divider()
-            if appState.isSignedIn {
-                Button("Sign Out") {
-                    Task { await appState.signOut() }
-                }
-            }
         }
     }
 }

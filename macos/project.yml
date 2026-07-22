@@ -48,6 +48,8 @@ targets:
         LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
         LSApplicationCategoryType: public.app-category.productivity
         NSHumanReadableCopyright: "Copyright © 2026 ArchAstro Inc."
+        # Menu-bar app: no Dock icon, no app switcher entry.
+        LSUIElement: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ai.archastro.Rooms

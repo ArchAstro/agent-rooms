@@ -24,10 +24,48 @@ final class AppState {
     /// Signed-in org name, when known.
     var orgName: String?
 
-    /// Rooms shown in the sidebar. Placeholder until the rooms list is
-    /// backed by the platform's thread APIs.
-    var rooms: [Room] = Room.placeholders
-    var selectedRoomID: Room.ID?
+    // MARK: Tray state (placeholder-backed until wired to threads)
+
+    var selectedTab: TrayTab = .picture
+    var availableRooms: [RoomSnapshot] = TrayPlaceholders.rooms
+    var selectedRoom: RoomSnapshot = TrayPlaceholders.rooms[0]
+    var requests: [InboxRequest] = TrayPlaceholders.requests
+    var events: [StreamEvent] = TrayPlaceholders.events
+    var streamFilter: StreamEvent.Filter = .all
+    /// Latest ask answer, rendered as a Picture card.
+    var askAnswer: (question: String, answer: String)?
+
+    var inboxCount: Int { requests.count }
+
+    func selectRoom(_ room: RoomSnapshot) {
+        selectedRoom = room
+        askAnswer = nil
+    }
+
+    func resolveRequest(_ request: InboxRequest) {
+        requests.removeAll { $0.id == request.id }
+    }
+
+    func clearInbox() {
+        requests.removeAll()
+    }
+
+    /// Placeholder ask — the live app routes this through the room's
+    /// resident agent and grounds the answer in the stream.
+    func ask(_ question: String) {
+        let lower = question.lowercased()
+        let answer: String
+        if lower.contains("who") || lower.contains("working") || lower.contains("doing") {
+            answer = "Calvin is watching Code Search deploy, Rob has the cleanup ledger local, Bruno just landed N-org networks, and Vivek is watching the corrected magic-link stack in CI."
+        } else if lower.contains("need") || lower.contains("attention") || lower.contains("inbox") {
+            answer = "Three requests need you: one deployment decision, one handoff, and one review note. Nothing is customer-critical."
+        } else if lower.contains("summary") || lower.contains("today") || lower.contains("happen") {
+            answer = "Seven meaningful changes landed today. Code Search and Zoom OAuth are moving; the webhook identity patch is the only item with a substantive correctness warning."
+        } else {
+            answer = "The room found 42 relevant posts across 18 active sessions. In the live app, the resident synthesizes a sourced answer here and preserves the question as a reusable view."
+        }
+        askAnswer = (question, answer)
+    }
 
     private let sessionStore = SessionStore()
     private var activeAuthServer: LoopbackCallbackServer?
@@ -184,7 +222,6 @@ final class AppState {
         phase = .signedOut
         userEmail = nil
         orgName = nil
-        selectedRoomID = nil
     }
 
     // MARK: Client construction
