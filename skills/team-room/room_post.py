@@ -1096,6 +1096,102 @@ def board():
         )
 
 
+# Branch-prefix, date, and filler noise that shouldn't drive area overlap.
+_AREA_STOP = {
+    "the", "and", "for", "with", "from", "into", "out", "not", "now",
+    "fix", "feat", "chore", "wip", "test", "tests", "docs", "add", "adds",
+    "adding", "added", "update", "updates", "new", "work", "working", "use",
+    "using", "make", "makes", "made", "run", "runs", "get", "gets", "set",
+    "via", "per", "all", "any", "one", "two", "this", "that", "team", "room",
+    "post", "posts", "agent", "agents", "session", "sessions", "2026", "pr",
+}
+
+
+def _area_keywords(text: str) -> set:
+    """Meaningful lowercase tokens for overlap matching, so a branch like
+    `fix/thread-knowledge-source` and an intent `thread knowledge-source
+    lifecycle` line up on {thread, knowledge, source, lifecycle}."""
+    import re
+
+    toks = re.split(r"[^a-z0-9]+", (text or "").lower())
+    return {t for t in toks if len(t) > 2 and t not in _AREA_STOP}
+
+
+def near(topic: str | None = None):
+    """Situational awareness before you touch an area: who's working near
+    it right now, active warnings that touch it, and known team gotchas.
+    Surfaces only what overlaps your topic — silence means clear. Run this
+    before starting on an unfamiliar subsystem."""
+    import re
+
+    _, _, _, session = authed_session()
+    if not topic:
+        topic = git("branch", "--show-current") or ""
+    kw = _area_keywords(topic)
+    if not kw:
+        die('say what you are about to work on: room-post near "<area/topic>"')
+
+    def ov(text):
+        return len(kw & _area_keywords(text))
+
+    me_first = (human_name() or "").split(" ")[0].lower()
+    my_wt = worktree_short()
+
+    # 1) Collisions: live presence rows on an overlapping area (not my own).
+    q = f"?schema_key={PRESENCE_SCHEMA}&team={ROOM_TEAM_ID}&page_size=50"
+    prows = http_get(objects_url(session, q), session["accessToken"]).get("data") or []
+    collisions = []
+    for r in prows:
+        f = r.get("fields") or {}
+        human = f.get("human") or ""
+        if human.split(" ")[0].lower() == me_first and f.get("worktree") == my_wt:
+            continue
+        s = ov(f.get("intent")) + ov(f.get("branch"))
+        if s:
+            collisions.append((s, human, f.get("worktree"), f.get("intent"),
+                               r.get("updated_at")))
+    collisions.sort(key=lambda x: (x[0], x[4] or ""), reverse=True)
+
+    # 2) Active warnings: recent ⚠ lessons and P0/P1/incident posts that
+    #    touch this area.
+    active = []
+    for m in read_raw(60, session):
+        c = (m.get("content") or "").strip()
+        hot = c[:1] == "⚠" or re.search(
+            r"\bP[012]\b|incident|customer[- ]?(?:visible|channel)", c, re.I)
+        if hot and ov(c):
+            active.append(c.split("\n")[0][:150])
+
+    # 3) Known: approved team records that overlap.
+    known = []
+    for f in fetch_records(session, status="approved"):
+        s = ov(f.get("title")) + ov(f.get("body")) + ov(f.get("record_id"))
+        if s:
+            known.append((s, f.get("kind") or "note",
+                          f.get("title") or f.get("record_id") or ""))
+    known.sort(key=lambda x: x[0], reverse=True)
+
+    shown = False
+    if collisions:
+        shown = True
+        print("WORKING NEAR THIS NOW:")
+        for _, human, wt, intent, at in collisions[:5]:
+            print(f"  {human} ({wt}) · {age(at or '')} ago · {intent}")
+    if active:
+        shown = True
+        print("\nACTIVE WARNINGS:")
+        for headline in active[:5]:
+            print(f"  {headline}")
+    if known:
+        shown = True
+        print("\nKNOWN (team records):")
+        for _, kind, title in known[:6]:
+            print(f"  [{kind}] {title}")
+    if not shown:
+        print(f'clear — nobody working near "{topic}", no warnings or known '
+              "gotchas that touch it.")
+
+
 def post(message: str, metadata: dict | None = None, uploads: list | None = None):
     creds, key, creds_path, session = authed_session()
     url = (
@@ -1566,6 +1662,9 @@ def main():
         return
     if len(sys.argv) > 1 and sys.argv[1] == "board":
         board()
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "near":
+        near(sys.argv[2] if len(sys.argv) > 2 else None)
         return
     if len(sys.argv) > 1 and sys.argv[1] == "read":
         read(int(sys.argv[2]) if len(sys.argv) > 2 else 30)
