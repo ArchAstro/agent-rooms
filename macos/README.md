@@ -16,16 +16,10 @@ open Rooms.xcodeproj
 The `.xcodeproj` is generated from `project.yml` and not checked in —
 edit the manifest, not the project.
 
-The platform SDK is **vendored** at `Vendor/archastro-swift/` (library
-sources + trimmed manifest, provenance in `VENDORED.md`) until
-`archastro-swift` is published — refresh it from a local checkout with:
-
-```bash
-./scripts/vendor_sdk.sh [path-to-archastro-swift]   # default ../../archastro-swift
-```
-
-Once the SDK ships as a tagged release, switch the package reference in
-`project.yml` to a versioned git dependency and delete `Vendor/`.
+The platform SDK is a Swift Package Manager dependency on
+[`archastro-swift`](https://github.com/ArchAstro/archastro-swift),
+tracking `main` until the first tagged release — then pin it in
+`project.yml` with `from: x.y.z`.
 
 Command-line build and test:
 
