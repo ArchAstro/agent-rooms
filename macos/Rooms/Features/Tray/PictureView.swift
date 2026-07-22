@@ -9,29 +9,37 @@ struct PictureView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 9) {
-                    morningNote
-                        .padding(.bottom, 4)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 9) {
+                        morningNote
+                            .padding(.bottom, 4)
+                            .id("picture-top")
 
-                    SectionLabel(text: "The picture")
-                        .padding(.bottom, 2)
+                        SectionLabel(text: "The picture")
+                            .padding(.bottom, 2)
 
-                    if let answer = appState.askAnswer {
-                        answerCard(question: answer.question, text: answer.answer)
-                            .transition(.move(edge: .top).combined(with: .opacity))
+                        if let answer = appState.askAnswer {
+                            answerCard(question: answer.question, text: answer.answer)
+                                .transition(.move(edge: .top).combined(with: .opacity))
+                        }
+
+                        digestCard
+                        liveViewCard
+                        decisionCard
                     }
-
-                    digestCard
-                    liveViewCard
-                    decisionCard
+                    .padding(.horizontal, 14)
+                    .padding(.top, 14)
+                    .padding(.bottom, 10)
                 }
-                .padding(.horizontal, 14)
-                .padding(.top, 14)
-                .padding(.bottom, 10)
+                .scrollIndicators(.hidden)
+                .animation(.easeOut(duration: 0.26), value: appState.askAnswer?.question)
+                .onChange(of: appState.askAnswer?.question) {
+                    withAnimation(.easeOut(duration: 0.3)) {
+                        proxy.scrollTo("picture-top", anchor: .top)
+                    }
+                }
             }
-            .scrollIndicators(.hidden)
-            .animation(.easeOut(duration: 0.26), value: appState.askAnswer?.question)
 
             composer
         }
@@ -100,8 +108,8 @@ struct PictureView: View {
             time: "now",
             title: "Who's working on what",
             provenance: "Live session exhaust · not a PR count",
-            actionTitle: "Keep standing",
-            action: {}
+            actionTitle: appState.liveViewPinned ? "Standing ✓" : "Keep standing",
+            action: { appState.toggleLiveViewPinned() }
         ) {
             VStack(spacing: 7) {
                 ForEach(TrayPlaceholders.people) { person in
@@ -140,7 +148,7 @@ struct PictureView: View {
             title: decision.title,
             provenance: decision.provenance,
             actionTitle: "Open thread",
-            action: {}
+            action: { appState.openInFullApp("Open thread") }
         ) {
             Text(decision.body)
                 .font(.system(size: 11))
@@ -236,10 +244,16 @@ struct SummaryCardView<Content: View>: View {
                     .foregroundStyle(Theme.muted2)
                     .lineLimit(1)
                 Spacer()
-                Button(actionTitle, action: action)
-                    .buttonStyle(.plain)
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(Theme.muted)
+                Button(action: action) {
+                    Text(actionTitle)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Theme.muted)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .contentShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+                .hoverHighlight(cornerRadius: 6, color: Theme.surface)
             }
             .padding(.top, 3)
             .overlay(alignment: .top) {

@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Observation
+import SwiftUI
 import ArchAstroPlatform
 
 /// Top-level observable state for the app: session lifecycle and the
@@ -26,7 +27,13 @@ final class AppState {
 
     // MARK: Tray state (placeholder-backed until wired to threads)
 
-    var selectedTab: TrayTab = .picture
+    var selectedTab: TrayTab = .picture {
+        didSet {
+            if oldValue == .stream && selectedTab != .stream {
+                newEventIDs.removeAll()
+            }
+        }
+    }
     var availableRooms: [RoomSnapshot] = TrayPlaceholders.rooms
     var selectedRoom: RoomSnapshot = TrayPlaceholders.rooms[0]
     var requests: [InboxRequest] = TrayPlaceholders.requests
@@ -34,20 +41,66 @@ final class AppState {
     var streamFilter: StreamEvent.Filter = .all
     /// Latest ask answer, rendered as a Picture card.
     var askAnswer: (question: String, answer: String)?
+    /// The Who's-working-on-what live view pinned to the Picture.
+    var liveViewPinned = false
+    /// Events that arrived since the stream was last in view.
+    var newEventIDs: Set<String> = []
+
+    /// Transient feedback toast (mirrors the mock's toast layer).
+    var toast: String?
+    private var toastTask: Task<Void, Never>?
+    private var liveFeedTask: Task<Void, Never>?
+    private var pendingLiveEvents = TrayPlaceholders.liveFeed
 
     var inboxCount: Int { requests.count }
+
+    func showToast(_ message: String) {
+        toastTask?.cancel()
+        toast = message
+        toastTask = Task {
+            try? await Task.sleep(nanoseconds: 1_900_000_000)
+            guard !Task.isCancelled else { return }
+            toast = nil
+        }
+    }
 
     func selectRoom(_ room: RoomSnapshot) {
         selectedRoom = room
         askAnswer = nil
+        showToast("Switched to \(room.name)")
     }
 
-    func resolveRequest(_ request: InboxRequest) {
+    func resolveRequest(_ request: InboxRequest, feedback: String) {
         requests.removeAll { $0.id == request.id }
+        showToast(feedback)
     }
 
+    func deferRequest(_ request: InboxRequest) {
+        showToast("\(request.kind.label) stays in your inbox")
+    }
+
+    /// Anything the tray can't do yet opens in the full app.
+    func openInFullApp(_ what: String) {
+        showToast("\(what) opened in the full app")
+    }
+
+    func toggleLiveViewPinned() {
+        liveViewPinned.toggle()
+        showToast(liveViewPinned ? "Live view pinned to The Picture" : "Live view unpinned")
+    }
+
+    /// Staggered clear, mirroring the mock's cascade.
     func clearInbox() {
-        requests.removeAll()
+        let pending = requests
+        Task {
+            for request in pending {
+                _ = withAnimation(.easeOut(duration: 0.25)) {
+                    requests.removeAll { $0.id == request.id }
+                }
+                try? await Task.sleep(nanoseconds: 55_000_000)
+            }
+            showToast("Inbox cleared")
+        }
     }
 
     /// Placeholder ask — the live app routes this through the room's
@@ -65,6 +118,49 @@ final class AppState {
             answer = "The room found 42 relevant posts across 18 active sessions. In the live app, the resident synthesizes a sourced answer here and preserves the question as a reusable view."
         }
         askAnswer = (question, answer)
+        showToast("Answer grounded in 42 room posts")
+    }
+
+    // MARK: Live feed simulation
+
+    /// Simulate the always-running stream: a new event lands every so
+    /// often, marked NEW until the stream is next in view. Replaced by
+    /// the real ApiChatChannel subscription in the next milestone.
+    func startLiveFeed() {
+        guard liveFeedTask == nil else { return }
+        liveFeedTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64.random(in: 14_000_000_000...24_000_000_000))
+                guard !Task.isCancelled, isSignedIn else { continue }
+                deliverNextLiveEvent()
+            }
+        }
+    }
+
+    func stopLiveFeed() {
+        liveFeedTask?.cancel()
+        liveFeedTask = nil
+    }
+
+    /// Internal for tests — the timer loop calls this on cadence.
+    func deliverNextLiveEvent() {
+        guard !pendingLiveEvents.isEmpty else { return }
+        var event = pendingLiveEvents.removeFirst()
+        event = StreamEvent(
+            id: "\(event.id)-\(UUID().uuidString.prefix(4))",
+            kind: event.kind,
+            author: event.author,
+            body: event.body,
+            time: "now",
+            isYou: event.isYou
+        )
+        pendingLiveEvents.append(event)
+        withAnimation(.easeOut(duration: 0.3)) {
+            events.insert(event, at: 0)
+            if selectedTab != .stream {
+                newEventIDs.insert(event.id)
+            }
+        }
     }
 
     private let sessionStore = SessionStore()

@@ -249,6 +249,30 @@ enum TrayPlaceholders {
         ),
     ]
 
+    /// Rotating queue for the simulated live feed.
+    static let liveFeed: [StreamEvent] = [
+        StreamEvent(
+            id: "live1", kind: .start, author: "Fleet · librarian",
+            body: "Distilling the last hour of session exhaust into the digest.",
+            time: "now", isYou: false
+        ),
+        StreamEvent(
+            id: "live2", kind: .done, author: "CI · code-search",
+            body: "Release validation finished green across the full matrix.",
+            time: "now", isYou: false
+        ),
+        StreamEvent(
+            id: "live3", kind: .lesson, author: "Team record",
+            body: "Prism dynamic mocks hide missing-field bugs; contract tests decode strictly on purpose.",
+            time: "now", isYou: false
+        ),
+        StreamEvent(
+            id: "live4", kind: .start, author: "You · rooms",
+            body: "Aligning the native tray to the menu-bar mock.",
+            time: "now", isYou: true
+        ),
+    ]
+
     static let events: [StreamEvent] = [
         StreamEvent(
             id: "e1", kind: .done, author: "Calvin · wt3",

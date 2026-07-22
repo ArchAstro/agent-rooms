@@ -19,14 +19,18 @@ struct InboxView: View {
                 }
                 Spacer()
                 if !appState.requests.isEmpty {
-                    Button("Clear all") {
-                        withAnimation(.easeOut(duration: 0.25)) {
-                            appState.clearInbox()
-                        }
+                    Button {
+                        appState.clearInbox()
+                    } label: {
+                        Text("Clear all")
+                            .font(.system(size: 9))
+                            .foregroundStyle(Theme.muted)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 4)
+                            .contentShape(RoundedRectangle(cornerRadius: 6))
                     }
                     .buttonStyle(.plain)
-                    .font(.system(size: 9))
-                    .foregroundStyle(Theme.muted)
+                    .hoverHighlight(cornerRadius: 6, color: Theme.surface)
                 }
             }
             .padding(.horizontal, 15)
@@ -111,11 +115,11 @@ struct RequestCardView: View {
             HStack(spacing: 6) {
                 actionButton(request.primaryAction, primary: true) {
                     withAnimation(.easeOut(duration: 0.25)) {
-                        appState.resolveRequest(request)
+                        appState.resolveRequest(request, feedback: primaryFeedback)
                     }
                 }
                 actionButton(request.secondaryAction, primary: false) {
-                    // Secondary actions defer or open the full app later.
+                    secondaryAction()
                 }
             }
             .padding(.top, 9)
@@ -144,6 +148,29 @@ struct RequestCardView: View {
         ))
     }
 
+    /// Mock-parity feedback per request kind (Approved / Handoff accepted /
+    /// Marked seen).
+    private var primaryFeedback: String {
+        switch request.kind {
+        case .approval: "Approved"
+        case .handoff: "Handoff accepted"
+        case .notice: "Marked seen"
+        }
+    }
+
+    private func secondaryAction() {
+        switch request.kind {
+        case .approval:
+            withAnimation(.easeOut(duration: 0.25)) {
+                appState.resolveRequest(request, feedback: "Held for review")
+            }
+        case .handoff:
+            appState.deferRequest(request)
+        case .notice:
+            appState.openInFullApp(request.secondaryAction)
+        }
+    }
+
     private func actionButton(
         _ title: String,
         primary: Bool,
@@ -163,7 +190,9 @@ struct RequestCardView: View {
                     RoundedRectangle(cornerRadius: 7)
                         .stroke(primary ? Theme.ink : Theme.lineStrong, lineWidth: 1)
                 )
+                .contentShape(RoundedRectangle(cornerRadius: 7))
         }
         .buttonStyle(.plain)
+        .hoverHighlight(cornerRadius: 7, color: primary ? .white.opacity(0.12) : Theme.surface)
     }
 }

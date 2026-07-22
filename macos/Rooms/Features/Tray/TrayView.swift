@@ -25,11 +25,37 @@ struct TrayView: View {
             case .signedIn:
                 header
                 activeView
+                    .animation(.easeOut(duration: 0.22), value: appState.selectedTab)
             }
         }
+        .animation(.easeOut(duration: 0.2), value: appState.toast)
         .frame(width: Theme.trayWidth, height: Theme.trayHeight)
         .background(Theme.paper)
-        .task { await appState.restoreSession() }
+        .overlay(alignment: .bottom) { toastOverlay }
+        .task {
+            await appState.restoreSession()
+            appState.startLiveFeed()
+        }
+    }
+
+    @ViewBuilder
+    private var toastOverlay: some View {
+        if let toast = appState.toast {
+            Text(toast)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color(hex: 0x201E1B).opacity(0.9), in: RoundedRectangle(cornerRadius: 9))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9)
+                        .stroke(Color.white.opacity(0.13), lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.24), radius: 17, y: 6)
+                .padding(.bottom, 74)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .id(toast)
+        }
     }
 
     private var header: some View {
@@ -109,6 +135,7 @@ struct TrayView: View {
             .contentShape(RoundedRectangle(cornerRadius: 7))
         }
         .buttonStyle(.plain)
+        .hoverHighlight()
         .popover(isPresented: $showingRoomSwitcher, arrowEdge: .bottom) {
             RoomSwitcherView(isPresented: $showingRoomSwitcher)
                 .environment(appState)
@@ -117,7 +144,7 @@ struct TrayView: View {
 
     private var segments: some View {
         HStack(spacing: 2) {
-            ForEach(TrayTab.allCases) { tab in
+            ForEach(Array(TrayTab.allCases.enumerated()), id: \.element) { index, tab in
                 Button {
                     appState.selectedTab = tab
                 } label: {
@@ -144,8 +171,12 @@ struct TrayView: View {
                         color: appState.selectedTab == tab ? Color(hex: 0x1E1B17).opacity(0.1) : .clear,
                         radius: 1.5, y: 1
                     )
+                    .contentShape(RoundedRectangle(cornerRadius: 7))
                 }
                 .buttonStyle(.plain)
+                .hoverHighlight(color: appState.selectedTab == tab ? .clear : Color(hex: 0x21201C).opacity(0.045))
+                .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: .command)
+                .help("\(tab.rawValue) (⌘\(index + 1))")
             }
         }
         .padding(.top, 4)
@@ -181,6 +212,7 @@ struct TrayView: View {
                 .contentShape(RoundedRectangle(cornerRadius: 7))
         }
         .buttonStyle(.plain)
+        .hoverHighlight()
         .help(title)
     }
 }
@@ -238,6 +270,26 @@ struct RoomSwitcherView: View {
                     .contentShape(RoundedRectangle(cornerRadius: 7))
                 }
                 .buttonStyle(.plain)
+                .hoverHighlight(color: Theme.surface)
+            }
+
+            // Identity — membership decides what each member can ask.
+            if let email = appState.userEmail {
+                Rectangle()
+                    .fill(Theme.line)
+                    .frame(height: 1)
+                    .padding(.vertical, 5)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Signed in as \(email)")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Theme.ink2)
+                        .lineLimit(1)
+                    Text("Membership decides what you can ask.")
+                        .font(.system(size: 9))
+                        .foregroundStyle(Theme.muted2)
+                }
+                .padding(.horizontal, 8)
+                .padding(.bottom, 5)
             }
         }
         .padding(6)
