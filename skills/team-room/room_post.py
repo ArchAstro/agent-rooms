@@ -736,24 +736,74 @@ def _refresh_session_locked(creds, key, creds_path, server=None):
     return session
 
 
+def resolve_room_source(session, persist: bool = True) -> str | None:
+    """Find the room thread's live knowledge source id. Threads self-index
+    into a context source; this locates the one bound to our thread so a
+    stale or missing source_id can't silently break search. Repairs the
+    stored config when it resolves, so the fix sticks."""
+    app, tok = session["appId"], session["accessToken"]
+    page = 1
+    while page <= 8:
+        path = (f"{PRODUCTION_SERVER}/protected/api/v1/developer/apps/{app}"
+                f"/context/sources?page_size=50&page={page}")
+        try:
+            body = http_get(path, tok)
+        except Exception:
+            return None
+        for s in body.get("data") or []:
+            if (s.get("thread_id") or s.get("thread")) == THREAD_ID and s.get("id"):
+                sid = s["id"]
+                if persist:
+                    cfg_path = _room_config_path()
+                    if cfg_path:
+                        try:
+                            cfg = json.load(open(cfg_path))
+                            if cfg.get("source_id") != sid:
+                                cfg["source_id"] = sid
+                                json.dump(cfg, open(cfg_path, "w"), indent=2)
+                        except Exception:
+                            pass
+                return sid
+        if not body.get("has_next"):
+            break
+        page += 1
+    return None
+
+
 def search(query: str):
     creds, key, creds_path, session = authed_session()
-    url = (
-        f"{PRODUCTION_SERVER}/protected/api/v1/developer/apps/"
-        f"{session['appId']}/context/sources/{ROOM_SOURCE_ID}/search"
-    )
     body = {"query": query, "max_results": 8}
+
+    def do(sid):
+        url = (f"{PRODUCTION_SERVER}/protected/api/v1/developer/apps/"
+               f"{session['appId']}/context/sources/{sid}/search")
+        return http_json(url, body, token=session["accessToken"])
+
+    src = ROOM_SOURCE_ID or resolve_room_source(session)
+    if not src:
+        die("couldn't find the room's knowledge source; is your login a "
+            "member of the room team?", 3)
     try:
-        resp = http_json(url, body, token=session["accessToken"])
+        resp = do(src)
     except urllib.error.HTTPError as e:
         if e.code == 401 and not session.get("static"):
             session = refresh_session(creds, key, creds_path)
-            resp = http_json(url, body, token=session["accessToken"])
+            resp = do(src)
         elif e.code == 401:
             die("room token rejected (revoked or expired); get a new one", 3)
+        elif e.code in (403, 404) and not session.get("static"):
+            # Stale or wrong source id: resolve the thread's live source and
+            # retry once. This is the self-heal that keeps search from
+            # breaking silently when the source rotates.
+            fresh = resolve_room_source(session)
+            if fresh and fresh != src:
+                resp = do(fresh)
+            else:
+                die("room knowledge source not found and couldn't resolve a "
+                    "live one for this thread", 3)
         elif session.get("static") and e.code in (403, 404, 500):
-            die("room search is not available with a token yet (the knowledge "
-                "source is agent-owned); use a login session for search", 3)
+            die("room search needs a login session (the knowledge source is "
+                "member-scoped); run room-post login", 3)
         else:
             die(f"search failed ({e.code}): {e.read().decode()[:200]}")
     items = resp.get("results") or resp.get("data") or []
