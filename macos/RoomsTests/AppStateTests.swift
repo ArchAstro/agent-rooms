@@ -17,14 +17,50 @@ import Testing
         #expect(!state.isSignedIn)
     }
 
-    @Test @MainActor func resolving_requests_drains_the_inbox() {
+    @Test @MainActor func resolving_requests_drains_the_inbox() async throws {
         let state = AppState()
         let initial = state.inboxCount
         #expect(initial > 0)
-        state.resolveRequest(state.requests[0])
+        state.resolveRequest(state.requests[0], feedback: "Approved")
         #expect(state.inboxCount == initial - 1)
+        #expect(state.toast == "Approved")
+
         state.clearInbox()
+        // Clearing is staggered (55ms per card) for the cascade animation.
+        try await Task.sleep(nanoseconds: 700_000_000)
         #expect(state.inboxCount == 0)
+        #expect(state.toast == "Inbox cleared")
+    }
+
+    @Test @MainActor func live_events_mark_new_until_stream_is_viewed() {
+        let state = AppState()
+        let initialCount = state.events.count
+        state.selectedTab = .picture
+        state.deliverNextLiveEvent()
+        #expect(state.events.count == initialCount + 1)
+        #expect(!state.newEventIDs.isEmpty)
+
+        // Opening the stream shows the NEW markers; leaving clears them.
+        state.selectedTab = .stream
+        #expect(!state.newEventIDs.isEmpty)
+        state.selectedTab = .picture
+        #expect(state.newEventIDs.isEmpty)
+
+        // Events arriving while the stream is in view are not marked.
+        state.selectedTab = .stream
+        state.deliverNextLiveEvent()
+        #expect(state.newEventIDs.isEmpty)
+    }
+
+    @Test @MainActor func tray_actions_surface_toast_feedback() {
+        let state = AppState()
+        state.toggleLiveViewPinned()
+        #expect(state.liveViewPinned)
+        #expect(state.toast == "Live view pinned to The Picture")
+        state.openInFullApp("Open PR")
+        #expect(state.toast == "Open PR opened in the full app")
+        state.selectRoom(state.availableRooms[1])
+        #expect(state.toast?.contains("Switched to") == true)
     }
 
     @Test @MainActor func ask_produces_a_grounded_answer_card() {

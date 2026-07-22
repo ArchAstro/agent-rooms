@@ -30,8 +30,10 @@ struct StreamView: View {
                                     : .clear,
                                 in: Capsule()
                             )
+                            .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)
+                    .hoverHighlight(cornerRadius: 999, color: Theme.surface)
                 }
             }
             .padding(.horizontal, 13)
@@ -41,7 +43,8 @@ struct StreamView: View {
             ScrollView {
                 VStack(spacing: 0) {
                     ForEach(filteredEvents) { event in
-                        EventRowView(event: event)
+                        EventRowView(event: event, isNew: appState.newEventIDs.contains(event.id))
+                            .transition(.move(edge: .top).combined(with: .opacity))
                     }
                 }
                 .padding(.horizontal, 14)
@@ -59,6 +62,7 @@ struct StreamView: View {
 
 struct EventRowView: View {
     let event: StreamEvent
+    var isNew = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -69,9 +73,20 @@ struct EventRowView: View {
                 .background(event.kind.background, in: RoundedRectangle(cornerRadius: 6))
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(event.author)
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(Theme.ink)
+                HStack(spacing: 5) {
+                    Text(event.author)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(Theme.ink)
+                    if isNew {
+                        Text("NEW")
+                            .font(.system(size: 7, weight: .heavy))
+                            .kerning(0.5)
+                            .foregroundStyle(Theme.purple)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Theme.purpleSoft, in: Capsule())
+                    }
+                }
                 Text(event.body)
                     .font(.system(size: 10))
                     .lineSpacing(2.5)

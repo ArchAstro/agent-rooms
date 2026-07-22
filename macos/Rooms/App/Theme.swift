@@ -78,6 +78,32 @@ struct KindChip: View {
     }
 }
 
+/// Hover feedback shared by the tray's flat controls — the SwiftUI
+/// equivalent of the mock's `:hover` backgrounds.
+struct HoverHighlight: ViewModifier {
+    var cornerRadius: CGFloat = 7
+    var color = Color(hex: 0x21201C).opacity(0.06)
+    @State private var hovered = false
+
+    func body(content: Content) -> some View {
+        content
+            .background(
+                hovered ? color : .clear,
+                in: RoundedRectangle(cornerRadius: cornerRadius)
+            )
+            .onHover { hovered = $0 }
+    }
+}
+
+extension View {
+    func hoverHighlight(
+        cornerRadius: CGFloat = 7,
+        color: Color = Color(hex: 0x21201C).opacity(0.06)
+    ) -> some View {
+        modifier(HoverHighlight(cornerRadius: cornerRadius, color: color))
+    }
+}
+
 /// Rounded status pill — mirrors `.status`.
 struct StatusPill: View {
     let text: String
