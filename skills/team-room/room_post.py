@@ -11,9 +11,12 @@ Usage:
                         # environment the archagent CLI is pointed at
   room_post.py login <mirror>  # same, for a mirror tier from room.json;
                                # posts then fan out there best-effort
-  room_post.py read [N] # newest N (default 30) room messages, full text
-  room_post.py search "<question>"   # semantic search over room knowledge
-  room_post.py board    # who is working where, from live presence rows
+  room_post.py search "<question>"   # THE read: semantic recall over ALL
+                                     # room knowledge, ranked by relevance,
+                                     # any age. Ask it before you touch an
+                                     # area, or when a failure stumps you.
+  room_post.py read [N] # recent stream, newest N (default 30) — a glance
+                        # at what's in flight, not the read that matters
 
 Membership (which repos may use the room) is an intentional, per-repo,
 HUMAN choice. A repo is in if it commits this kit (the normal path), or
@@ -154,7 +157,7 @@ ROOM_SOURCE_ID = _ROOM_CFG.get("source_id") or ""
 ROOM_TEAM_ID = _ROOM_CFG.get("team_id", "")
 PRESENCE_SCHEMA = "team-presence"
 PRODUCTION_SERVER = _ROOM_CFG.get("server", "")
-KIT_VERSION = "2026.07.21"
+KIT_VERSION = "2026.07.22"
 ROOM_APP_NAME = "ArchAgents"
 MAX_HEADLINE = 300
 EXPIRY_SKEW_SECONDS = 60
@@ -589,6 +592,32 @@ def authed_session():
     return creds, key, creds_path, session
 
 
+def login_session():
+    """A browser-login session (member-scoped), independent of any static
+    token, or None if this machine has no room login. Never dies — callers
+    use it to prefer a login for reads that a courier token can't do."""
+    try:
+        creds = json.load(open(ROOM_CREDS_PATH))
+        key = next(iter(creds["orgSessions"]))
+    except Exception:
+        return None
+    session = creds["orgSessions"][key]
+    expires_at = session.get("expiresAt") or 0
+    if expires_at / 1000 < time.time() + EXPIRY_SKEW_SECONDS:
+        session = refresh_session(creds, key, ROOM_CREDS_PATH)
+    return creds, key, ROOM_CREDS_PATH, session
+
+
+def read_session():
+    """The right credential for member-scoped reads (search, records). The
+    knowledge index is member-scoped and a static courier token CANNOT read
+    it, so prefer a browser login whenever one exists on this machine. Fall
+    back to authed_session (static) so a pure-CI box still does the reads a
+    token can do. Posting stays on authed_session — attribution and CI use
+    the token on purpose; only reads need the login."""
+    return login_session() or authed_session()
+
+
 def read(limit: int = 30):
     # One line of protocol currency: sessions load instructions once at
     # start, but this tool always runs current. If the room's rules have
@@ -770,9 +799,13 @@ def resolve_room_source(session, persist: bool = True) -> str | None:
     return None
 
 
-def search(query: str):
-    creds, key, creds_path, session = authed_session()
-    body = {"query": query, "max_results": 8}
+def search_items(session, query: str, max_results: int = 8) -> list:
+    """Query the room's knowledge index (semantic, relevance-ranked) and
+    return the raw items. THE scaling read: this stays O(query) whether the
+    thread holds a thousand posts or a million, because it hits the index,
+    not the thread. Self-heals a stale source id. Raises on hard failure so
+    the caller can decide whether to degrade."""
+    body = {"query": query, "max_results": max_results}
 
     def do(sid):
         url = (f"{PRODUCTION_SERVER}/protected/api/v1/developer/apps/"
@@ -781,32 +814,37 @@ def search(query: str):
 
     src = ROOM_SOURCE_ID or resolve_room_source(session)
     if not src:
-        die("couldn't find the room's knowledge source; is your login a "
-            "member of the room team?", 3)
+        raise RuntimeError("no room knowledge source (login as a team member)")
     try:
         resp = do(src)
     except urllib.error.HTTPError as e:
-        if e.code == 401 and not session.get("static"):
-            session = refresh_session(creds, key, creds_path)
-            resp = do(src)
-        elif e.code == 401:
-            die("room token rejected (revoked or expired); get a new one", 3)
-        elif e.code in (403, 404) and not session.get("static"):
-            # Stale or wrong source id: resolve the thread's live source and
-            # retry once. This is the self-heal that keeps search from
-            # breaking silently when the source rotates.
+        if e.code in (403, 404) and not session.get("static"):
             fresh = resolve_room_source(session)
             if fresh and fresh != src:
                 resp = do(fresh)
             else:
-                die("room knowledge source not found and couldn't resolve a "
-                    "live one for this thread", 3)
+                raise
         elif session.get("static") and e.code in (403, 404, 500):
-            die("room search needs a login session (the knowledge source is "
-                "member-scoped); run room-post login", 3)
+            raise RuntimeError("search needs a login session (member-scoped)")
+        else:
+            raise
+    return resp.get("results") or resp.get("data") or []
+
+
+def search(query: str):
+    creds, key, creds_path, session = read_session()
+    try:
+        items = search_items(session, query)
+    except urllib.error.HTTPError as e:
+        if e.code == 401 and not session.get("static"):
+            session = refresh_session(creds, key, creds_path)
+            items = search_items(session, query)
+        elif e.code == 401:
+            die("room token rejected (revoked or expired); get a new one", 3)
         else:
             die(f"search failed ({e.code}): {e.read().decode()[:200]}")
-    items = resp.get("results") or resp.get("data") or []
+    except RuntimeError as e:
+        die(str(e), 3)
     if not items:
         print("(no results)")
     for it in items:
@@ -1174,7 +1212,7 @@ def near(topic: str | None = None):
     before starting on an unfamiliar subsystem."""
     import re
 
-    _, _, _, session = authed_session()
+    _, _, _, session = read_session()
     if not topic:
         topic = git("branch", "--show-current") or ""
     kw = _area_keywords(topic)
@@ -1202,17 +1240,28 @@ def near(topic: str | None = None):
                                r.get("updated_at")))
     collisions.sort(key=lambda x: (x[0], x[4] or ""), reverse=True)
 
-    # 2) Active warnings: recent ⚠ lessons and P0/P1/incident posts that
-    #    touch this area.
-    active = []
-    for m in read_raw(60, session):
-        c = (m.get("content") or "").strip()
-        hot = c[:1] == "⚠" or re.search(
-            r"\bP[012]\b|incident|customer[- ]?(?:visible|channel)", c, re.I)
-        if hot and ov(c):
-            active.append(c.split("\n")[0][:150])
+    # 2) What the room knows about this area — from the KNOWLEDGE INDEX, by
+    #    relevance, not a thread scan. This is the read that survives a
+    #    million-message thread: it stays O(query), and returns the most
+    #    relevant posts regardless of when they were written. Warnings
+    #    (⚠ lessons, P0/P1/incident) are pulled out; the rest is context.
+    warnings, context = [], []
+    try:
+        for it in search_items(session, topic, max_results=10):
+            c = (it.get("content") or it.get("text") or "").strip()
+            if not c:
+                continue
+            line = c.split("\n")[0][:160]
+            hot = c[:1] == "⚠" or re.search(
+                r"\bP[012]\b|incident|customer[- ]?(?:visible|channel)", c, re.I)
+            (warnings if hot else context).append(line)
+    except (Exception, SystemExit):
+        # Index unavailable (e.g. token, not a login session). Collisions and
+        # approved records still work; recall degrades, loudly on `doctor`.
+        pass
 
-    # 3) Known: approved team records that overlap.
+    # 3) The approved distillate: a small, bounded, high-trust set of records
+    #    (custom objects, not the thread), always safe to scan.
     known = []
     for f in fetch_records(session, status="approved"):
         s = ov(f.get("title")) + ov(f.get("body")) + ov(f.get("record_id"))
@@ -1227,19 +1276,24 @@ def near(topic: str | None = None):
         print("WORKING NEAR THIS NOW:")
         for _, human, wt, intent, at in collisions[:5]:
             print(f"  {human} ({wt}) · {age(at or '')} ago · {intent}")
-    if active:
+    if warnings:
         shown = True
-        print("\nACTIVE WARNINGS:")
-        for headline in active[:5]:
-            print(f"  {headline}")
+        print("\nWARNINGS (from the room's knowledge):")
+        for line in warnings[:5]:
+            print(f"  {line}")
     if known:
         shown = True
-        print("\nKNOWN (team records):")
-        for _, kind, title in known[:6]:
+        print("\nKNOWN RULES (approved records):")
+        for _, kind, title in known[:5]:
             print(f"  [{kind}] {title}")
+    if context:
+        shown = True
+        print("\nRELATED (what the room knows):")
+        for line in context[:5]:
+            print(f"  {line}")
     if not shown:
-        print(f'clear — nobody working near "{topic}", no warnings or known '
-              "gotchas that touch it.")
+        print(f'clear — nobody working near "{topic}", nothing in the room\'s '
+              "knowledge that touches it.")
 
 
 def post(message: str, metadata: dict | None = None, uploads: list | None = None):
@@ -1617,6 +1671,34 @@ def doctor():
         print(
             "warn team members not visible to this credential (posting "
             "may still work; records/board may not)"
+        )
+
+    # 5b. THE READ PATH: knowledge search. A green "room reachable" does NOT
+    #     prove this — the index is member-scoped, so a static courier token
+    #     reads the thread fine yet cannot search. The whole read protocol
+    #     (recall before you touch an area, search when a failure stumps you)
+    #     dies silently if this fails, so probe it explicitly and loudly.
+    #     FAIL only when a login EXISTS but search still breaks (a real,
+    #     fixable fault like a stale source id); a machine with no login is a
+    #     legitimate post-only courier, so that's a warn, not a failure.
+    ls = login_session()
+    if ls:
+        try:
+            search_items(ls[3], "doctor smoke test", max_results=1)
+            print("ok  knowledge search: index reachable (the read path works)")
+        except (Exception, SystemExit) as e:
+            ok = False
+            print(
+                f"FAIL knowledge search: {str(e)[:100]} — a login exists but "
+                "search failed; the knowledge source is likely misconfigured "
+                "(check room.json source_id)."
+            )
+    else:
+        print(
+            "warn knowledge search: no browser login on this machine, so the "
+            "read path (search / recall before you touch an area) is off — a "
+            "static token posts but cannot read knowledge. Run `room-post "
+            "login` to enable it."
         )
 
     # 6. mirrors (informational — a mirror never blocks anything)
