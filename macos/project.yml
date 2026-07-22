@@ -5,11 +5,11 @@ options:
     macOS: "14.0"
   createIntermediateGroups: true
 
-# Vendored until archastro-swift is published; refresh with
-# scripts/vendor_sdk.sh, then switch this to a versioned git dependency.
+# Tracks main until the first tagged release — then pin with `from: x.y.z`.
 packages:
   ArchAstroPlatform:
-    path: Vendor/archastro-swift
+    url: https://github.com/ArchAstro/archastro-swift
+    branch: main
 
 settings:
   base:
@@ -61,6 +61,9 @@ targets:
       - RoomsTests
     dependencies:
       - target: Rooms
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
 
 schemes:
   Rooms:
