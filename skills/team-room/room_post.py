@@ -85,14 +85,30 @@ def _room_config_path() -> str | None:
 def _room_config() -> dict:
     cfg_path = _room_config_path()
     if cfg_path is None:
-        print(
-            "room_post: not joined to a room yet. No room.json beside this\n"
-            "script, no ROOM_JSON env var, and no ~/.config/team-room/room.json.\n"
-            "If you installed via a skill, run once:\n"
-            "  room-post init --config <room.json>   (ask whoever runs your room)\n"
-            "There is no default room.",
-            file=sys.stderr,
-        )
+        creds_exist = os.path.exists(
+            os.path.expanduser("~/.config/team-room/credentials.json"))
+        if creds_exist:
+            # Already signed in on this machine but no room saved yet — the
+            # room is one command away, no browser needed.
+            print(
+                "room_post: signed in, but no team room saved yet. Run once:\n"
+                "  room-post discover\n"
+                "It finds your team room from your account and saves it; then\n"
+                "every command works. (In several rooms? it will ask which.)",
+                file=sys.stderr,
+            )
+        else:
+            # Not connected at all: ONE browser click does auth + finds the
+            # room + saves it. Never send people hunting for a room.json.
+            print(
+                "room_post: not connected yet. One browser click sets it up:\n"
+                "  room-post login\n"
+                "That signs you in AND finds your team room and saves it — "
+                "nothing to paste, no file to hunt down. Then `room-post doctor`\n"
+                "goes green. (Non-prod tier or self-host: "
+                "room-post init --config <room.json>.)",
+                file=sys.stderr,
+            )
         sys.exit(4)
     try:
         with open(cfg_path, "r", encoding="utf-8") as f:
