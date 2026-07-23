@@ -1321,6 +1321,16 @@ def post(message: str, metadata: dict | None = None, uploads: list | None = None
     return session
 
 
+def _mirror_has_creds(m: dict) -> bool:
+    """True if this machine already has any credential for this mirror, so
+    `login` doesn't re-prompt for a tier that's already connected."""
+    return (
+        bool(os.environ.get(f"TEAM_ROOM_TOKEN_{m['name'].upper()}", "").strip())
+        or os.path.exists(os.path.join(MIRRORS_DIR, f"{m['name']}.token"))
+        or os.path.exists(os.path.join(MIRRORS_DIR, f"{m['name']}.json"))
+    )
+
+
 def _mirror_session(m: dict) -> dict | None:
     """Auth for one mirror: TEAM_ROOM_TOKEN_<NAME> env / token file, else
     the mirror's browser-login session (refreshed if expired). None means
@@ -1430,10 +1440,14 @@ def login_page_html(ok: bool) -> str:
 </div></body></html>"""
 
 
-def login(mirror: dict | None = None):
-    """Browser login. With no argument: the room itself (prod). With a
-    mirror config: same flow against that tier's portal, stored under
-    the mirror's own credentials file."""
+def login(mirror: dict | None = None, best_effort: bool = False,
+          timeout: int = 300):
+    """Browser login. With no argument: the room itself (prod), and then
+    every mirror tier in room.json in the same run, so one `login` connects
+    all tiers. With a mirror config: same flow against that tier's portal,
+    stored under the mirror's own credentials file. best_effort=True (used
+    when auto-connecting mirrors) skips a tier on timeout/failure instead of
+    aborting the whole login."""
     import http.server
     import threading
     import urllib.parse
@@ -1484,12 +1498,21 @@ def login(mirror: dict | None = None):
         webbrowser.open(url)
     except Exception:
         pass
-    if not done.wait(timeout=300):
+    if not done.wait(timeout=timeout):
+        server.shutdown()
+        if best_effort:
+            print(f"  (no response for '{mirror['name']}'; skipping it — run "
+                  f"`room-post login {mirror['name']}` later to connect.)")
+            return
         die("login timed out after 5 minutes")
     server.shutdown()
     required = ("access_token", "refresh_token", "app", "org", "user")
     missing = [k for k in required if not result.get(k)]
     if missing:
+        if best_effort:
+            print(f"  (login for '{mirror['name']}' came back incomplete; "
+                  "skipping this tier.)")
+            return
         die(f"callback missing params: {missing}")
     creds = {
         "server": server_url,
@@ -1529,6 +1552,23 @@ def login(mirror: dict | None = None):
         except Exception as e:
             print(f"(couldn't auto-detect your room: {e}. If you have a "
                   "room.json, run: room-post init --config <path>)")
+
+    # One `login` connects every tier. After the room (prod) is in, walk the
+    # mirror tiers from room.json and connect each one that isn't already,
+    # one browser click apiece. Best-effort: a closed/ignored window skips
+    # that tier and never blocks the login. This is what makes staging "just
+    # work" for the whole team — nobody has to know a second command exists.
+    if not mirror:
+        pending = [m for m in MIRRORS
+                   if m.get("thread_id") and not _mirror_has_creds(m)]
+        if pending:
+            names = ", ".join(m["name"] for m in pending)
+            print(f"\nThis room also has tiers: {names}. Connecting each now so "
+                  "your posts reach them too (one browser click per tier; close "
+                  "a window to skip that tier).")
+            for m in pending:
+                print(f"\n-- connecting '{m['name']}' --")
+                login(m, best_effort=True, timeout=180)
 
 
 def inbox():
