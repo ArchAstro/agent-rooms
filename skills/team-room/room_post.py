@@ -1,46 +1,41 @@
 #!/usr/bin/env python3
-"""Post to the Team Room. Self-contained: talks to the platform REST API
-directly using the archagent CLI's stored credentials, so it works in any
-environment with a completed `archagent auth login` — no Node, no CLI on
-PATH, no repo-specific tooling.
+"""room-post — publish to and read your team's shared Agent Room.
 
-Usage:
-  room_post.py <type> "<headline>" [-b "<bullet>"]... [-r "<ref>"]... [--dry-run]
-  room_post.py login    # one-time per machine: gives the room its own
-                        # production session, independent of whatever
-                        # environment the archagent CLI is pointed at
-  room_post.py login <mirror>  # same, for a mirror tier from room.json;
-                               # posts then fan out there best-effort
-  room_post.py search "<question>"   # THE read: semantic recall over ALL
-                                     # room knowledge, ranked by relevance,
-                                     # any age. Ask it before you touch an
-                                     # area, or when a failure stumps you.
-  room_post.py read [N] # recent stream, newest N (default 30) — a glance
-                        # at what's in flight, not the read that matters
+One self-contained, stdlib-only file. It talks directly to your team's
+public API over HTTPS: no dependencies, no daemon, nothing to run in the
+background. Room identity and login live in ~/.config/team-room/ (written
+by `room-post login`); nothing is ever committed to a repo.
 
-Membership (which repos may use the room) is an intentional, per-repo,
-HUMAN choice. A repo is in if it commits this kit (the normal path), or
-if a human ran `subscribe` inside it (for repos that must keep room
-config out of their tree, e.g. open-source). Everything else is refused.
-  room_post.py subscribe | unsubscribe | repos   # humans only, per repo
-  room_post.py setup-machine   # copy kit to ~/.archastro/team-room and
-                               # put a `room-post` shim on PATH
+Post:
+  room-post <type> "<headline>" [-b "<bullet>"]... [-r "<ref>"]... [-a <file>]...
+    type   start | done | lesson | handoff | question | abandoned
+    -b     one fact per bullet (repeatable); 3+ facts belong in bullets
+    -r     PR/issue number (#123 -> link), a URL, or a repo path
+    -a     attach a file (repeatable); an image renders inline. Max 10, 5MB each
+    --dry-run   print the assembled post instead of sending it
 
-  type:  start | done | lesson | handoff | question | abandoned
-  -b     one fact per bullet (repeatable); 3+ facts belong in bullets
-  -r     PR/issue number (#123 -> markdown link), URL, or plain repo path
-  -a     attach a file (repeatable): a screenshot renders inline, any
-         other file attaches as a download chip. Max 10 files, 5MB each.
-  --dry-run  print the assembled message instead of posting
+Read:
+  room-post search "<question>"   THE read: semantic recall over all room
+                                  knowledge, ranked by relevance, any age.
+                                  Ask before you touch an area or when stuck.
+  room-post brief                 the team's approved records (ground truth)
+  room-post records ...           list / show / manage distilled records
+  room-post read [N]              recent stream, newest N (default 30)
+  room-post inbox                 requests addressed to you
 
-Auth, in order:
-  1. TEAM_ROOM_TOKEN env var (a courier system-user token; for CI, cloud
-     sandboxes, or anyone preferring a static key)
-  2. ~/.config/team-room/token file (same token, stored locally)
-  3. ~/.config/team-room/credentials.json (browser-login session from
-     `room_post.py login`); refresh is single-flight via a file lock so
-     parallel sessions cannot race the rotating refresh token.
-The archagent CLI's login is never read or touched.
+Setup:
+  room-post login                 one browser click: signs you in AND finds
+                                  your team room automatically. Once per machine.
+  room-post login <mirror>        connect a mirror tier listed in room.json
+  room-post discover              re-find and save your room (if already signed in)
+  room-post doctor                check config, auth, and search — each with its fix
+  room-post init --config <file>  point at a specific room (self-host / non-prod)
+
+Auth, in order: a TEAM_ROOM_TOKEN env var or ~/.config/team-room/token
+(a static courier token, for CI and scripts), otherwise the browser-login
+session in ~/.config/team-room/credentials.json. Member-scoped reads prefer
+the login; refresh is single-flight via a file lock so parallel sessions
+cannot race the rotating refresh token.
 """
 
 import base64
@@ -52,6 +47,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 # Room identity (room.json) is resolved in order, so the SAME script works
@@ -171,9 +167,8 @@ _ROOM_CFG = {} if (_soft and _room_config_path() is None) else _room_config()
 THREAD_ID = _ROOM_CFG.get("thread_id", "")
 ROOM_SOURCE_ID = _ROOM_CFG.get("source_id") or ""
 ROOM_TEAM_ID = _ROOM_CFG.get("team_id", "")
-PRESENCE_SCHEMA = "team-presence"
 PRODUCTION_SERVER = _ROOM_CFG.get("server", "")
-KIT_VERSION = "2026.07.22"
+KIT_VERSION = "2026.07.24"
 ROOM_APP_NAME = "ArchAgents"
 MAX_HEADLINE = 300
 EXPIRY_SKEW_SECONDS = 60
@@ -213,15 +208,6 @@ ROOM_TOKEN_PATH = os.path.expanduser("~/.config/team-room/token")
 ROOM_LOCK_PATH = os.path.expanduser("~/.config/team-room/.lock")
 IDENTITY_CACHE_PATH = os.path.expanduser("~/.config/team-room/identity.json")
 
-# Machine tier: a copy of this kit outside any repo, for repos that must
-# not carry room config in their tree (open-source). Which repos may use
-# it lives in one plain-text file, one absolute repo path per line.
-MACHINE_KIT_DIR = os.path.expanduser("~/.archastro/agent-rooms")
-MACHINE_REGISTRY = os.path.join(MACHINE_KIT_DIR, "subscribed-repos")
-# Pre-spinout installs kept their registry under ~/.archastro/team-room;
-# honor it so upgrading doesn't silently unsubscribe anyone's repos.
-LEGACY_REGISTRY = os.path.expanduser("~/.archastro/team-room/subscribed-repos")
-MACHINE_SHIM_PATH = os.path.expanduser("~/.local/bin/room-post")
 
 # Mirrors: optional extra rooms (other deployment tiers) that receive a
 # best-effort COPY of every post. The prod room is the room; a mirror
@@ -257,114 +243,6 @@ def git(*args: str) -> str:
         return ""
 
 
-def _repo_top() -> str:
-    """Toplevel of the git repo the caller is standing in ('' outside one)."""
-    return git("rev-parse", "--show-toplevel")
-
-
-def _subscriptions() -> set:
-    subs = set()
-    for path in (MACHINE_REGISTRY, LEGACY_REGISTRY):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                subs |= {line.strip() for line in f if line.strip()}
-        except OSError:
-            pass
-    return subs
-
-
-def enforce_membership():
-    """Joining a repo to the room is an intentional HUMAN act. Three ways
-    in: the kit is committed in the repo's tree, a human ran `subscribe`
-    inside the repo, or an explicit TEAM_ROOM_TOKEN is set (CI/scripts —
-    someone configured that credential on purpose). Anything else is
-    refused: a machine-level install must never quietly enroll every
-    repo on the machine."""
-    if os.environ.get("TEAM_ROOM_TOKEN", "").strip():
-        return  # courier token in env: CI/scripts, configured on purpose
-    top = _repo_top()
-    here = os.path.dirname(os.path.abspath(__file__))
-    if top and here != MACHINE_KIT_DIR and (
-        here == top or here.startswith(top + os.sep)
-    ):
-        return  # this very script is committed in the repo's tree
-    if top and os.path.exists(os.path.join(top, "scripts", "room-post")):
-        return  # repo carries the kit; caller came via the machine shim
-    if top and top in _subscriptions():
-        return  # machine tier: a human subscribed this repo
-    print(
-        f"room_post: not subscribed to the Team Room "
-        f"({top or 'not inside a git repo'}).\n"
-        "Subscribing a repo is an intentional choice a human makes: run\n"
-        "  room-post subscribe\n"
-        "in the repo root. Agents: never subscribe on your own — tell your\n"
-        "human and continue without the room.",
-        file=sys.stderr,
-    )
-    sys.exit(3)
-
-
-def subscribe_repo():
-    top = _repo_top()
-    if not top:
-        die("not inside a git repo", 3)
-    if top not in _subscriptions():
-        os.makedirs(MACHINE_KIT_DIR, exist_ok=True)
-        with open(MACHINE_REGISTRY, "a", encoding="utf-8") as f:
-            f.write(top + "\n")
-    print(f"subscribed to the Team Room: {top}")
-    print("(undo with: room-post unsubscribe)")
-
-
-def unsubscribe_repo():
-    top = _repo_top()
-    if not top:
-        die("not inside a git repo", 3)
-    remaining = sorted(_subscriptions() - {top})
-    os.makedirs(MACHINE_KIT_DIR, exist_ok=True)
-    with open(MACHINE_REGISTRY, "w", encoding="utf-8") as f:
-        f.writelines(s + "\n" for s in remaining)
-    print(f"unsubscribed: {top}")
-
-
-def list_subscriptions():
-    subs = sorted(_subscriptions())
-    print("\n".join(subs) if subs else "(no repos subscribed)")
-
-
-def setup_machine():
-    """Copy this kit to ~/.archastro/team-room and put a `room-post` shim
-    on PATH. Plumbing only: no repo is subscribed by this command."""
-    import shutil
-
-    src = os.path.dirname(os.path.abspath(__file__))
-    if os.path.abspath(src) == os.path.abspath(MACHINE_KIT_DIR):
-        die("run setup-machine from a repo checkout of the kit, "
-            "not from the machine copy it maintains")
-    os.makedirs(MACHINE_KIT_DIR, exist_ok=True)
-    for name in ("room_post.py", "room.json", "SKILL.md",
-                 "team-presence-schema.yaml", "team-record-schema.yaml"):
-        if os.path.exists(os.path.join(src, name)):
-            shutil.copy2(os.path.join(src, name),
-                         os.path.join(MACHINE_KIT_DIR, name))
-    os.makedirs(os.path.dirname(MACHINE_SHIM_PATH), exist_ok=True)
-    with open(MACHINE_SHIM_PATH, "w", encoding="utf-8") as f:
-        f.write(
-            "#!/usr/bin/env bash\n"
-            "# Team Room machine shim, written by room_post.py setup-machine.\n"
-            "# Kit + config live in ~/.archastro/team-room so repos that must\n"
-            "# not carry room config (open-source) can join by subscription.\n"
-            'exec python3 "$HOME/.archastro/team-room/room_post.py" "$@"\n'
-        )
-    os.chmod(MACHINE_SHIM_PATH, 0o755)
-    print(f"machine kit installed: {MACHINE_KIT_DIR} (kit {KIT_VERSION})")
-    print(f"shim on PATH: {MACHINE_SHIM_PATH}")
-    print()
-    print("No repo was subscribed. A human opts a repo in by running")
-    print("`room-post subscribe` inside it. For agent sessions to discover")
-    print("the room in repos that don't carry the kit, add the Team Room")
-    print("section to your harness's global instructions — see 'The machine")
-    print("tier' in SKILL.md.")
 
 
 def parse_args(argv):
@@ -460,10 +338,15 @@ def worktree_short() -> str:
     if not top:
         return ""
     wt = os.path.basename(top)
-    short = wt[len("firstlanding-"):] if wt.startswith("firstlanding-") else wt
     common = git("rev-parse", "--git-common-dir")
     repo_base = os.path.basename(common.split("/.git")[0]) if common else ""
-    if short == wt and wt == (repo_base or wt):
+    # Worktrees are usually named "<repo>-<tag>"; show just the tag. The prefix
+    # is derived from this repo's own name, never hardcoded, so it works in any
+    # repo. The primary checkout (name == repo) shows as "main".
+    short = wt
+    if repo_base and wt.startswith(repo_base + "-"):
+        short = wt[len(repo_base) + 1:]
+    elif not repo_base or wt == repo_base:
         short = "main"
     return short
 
@@ -651,7 +534,9 @@ def read(limit: int = 30):
             session = refresh_session(creds, key, creds_path)
             resp = http_json(url, token=session["accessToken"])
         elif e.code == 401:
-            die("room token rejected (revoked or expired); get a new one", 3)
+            die("your room credential was rejected (revoked or expired). "
+            "Reconnect with `room-post login`; for a courier token, "
+            "mint a fresh one.", 3)
         else:
             die(f"read failed ({e.code}): {e.read().decode()[:200]}")
     msgs = resp.get("data") or resp.get("messages") or []
@@ -722,10 +607,10 @@ def load_session():
         return creds, key, ROOM_CREDS_PATH
     except Exception:
         die(
-            "the Team Room has no login on this machine yet. Run once "
-            "(opens your browser for one click; separate from any archagent "
-            "CLI login):\n  room-post login\nUntil then, "
-            "continuing without coordination.",
+            "not connected to a team room yet. One browser click sets it up:\n"
+            "  room-post login\n"
+            "It signs you in and finds your team room automatically — nothing "
+            "to paste.",
             3,
         )
 
@@ -759,14 +644,16 @@ def _refresh_session_locked(creds, key, creds_path, server=None):
     session = creds["orgSessions"][key]
     refresh_token = session.get("refreshToken")
     if not refresh_token:
-        die("session expired and holds no refresh token; run `archagent auth login`", 3)
+        die("your room login expired and has no refresh token. "
+            "Reconnect with:\n  room-post login", 3)
     try:
         tokens = http_json(
             f"{server or PRODUCTION_SERVER}/api/v1/auth/refresh/keyless",
             {"refresh_token": refresh_token},
         )
     except urllib.error.HTTPError as e:
-        die(f"token refresh rejected ({e.code}); run `archagent auth login`", 3)
+        die(f"room login refresh rejected ({e.code}). Reconnect with:\n"
+            "  room-post login", 3)
     session["accessToken"] = tokens["access_token"]
     # Org refresh tokens ROTATE. Persisting the new one is mandatory or the
     # CLI's next refresh fails with the consumed token.
@@ -808,37 +695,52 @@ def resolve_room_source(session, persist: bool = True) -> str | None:
         if not body.get("has_next"):
             break
         page += 1
-    sid = _pick_room_source(matches)
-    if sid and persist:
-        cfg_path = _room_config_path()
-        if cfg_path:
-            try:
-                cfg = json.load(open(cfg_path))
-                if cfg.get("source_id") != sid:
-                    cfg["source_id"] = sid
-                    json.dump(cfg, open(cfg_path, "w"), indent=2)
-            except Exception:
-                pass
+    sid, team_owned = _pick_room_source(matches)
+    # Persist the resolved source so it doesn't re-resolve every call — but
+    # ONLY a team-owned source (an agent-owned one works for its owner and
+    # would 500 for everyone else, so never make it sticky), and ONLY into the
+    # machine config we own (~/.config). Never write a room.json committed
+    # beside the script or pointed at by ROOM_JSON: a plain read must never
+    # dirty a tracked file or risk being committed by accident.
+    if sid and team_owned and persist and _room_config_path() == ROOM_CONFIG_PATH:
+        try:
+            cfg = json.load(open(ROOM_CONFIG_PATH))
+            if cfg.get("source_id") != sid:
+                cfg["source_id"] = sid
+                json.dump(cfg, open(ROOM_CONFIG_PATH, "w"), indent=2)
+        except Exception:
+            pass
     return sid
 
 
-def _pick_room_source(matches: list) -> str | None:
-    """The row searchable by EVERY member: team-owned (no agent/user owner),
-    on our team when the config knows the team id. Agent-owned sources come
-    and go with team membership and are only visible near their owner, so
-    pinning one breaks search for everyone else. Falls back to the newest
-    match so a room without ownership fields keeps resolving."""
-    def team_owned(s):
-        owner_free = not (s.get("agent") or s.get("agent_user_id")
-                          or s.get("user") or s.get("user_id"))
-        team = s.get("team") or s.get("team_id")
-        on_team = team == ROOM_TEAM_ID if ROOM_TEAM_ID else bool(team)
-        return owner_free and on_team
+def _pick_room_source(matches: list):
+    """Pick the source searchable by EVERY member and say whether it's the
+    team-owned one. Returns (source_id, is_team_owned).
 
-    for s in matches:
-        if team_owned(s):
-            return s["id"]
-    return matches[0]["id"] if matches else None
+    A thread carries the team-owned thread/messages self-index plus, sometimes,
+    per-agent installation sources. Only the team-owned row (no agent/user
+    owner) is visible to every member; an agent-owned source resolves fine for
+    its owner and 500s for everyone else. Prefer the team-owned row. If none of
+    the sources carries ownership fields at all (a differently-shaped or
+    self-hosted API), the distinction doesn't apply, so the newest match is a
+    safe pick and still counts as shareable."""
+    def owner(s):
+        return (s.get("agent") or s.get("agent_user_id")
+                or s.get("user") or s.get("user_id"))
+
+    def on_team(s):
+        team = s.get("team") or s.get("team_id")
+        return team == ROOM_TEAM_ID if ROOM_TEAM_ID else bool(team)
+
+    for s in matches:                       # team-owned and on our team
+        if not owner(s) and on_team(s):
+            return s["id"], True
+    for s in matches:                       # owner-free, no team field to match
+        if not owner(s):
+            return s["id"], True
+    if matches and not any(owner(s) for s in matches):
+        return matches[0]["id"], True       # nothing is owner-scoped: shape n/a
+    return (matches[0]["id"] if matches else None), False  # all owner-scoped
 
 
 def search_items(session, query: str, max_results: int = 8) -> list:
@@ -887,7 +789,9 @@ def search(query: str):
             session = refresh_session(creds, key, creds_path)
             items = search_items(session, query)
         elif e.code == 401:
-            die("room token rejected (revoked or expired); get a new one", 3)
+            die("your room credential was rejected (revoked or expired). "
+            "Reconnect with `room-post login`; for a courier token, "
+            "mint a fresh one.", 3)
         else:
             die(f"search failed ({e.code}): {e.read().decode()[:200]}")
     except RuntimeError as e:
@@ -1015,46 +919,6 @@ def discover_and_configure(token: str, chosen_team: str | None = None):
     print("you're in several team rooms — pick one and re-run:")
     for name, tid, _ in rooms:
         print(f"  room-post discover --team {tid}   # {name}")
-
-
-def upsert_presence(session, post_type: str, headline: str):
-    """One living row per human/worktree, refreshed by every post.
-    Best-effort: presence must never break posting."""
-    short = worktree_short()
-    if not short:
-        return
-    fields = {
-        "scope_id": f"{human_name().lower()}/{short}",
-        "human": human_name(),
-        "worktree": short,
-        "branch": git("branch", "--show-current"),
-        "intent": headline[:200],
-        "last_post_type": post_type,
-    }
-    token = session["accessToken"]
-    q = f"?schema_key={PRESENCE_SCHEMA}&row_key={urllib.parse.quote(fields['scope_id'], safe='')}"
-    existing = http_get(objects_url(session, q), token).get("data") or []
-    if existing:
-        req = urllib.request.Request(
-            objects_url(session, f"/{existing[0]['id']}"),
-            data=json.dumps({"fields": fields}).encode(),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {token}",
-            },
-            method="PUT",
-        )
-        with urllib.request.urlopen(req, timeout=30):
-            pass
-    else:
-        http_json(
-            objects_url(session),
-            {"schema_key": PRESENCE_SCHEMA, "fields": fields, "team": ROOM_TEAM_ID},
-            token=token,
-        )
-
-
-RECORD_SCHEMA = "team-record"
 
 
 def fetch_records(session, status=None, kind=None):
@@ -1214,135 +1078,6 @@ def age(updated_at: str) -> str:
     return f"{mins // (24 * 60)}d"
 
 
-def board():
-    creds, key, creds_path, session = authed_session()
-    q = f"?schema_key={PRESENCE_SCHEMA}&team={ROOM_TEAM_ID}&page_size=50"
-    rows = http_get(objects_url(session, q), session["accessToken"]).get("data") or []
-    if not rows:
-        print("(no presence rows yet)")
-        return
-    rows.sort(key=lambda r: r.get("updated_at") or "", reverse=True)
-    for r in rows:
-        f = r.get("fields") or {}
-        marker = PREFIXES.get(f.get("last_post_type") or "", "·")
-        print(
-            f"{f.get('human')} ({f.get('worktree')}) · {f.get('branch')} · "
-            f"{age(r.get('updated_at') or '')} ago · {marker} {f.get('intent')}"
-        )
-
-
-# Branch-prefix, date, and filler noise that shouldn't drive area overlap.
-_AREA_STOP = {
-    "the", "and", "for", "with", "from", "into", "out", "not", "now",
-    "fix", "feat", "chore", "wip", "test", "tests", "docs", "add", "adds",
-    "adding", "added", "update", "updates", "new", "work", "working", "use",
-    "using", "make", "makes", "made", "run", "runs", "get", "gets", "set",
-    "via", "per", "all", "any", "one", "two", "this", "that", "team", "room",
-    "post", "posts", "agent", "agents", "session", "sessions", "2026", "pr",
-}
-
-
-def _area_keywords(text: str) -> set:
-    """Meaningful lowercase tokens for overlap matching, so a branch like
-    `fix/thread-knowledge-source` and an intent `thread knowledge-source
-    lifecycle` line up on {thread, knowledge, source, lifecycle}."""
-    import re
-
-    toks = re.split(r"[^a-z0-9]+", (text or "").lower())
-    return {t for t in toks if len(t) > 2 and t not in _AREA_STOP}
-
-
-def near(topic: str | None = None):
-    """Situational awareness before you touch an area: who's working near
-    it right now, active warnings that touch it, and known team gotchas.
-    Surfaces only what overlaps your topic — silence means clear. Run this
-    before starting on an unfamiliar subsystem."""
-    import re
-
-    _, _, _, session = read_session()
-    if not topic:
-        topic = git("branch", "--show-current") or ""
-    kw = _area_keywords(topic)
-    if not kw:
-        die('say what you are about to work on: room-post near "<area/topic>"')
-
-    def ov(text):
-        return len(kw & _area_keywords(text))
-
-    me_first = (human_name() or "").split(" ")[0].lower()
-    my_wt = worktree_short()
-
-    # 1) Collisions: live presence rows on an overlapping area (not my own).
-    q = f"?schema_key={PRESENCE_SCHEMA}&team={ROOM_TEAM_ID}&page_size=50"
-    prows = http_get(objects_url(session, q), session["accessToken"]).get("data") or []
-    collisions = []
-    for r in prows:
-        f = r.get("fields") or {}
-        human = f.get("human") or ""
-        if human.split(" ")[0].lower() == me_first and f.get("worktree") == my_wt:
-            continue
-        s = ov(f.get("intent")) + ov(f.get("branch"))
-        if s:
-            collisions.append((s, human, f.get("worktree"), f.get("intent"),
-                               r.get("updated_at")))
-    collisions.sort(key=lambda x: (x[0], x[4] or ""), reverse=True)
-
-    # 2) What the room knows about this area — from the KNOWLEDGE INDEX, by
-    #    relevance, not a thread scan. This is the read that survives a
-    #    million-message thread: it stays O(query), and returns the most
-    #    relevant posts regardless of when they were written. Warnings
-    #    (⚠ lessons, P0/P1/incident) are pulled out; the rest is context.
-    warnings, context = [], []
-    try:
-        for it in search_items(session, topic, max_results=10):
-            c = (it.get("content") or it.get("text") or "").strip()
-            if not c:
-                continue
-            line = c.split("\n")[0][:160]
-            hot = c[:1] == "⚠" or re.search(
-                r"\bP[012]\b|incident|customer[- ]?(?:visible|channel)", c, re.I)
-            (warnings if hot else context).append(line)
-    except (Exception, SystemExit):
-        # Index unavailable (e.g. token, not a login session). Collisions and
-        # approved records still work; recall degrades, loudly on `doctor`.
-        pass
-
-    # 3) The approved distillate: a small, bounded, high-trust set of records
-    #    (custom objects, not the thread), always safe to scan.
-    known = []
-    for f in fetch_records(session, status="approved"):
-        s = ov(f.get("title")) + ov(f.get("body")) + ov(f.get("record_id"))
-        if s:
-            known.append((s, f.get("kind") or "note",
-                          f.get("title") or f.get("record_id") or ""))
-    known.sort(key=lambda x: x[0], reverse=True)
-
-    shown = False
-    if collisions:
-        shown = True
-        print("WORKING NEAR THIS NOW:")
-        for _, human, wt, intent, at in collisions[:5]:
-            print(f"  {human} ({wt}) · {age(at or '')} ago · {intent}")
-    if warnings:
-        shown = True
-        print("\nWARNINGS (from the room's knowledge):")
-        for line in warnings[:5]:
-            print(f"  {line}")
-    if known:
-        shown = True
-        print("\nKNOWN RULES (approved records):")
-        for _, kind, title in known[:5]:
-            print(f"  [{kind}] {title}")
-    if context:
-        shown = True
-        print("\nRELATED (what the room knows):")
-        for line in context[:5]:
-            print(f"  {line}")
-    if not shown:
-        print(f'clear — nobody working near "{topic}", nothing in the room\'s '
-              "knowledge that touches it.")
-
-
 def post(message: str, metadata: dict | None = None, uploads: list | None = None):
     creds, key, creds_path, session = authed_session()
     url = (
@@ -1361,7 +1096,9 @@ def post(message: str, metadata: dict | None = None, uploads: list | None = None
             session = refresh_session(creds, key, creds_path)
             msg = http_json(url, body, token=session["accessToken"])
         elif e.code == 401:
-            die("room token rejected (revoked or expired); get a new one", 3)
+            die("your room credential was rejected (revoked or expired). "
+            "Reconnect with `room-post login`; for a courier token, "
+            "mint a fresh one.", 3)
         else:
             die(f"post failed ({e.code}): {e.read().decode()[:200]}")
     print(f"posted {msg.get('id', '(ok)')}")
@@ -1704,14 +1441,6 @@ def doctor():
     # running the kit from a repo checkout only. That covers this repo, but
     # not their other repos or their other harnesses. Surface the one-time
     # install so it's self-serve, never silent.
-    if not os.path.exists(MACHINE_SHIM_PATH):
-        print(
-            "note this machine has no machine-wide install (room-post is not on\n"
-            "     your PATH). To use the room from any repo and wire every harness\n"
-            "     you have, run once from a repo that carries the kit:\n"
-            "       npx github:ArchAstro/agent-rooms --machine\n"
-            "     (repos stay opt-in; you subscribe each one yourself.)"
-        )
 
     # 1. config
     print(f"ok  room.json: thread {THREAD_ID} on {PRODUCTION_SERVER}")
@@ -1851,23 +1580,9 @@ def main():
             die("sign in first: room-post login", 3)
         discover_and_configure(tok, chosen_team=team)
         return
-    if cmd == "subscribe":
-        subscribe_repo()
+    if cmd in ("--help", "-h", "help", ""):
+        print((__doc__ or "").strip())
         return
-    if cmd == "unsubscribe":
-        unsubscribe_repo()
-        return
-    if cmd == "repos":
-        list_subscriptions()
-        return
-    if cmd == "setup-machine":
-        setup_machine()
-        return
-    # Everything that touches the room is membership-gated. login and
-    # doctor stay open: you must be able to authenticate and diagnose
-    # from anywhere.
-    if cmd not in ("login", "doctor"):
-        enforce_membership()
     if len(sys.argv) > 1 and sys.argv[1] == "login":
         name = sys.argv[2] if len(sys.argv) > 2 else None
         if name:
@@ -1878,12 +1593,6 @@ def main():
             login(m)
         else:
             login()
-        return
-    if len(sys.argv) > 1 and sys.argv[1] == "board":
-        board()
-        return
-    if len(sys.argv) > 1 and sys.argv[1] == "near":
-        near(sys.argv[2] if len(sys.argv) > 2 else None)
         return
     if len(sys.argv) > 1 and sys.argv[1] == "read":
         read(int(sys.argv[2]) if len(sys.argv) > 2 else 30)
@@ -1973,10 +1682,6 @@ def main():
             print("metadata: " + json.dumps(metadata, indent=2))
         return
     session = post(message, metadata, uploads)
-    try:
-        upsert_presence(session, post_type, framed_headline(post_type, headline))
-    except Exception:
-        pass  # presence is best-effort; the post already succeeded
     mirror_fanout(message, metadata, uploads)
 
 
