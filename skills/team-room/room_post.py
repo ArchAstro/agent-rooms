@@ -784,10 +784,17 @@ def _refresh_session_locked(creds, key, creds_path, server=None):
 def resolve_room_source(session, persist: bool = True) -> str | None:
     """Find the room thread's live knowledge source id. Threads self-index
     into a context source; this locates the one bound to our thread so a
-    stale or missing source_id can't silently break search. Repairs the
-    stored config when it resolves, so the fix sticks."""
+    stale or missing source_id can't silently break search.
+
+    A thread can carry SEVERAL sources: the team-owned thread/messages
+    self-index plus per-agent installation sources. Only the team-owned one
+    is searchable by every member — an agent-owned source resolves fine
+    under a privileged credential and then fails for everyone else (a
+    PrivacyError surfaced as a 500). So all matches are collected and
+    `_pick_room_source` prefers the team-owned row. Repairs the stored
+    config when it resolves, so the fix sticks."""
     app, tok = session["appId"], session["accessToken"]
-    page = 1
+    matches, page = [], 1
     while page <= 8:
         path = (f"{PRODUCTION_SERVER}/protected/api/v1/developer/apps/{app}"
                 f"/context/sources?page_size=50&page={page}")
@@ -797,22 +804,41 @@ def resolve_room_source(session, persist: bool = True) -> str | None:
             return None
         for s in body.get("data") or []:
             if (s.get("thread_id") or s.get("thread")) == THREAD_ID and s.get("id"):
-                sid = s["id"]
-                if persist:
-                    cfg_path = _room_config_path()
-                    if cfg_path:
-                        try:
-                            cfg = json.load(open(cfg_path))
-                            if cfg.get("source_id") != sid:
-                                cfg["source_id"] = sid
-                                json.dump(cfg, open(cfg_path, "w"), indent=2)
-                        except Exception:
-                            pass
-                return sid
+                matches.append(s)
         if not body.get("has_next"):
             break
         page += 1
-    return None
+    sid = _pick_room_source(matches)
+    if sid and persist:
+        cfg_path = _room_config_path()
+        if cfg_path:
+            try:
+                cfg = json.load(open(cfg_path))
+                if cfg.get("source_id") != sid:
+                    cfg["source_id"] = sid
+                    json.dump(cfg, open(cfg_path, "w"), indent=2)
+            except Exception:
+                pass
+    return sid
+
+
+def _pick_room_source(matches: list) -> str | None:
+    """The row searchable by EVERY member: team-owned (no agent/user owner),
+    on our team when the config knows the team id. Agent-owned sources come
+    and go with team membership and are only visible near their owner, so
+    pinning one breaks search for everyone else. Falls back to the newest
+    match so a room without ownership fields keeps resolving."""
+    def team_owned(s):
+        owner_free = not (s.get("agent") or s.get("agent_user_id")
+                          or s.get("user") or s.get("user_id"))
+        team = s.get("team") or s.get("team_id")
+        on_team = team == ROOM_TEAM_ID if ROOM_TEAM_ID else bool(team)
+        return owner_free and on_team
+
+    for s in matches:
+        if team_owned(s):
+            return s["id"]
+    return matches[0]["id"] if matches else None
 
 
 def search_items(session, query: str, max_results: int = 8) -> list:
@@ -834,7 +860,12 @@ def search_items(session, query: str, max_results: int = 8) -> list:
     try:
         resp = do(src)
     except urllib.error.HTTPError as e:
-        if e.code in (403, 404) and not session.get("static"):
+        # 500 is a resolve trigger too: the platform answers an
+        # existing-but-invisible source with a privacy raise (500), not
+        # 404, so a stale pinned id looks like a server error. Re-resolve
+        # once; a genuine server fault re-raises when the id comes back
+        # unchanged.
+        if e.code in (403, 404, 500) and not session.get("static"):
             fresh = resolve_room_source(session)
             if fresh and fresh != src:
                 resp = do(fresh)
