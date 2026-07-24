@@ -850,7 +850,7 @@ def http_get(url: str, token: str) -> dict:
     req = urllib.request.Request(
         url, headers={"Authorization": f"Bearer {token}"}
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with urllib.request.urlopen(req, timeout=8) as resp:
         return json.load(resp)
 
 
@@ -886,7 +886,7 @@ def discover_rooms(server: str, token: str, pub_key: str) -> list:
             f"{server}{path}",
             headers={"Authorization": f"Bearer {token}",
                      "x-archastro-api-key": pub_key})
-        with urllib.request.urlopen(req, timeout=20) as r:
+        with urllib.request.urlopen(req, timeout=8) as r:
             return json.load(r)
 
     rooms = []
@@ -1039,7 +1039,7 @@ def _patch_record(session, object_id, fields):
                  "Authorization": f"Bearer {session['accessToken']}"},
         method="PUT",
     )
-    with urllib.request.urlopen(req, timeout=30):
+    with urllib.request.urlopen(req, timeout=8):
         pass
 
 
@@ -1456,7 +1456,7 @@ def read_raw(limit: int = 30, session=None):
             "x-archastro-api-key": _ROOM_CFG["publishable_key"],
         },
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with urllib.request.urlopen(req, timeout=8) as resp:
         data = json.load(resp)
     rows = data.get("data")
     if isinstance(rows, dict):
@@ -1719,5 +1719,52 @@ def main():
     mirror_fanout(message, metadata, uploads)
 
 
+# Commands that must NEVER interrupt a developer's session. `doctor` is
+# excluded on purpose: it is the diagnostic, so it reports honestly and
+# returns a real exit code.
+_NEVER_BLOCK = {"search", "brief", "read", "records", "inbox", "discover",
+                "start", "done", "lesson", "handoff", "question", "abandoned",
+                "notify", "approve", "accept"}
+
+
+def _run_never_blocking():
+    """The room is additive, never blocking.
+
+    If the room is down, slow, unauthenticated, or broken, the session must
+    carry on exactly as if the room did not exist. We exit 0 even on failure,
+    because a non-zero exit invites the agent to treat the room as a task it
+    must fix — which is the one thing the room must never cause. The message
+    says so explicitly, so a coding agent reads it and moves on instead of
+    debugging us. Writes still say loudly that the post did not land (a lost
+    post is worth knowing about); they just don't derail the session.
+    """
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd not in _NEVER_BLOCK:
+        main()
+        return
+    is_write = cmd not in {"search", "brief", "read", "records", "inbox", "discover"}
+    try:
+        main()
+    except SystemExit as e:
+        if e.code in (0, None):
+            raise
+        what = ("your post did NOT land" if is_write
+                else "couldn't reach the room's knowledge")
+        print(f"\nroom: {what}. Continuing without the room — this is NOT a "
+              "problem for you to fix, and not a reason to retry, debug, or "
+              "pause your work. Mention it to your human once and carry on.",
+              file=sys.stderr)
+        sys.exit(0)
+    except KeyboardInterrupt:
+        raise
+    except Exception:
+        what = ("your post did NOT land" if is_write
+                else "couldn't reach the room's knowledge")
+        print(f"\nroom: {what}. Continuing without the room — this is NOT a "
+              "problem for you to fix. Carry on with your task.",
+              file=sys.stderr)
+        sys.exit(0)
+
+
 if __name__ == "__main__":
-    main()
+    _run_never_blocking()
