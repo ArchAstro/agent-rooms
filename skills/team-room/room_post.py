@@ -817,11 +817,15 @@ def search_items(session, query: str, max_results: int = 8) -> list:
 def search(query: str):
     creds, key, creds_path, session = read_session()
     try:
-        items = search_items(session, query)
+        # Over-fetch: most of what the index returns is conversation about the
+        # work (resident replies, task filings), not knowledge from it. Pull a
+        # wide candidate set so ranking has real lessons to promote instead of
+        # eight slots of chatter, then trim to what's worth reading.
+        items = search_items(session, query, max_results=30)
     except urllib.error.HTTPError as e:
         if e.code == 401 and not session.get("static"):
             session = refresh_session(creds, key, creds_path)
-            items = search_items(session, query)
+            items = search_items(session, query, max_results=30)
         elif e.code == 401:
             die("your room credential was rejected (revoked or expired). "
             "Reconnect with `room-post login`; for a courier token, "
@@ -830,13 +834,73 @@ def search(query: str):
             die(f"search failed ({e.code}): {e.read().decode()[:200]}")
     except RuntimeError as e:
         die(str(e), 3)
+    render_hits(items, query)
+
+
+# What a hit is worth to someone about to do work. A dead end and a hard-won
+# lesson prevent rework; a status line almost never does. Anything without our
+# structured exhaust (resident-agent chatter, notifications, task filings) is
+# conversation about the work rather than knowledge from it, so it sorts last.
+_HIT_VALUE = {"lesson": 0, "abandoned": 1, "question": 2, "handoff": 3,
+              "done": 5, "start": 6, "notify": 7}
+_GLYPH = {"lesson": "⚠", "abandoned": "✗", "question": "?", "handoff": "→",
+          "done": "✓", "start": "▶", "notify": "🔔"}
+
+
+def hit_facets(item: dict) -> dict:
+    """The kit's structured exhaust for a search hit. The index keeps the full
+    message in raw_content, so post_type/areas/human ride along and no second
+    round trip is needed."""
+    raw = item.get("raw_content")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = None
+    return ((raw or {}).get("metadata") or {}) if isinstance(raw, dict) else {}
+
+
+def render_hits(items: list, query: str = ""):
+    """Print hits ranked by what actually prevents rework, and say WHY each one
+    is here. Semantic similarity alone buries one real lesson under six status
+    posts; ordering by post type and area overlap puts the lesson on top."""
     if not items:
-        print("(no results)")
-    for it in items:
-        content = (it.get("content") or it.get("text") or "").strip()
-        print(f"--- {it.get('id', '')} ---")
-        print(content[:600])
+        print("(nothing in the room about this — you're clear to proceed)")
+        return
+    kw = _area_tokens(query)
+    scored = []
+    for i, it in enumerate(items):
+        md = hit_facets(it)
+        ptype = md.get("post_type")
+        areas = md.get("areas") or []
+        overlap = len(kw & _area_tokens(" ".join(areas))) if kw else 0
+        scored.append(((_HIT_VALUE.get(ptype, 9), -overlap, i), it, md))
+    scored.sort(key=lambda t: t[0])
+    # Show every real trace, but only a taste of the chatter — a wall of status
+    # posts is what made agents stop reading results in the first place.
+    keep = [x for x in scored if x[0][0] < 5][:8] + [x for x in scored if x[0][0] >= 5][:2]
+
+    shown_divider = False
+    for (rank, _, _), it, md in keep:
+        ptype = md.get("post_type")
+        if rank >= 5 and not shown_divider:
+            print("--- below: status and chatter, rarely worth reading ---\n")
+            shown_divider = True
+        who = md.get("human") or ""
+        areas = ", ".join((md.get("areas") or [])[:3])
+        tag = f"{_GLYPH.get(ptype, '·')} {ptype or 'note'}"
+        head = f"{tag}" + (f" · {who}" if who else "") + (f" · {areas}" if areas else "")
+        print(f"--- {head} ---")
+        print((it.get("content") or it.get("text") or "").strip()[:600])
         print()
+
+
+def _area_tokens(text: str) -> set:
+    import re
+    stop = {"the", "and", "for", "with", "from", "this", "that", "src", "lib",
+            "app", "apps", "services", "core", "test", "tests"}
+    return {t for t in re.findall(r"[a-z0-9]{3,}", (text or "").lower())
+            if t not in stop}
 
 
 def objects_url(session, suffix=""):
