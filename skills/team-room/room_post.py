@@ -167,6 +167,7 @@ _ROOM_CFG = {} if (_soft and _room_config_path() is None) else _room_config()
 THREAD_ID = _ROOM_CFG.get("thread_id", "")
 ROOM_SOURCE_ID = _ROOM_CFG.get("source_id") or ""
 ROOM_TEAM_ID = _ROOM_CFG.get("team_id", "")
+RECORD_SCHEMA = "team-record"   # custom-object schema key for team records
 PRODUCTION_SERVER = _ROOM_CFG.get("server", "")
 KIT_VERSION = "2026.07.24"
 ROOM_APP_NAME = "ArchAgents"
