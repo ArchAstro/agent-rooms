@@ -42,6 +42,7 @@ import base64
 import json
 import mimetypes
 import os
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -49,6 +50,38 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+
+def configure_ca_bundle():
+    """Give standalone Python installs a usable system certificate bundle.
+
+    The python.org macOS installer can report a default OpenSSL cafile that
+    does not exist until its separate certificate-install script has run.
+    Respect explicit operator configuration first, then fall back to common
+    OS-managed bundles. Setting SSL_CERT_FILE keeps every urllib call in this
+    self-contained client on the same verified TLS configuration.
+    """
+    if os.environ.get("SSL_CERT_FILE") or os.environ.get("SSL_CERT_DIR"):
+        return
+
+    defaults = ssl.get_default_verify_paths()
+    if defaults.cafile and os.path.isfile(defaults.cafile):
+        return
+
+    candidates = (
+        "/etc/ssl/cert.pem",
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+        "/opt/homebrew/etc/openssl@3/cert.pem",
+        "/usr/local/etc/openssl@3/cert.pem",
+    )
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            os.environ["SSL_CERT_FILE"] = candidate
+            return
+
+
+configure_ca_bundle()
 
 # Room identity (room.json) is resolved in order, so the SAME script works
 # whether it's committed inside a repo or installed as a generic public
