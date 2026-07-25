@@ -482,21 +482,18 @@ def _with_session_lock(fn):
     os.makedirs(os.path.dirname(SESSION_STATE_PATH), exist_ok=True)
     os.chmod(os.path.dirname(SESSION_STATE_PATH), 0o700)
     lock_path = SESSION_STATE_PATH + ".lock"
-    # NEVER block a developer for bookkeeping. A blocking LOCK_EX hangs
-    # forever behind a wedged holder or a sick filesystem (NFS, FUSE), which
-    # would stall the command an agent is running. This state is a nudge
-    # cache: if we cannot get the lock in ~50ms, skipping the write costs
-    # nothing and stalling costs everything.
-    deadline = time.time() + 0.05
+    # NEVER wait for bookkeeping. One non-blocking attempt: if another process
+    # holds the lock, drop this write and return immediately. A blocking
+    # LOCK_EX would hang forever behind a wedged holder or a sick filesystem
+    # (NFS, FUSE) and stall the command an agent is running for a developer.
+    # Even a short retry window buys nothing here — this is a nudge cache, and
+    # a missed counter increment has no consequence, while any wait at all is
+    # latency in someone's hot path.
     with open(lock_path, "a") as lock:
-        while True:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except OSError:
-                if time.time() >= deadline:
-                    return
-                time.sleep(0.005)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return
         tmp = SESSION_STATE_PATH + f".tmp.{os.getpid()}.{threading.get_ident()}"
         try:
             all_s = _load_sessions()
