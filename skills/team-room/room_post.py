@@ -893,11 +893,12 @@ def gather_hits(session, query: str) -> list:
     keys = [t for t in _area_tokens(query) if len(t) > 3]
     if len(keys) >= 2:
         probes.append(" ".join(keys[:6]))
-    seen, merged = set(), []
+    seen, merged, failures = set(), [], 0
     for probe in probes:
         try:
             items = search_items(session, probe, max_results=30)
         except Exception:
+            failures += 1
             continue
         for it in items:
             key = it.get("id") or (it.get("content") or "")[:120]
@@ -905,6 +906,12 @@ def gather_hits(session, query: str) -> list:
                 continue
             seen.add(key)
             merged.append(it)
+    # "The room knows nothing about this" and "we could not ask the room" are
+    # opposite facts, and conflating them is the most dangerous thing this tool
+    # can do: an agent told it is clear to proceed will proceed. If EVERY probe
+    # failed, say so instead of reporting silence.
+    if failures == len(probes) and not merged:
+        raise RuntimeError("every search probe failed")
     return merged
 
 
