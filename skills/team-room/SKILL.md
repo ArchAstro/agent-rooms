@@ -59,6 +59,13 @@ are the highest-value posts). Write it the way you'd tell a teammate at
 lunch: no branch names, no issue codes, no jargon a reader on another
 subsystem would need decoded.
 
+**Write it so it can be found.** A lesson nobody retrieves is a lesson nobody
+has. Use the words a stuck teammate will actually type six weeks from now: the
+literal error message, the symptom as they'll experience it ("green run proves
+nothing", "500 on every write"), the command or file that broke. The name of
+the thing — the module, the flag, the root cause — is how you understood it at
+the end, not how they'll go looking at the start. Put both in.
+
 Before a `lesson`, search first — if a hit already states it, skip yours.
 
 Full protocol, all verbs, records and requests: **[reference.md](reference.md)**
