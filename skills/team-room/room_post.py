@@ -196,7 +196,27 @@ DEFAULT_PUBLISHABLE_KEY = "pk_dap_032Tk6YGrHp2cnyxwABnMS_Q6M9BsvOr8HKuIkLZNRWVTC
 # config eagerly and fails loud if it's missing.
 _SOFT_CONFIG_CMDS = {"init", "login", "discover", "--help", "-h", "help"}
 _soft = len(sys.argv) > 1 and sys.argv[1] in _SOFT_CONFIG_CMDS
-_ROOM_CFG = {} if (_soft and _room_config_path() is None) else _room_config()
+
+# Commands that must NEVER interrupt a developer's session, referenced both
+# here (missing config would otherwise exit non-zero during module load,
+# long before the exit-code wrapper at the bottom can catch it) and by that
+# wrapper.
+_NEVER_BLOCK = {"search", "brief", "read", "records", "inbox", "discover",
+                "start", "done", "lesson", "handoff", "question", "abandoned",
+                "notify", "approve", "accept"}
+
+try:
+    _ROOM_CFG = {} if (_soft and _room_config_path() is None) else _room_config()
+except SystemExit:
+    if len(sys.argv) > 1 and sys.argv[1] in _NEVER_BLOCK:
+        # The instructions for connecting were already printed by
+        # _room_config(); what matters here is the exit code — a non-zero
+        # exit invites the agent to treat the room as a task to fix.
+        print("\nroom: not connected — continuing without the room. This is "
+              "NOT a problem for you to fix; carry on with your task.",
+              file=sys.stderr)
+        sys.exit(0)
+    raise
 THREAD_ID = _ROOM_CFG.get("thread_id", "")
 ROOM_SOURCE_ID = _ROOM_CFG.get("source_id") or ""
 ROOM_TEAM_ID = _ROOM_CFG.get("team_id", "")
@@ -836,13 +856,13 @@ def refresh_session(creds, key, creds_path, server=None, lock_path=None):
     # plenty for a real refresh (one HTTP round trip); after that, fail the
     # ROOM command softly — the developer's session must not inherit our
     # deadlock.
-    deadline = time.time() + 10
+    deadline = time.monotonic() + 10
     while True:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             break
         except OSError:
-            if time.time() >= deadline:
+            if time.monotonic() >= deadline:
                 lock.close()
                 # One last read: whoever holds the lock may have finished.
                 try:
@@ -853,9 +873,11 @@ def refresh_session(creds, key, creds_path, server=None, lock_path=None):
                         return fs
                 except Exception:
                     pass
+                # Never advise deleting the lock file: unlinking it creates a
+                # new inode and lets two refreshes race a rotating token.
                 die("another room-post is holding the login lock and hasn't "
-                    "finished in 10s. Just retry; if it persists, delete "
-                    f"{lock_path}", 3)
+                    "finished in 10s. Just retry; if it persists, look for a "
+                    "stuck room-post process and kill it", 3)
             time.sleep(0.2)
     try:
         # Another process may have refreshed while we waited: re-read and
@@ -1186,7 +1208,8 @@ def objects_url(session, suffix=""):
 
 def http_get(url: str, token: str) -> dict:
     req = urllib.request.Request(
-        url, headers={"Authorization": f"Bearer {token}"}
+        url, headers={"Authorization": f"Bearer {token}",
+                      "User-Agent": f"room-post/{KIT_VERSION}"}
     )
     with urllib.request.urlopen(req, timeout=8) as resp:
         return json.load(resp)
@@ -1223,6 +1246,7 @@ def discover_rooms(server: str, token: str, pub_key: str) -> list:
         req = urllib.request.Request(
             f"{server}{path}",
             headers={"Authorization": f"Bearer {token}",
+                     "User-Agent": f"room-post/{KIT_VERSION}",
                      "x-archastro-api-key": pub_key})
         with urllib.request.urlopen(req, timeout=8) as r:
             return json.load(r)
@@ -1374,6 +1398,7 @@ def _patch_record(session, object_id, fields):
         objects_url(session, f"/{object_id}"),
         data=json.dumps({"fields": fields}).encode(),
         headers={"Content-Type": "application/json",
+                 "User-Agent": f"room-post/{KIT_VERSION}",
                  "Authorization": f"Bearer {session['accessToken']}"},
         method="PUT",
     )
@@ -1791,6 +1816,7 @@ def read_raw(limit: int = 30, session=None):
         url,
         headers={
             "Authorization": f"Bearer {session['accessToken']}",
+            "User-Agent": f"room-post/{KIT_VERSION}",
             "x-archastro-api-key": _ROOM_CFG["publishable_key"],
         },
     )
@@ -1806,6 +1832,18 @@ def doctor():
     """First-run diagnostics, read-only. Each check prints ok/FAIL with
     the fix, so 'it doesn't work' is self-serve instead of a support
     thread."""
+    # Count warn lines as they print, so the summary can't say "all good"
+    # over a page of warnings — that exact combination once hid a
+    # week-stale kit.
+    import builtins
+    _warns = []
+
+    def print(*args, **kw):  # shadows builtin for this function only
+        text = " ".join(str(a) for a in args)
+        if text.startswith("warn"):
+            _warns.append(text)
+        builtins.print(*args, **kw)
+
     print(f"room-post kit {KIT_VERSION}")
     ok = True
 
@@ -1959,7 +1997,13 @@ def doctor():
                   "pointing there runs frozen code. Re-run: "
                   "npx github:ArchAstro/agent-rooms --machine (it forwards it)")
 
-    print("doctor: all good" if ok else "doctor: fix the FAILs above")
+    if not ok:
+        print("doctor: fix the FAILs above")
+    elif _warns:
+        print(f"doctor: no failures, but {len(_warns)} warning(s) above are "
+              "worth acting on")
+    else:
+        print("doctor: all good")
     sys.exit(0 if ok else 4)
 
 
@@ -2094,11 +2138,6 @@ def main():
 # Commands that must NEVER interrupt a developer's session. `doctor` is
 # excluded on purpose: it is the diagnostic, so it reports honestly and
 # returns a real exit code.
-_NEVER_BLOCK = {"search", "brief", "read", "records", "inbox", "discover",
-                "start", "done", "lesson", "handoff", "question", "abandoned",
-                "notify", "approve", "accept"}
-
-
 def _run_never_blocking():
     """The room is additive, never blocking.
 
