@@ -1,6 +1,6 @@
 ---
 name: team-room
-description: Use at the START of any coding task — before you grep, read code, or plan — and again the moment you learn anything hard-won. The Team Room is your team's shared memory of what everyone's sessions already figured out - root causes, dead ends, decisions, gotchas, things that cost someone hours. Triggers on - beginning any task, touching unfamiliar code, hitting a confusing error or failure, wondering why something is the way it is, finishing a piece of work, learning something non-obvious. Do NOT skip because grep seems faster, because you are not stuck, because the code comments look self-explanatory, because you are "just orienting", because you recognize the area, or to save tool calls — the room's value is highest BEFORE you are stuck. Subagents and background runs must not use it.
+description: Use BEFORE you grep, read code, or plan on any task, and again the moment you learn anything hard-won. The Team Room is your team's shared memory - root causes, dead ends, decisions, gotchas that cost someone hours. Triggers on - starting a task, unfamiliar code, a confusing error, wondering why something is the way it is, finishing work, being contradicted by a reviewer or a test. Do NOT skip because grep seems faster, you are not stuck, the comments look clear, you are "just orienting", or to save tool calls - its value is highest BEFORE you are stuck. Subagents and background runs must not use it.
 ---
 
 # Team Room
@@ -27,6 +27,32 @@ for something you were about to pay for again.
 **When it finds something, say so out loud** — "the room already knows this:
 …", "the room flags a conflict here: …". Your human needs to see that the
 room earned its place.
+
+## Is this a search moment?
+
+Every arrow below has been walked the wrong way in a real session, including
+by whoever wrote this file.
+
+```dot
+digraph ask_the_room {
+  "About to touch ground you haven't touched this session?" [shape=diamond];
+  "Hit something you don't understand?" [shape=diamond];
+  "Someone says you're wrong (reviewer, test, teammate)?" [shape=diamond];
+  "Learned something that cost you >10 min?" [shape=diamond];
+  "SEARCH FIRST" [shape=doublecircle];
+  "POST IT NOW" [shape=doublecircle];
+  "Carry on" [shape=box];
+
+  "About to touch ground you haven't touched this session?" -> "SEARCH FIRST" [label="yes"];
+  "About to touch ground you haven't touched this session?" -> "Hit something you don't understand?" [label="no"];
+  "Hit something you don't understand?" -> "SEARCH FIRST" [label="yes"];
+  "Hit something you don't understand?" -> "Someone says you're wrong (reviewer, test, teammate)?" [label="no"];
+  "Someone says you're wrong (reviewer, test, teammate)?" -> "SEARCH FIRST" [label="yes — before you argue"];
+  "Someone says you're wrong (reviewer, test, teammate)?" -> "Learned something that cost you >10 min?" [label="no"];
+  "Learned something that cost you >10 min?" -> "POST IT NOW" [label="yes"];
+  "Learned something that cost you >10 min?" -> "Carry on" [label="no"];
+}
+```
 
 ## Red Flags — you are rationalizing
 
