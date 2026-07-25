@@ -13,7 +13,7 @@
 // vendor is safe to commit anywhere (even a public repo) and there's no
 // room.json to drift or leak. (--machine writes identity to ~/.config only.)
 
-import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, symlinkSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, symlinkSync, renameSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -26,6 +26,7 @@ const KIT_SRC = join(PKG_ROOT, "skills", "team-room");
 const KIT_FILES = [
   "room_post.py",
   "SKILL.md",
+  "reference.md", // SKILL.md links to it; omitting it made that a dead link
   "team-record-schema.yaml",
 ];
 const ROOM_KEYS = ["thread_id", "team_id", "server", "portal", "app_slug", "publishable_key"];
@@ -85,6 +86,7 @@ function loadRoomConfig(flags, fallbackPath) {
       return JSON.parse(readFileSync(inRepo, "utf8"));
     }
   }
+  if (flags.allowMissingIdentity) return null;
   fail(
     "no room identity given. Pass --config <room.json> or the flags\n" +
       `  ${ROOM_KEYS.map((k) => "--" + k.replaceAll("_", "-") + " <value>").join(" ")}\n` +
@@ -97,13 +99,30 @@ function upsertMarkedBlock(filePath, block) {
   const wrapped = `${MARK_START}\n${block}\n${MARK_END}`;
   const start = text.indexOf(MARK_START);
   const end = text.indexOf(MARK_END);
-  if (start !== -1 && end !== -1) {
+  if (start !== -1 && end !== -1 && end > start) {
+    // Guard against a second marker pair further down: replacing the first
+    // pair while another exists would leave a stale duplicate block.
+    if (text.indexOf(MARK_START, start + 1) !== -1 || text.indexOf(MARK_END, end + 1) !== -1) {
+      console.warn(`WARNING: ${filePath} has more than one agent-rooms marker pair; ` +
+        "not touching it. Remove the duplicates and re-run.");
+      return false;
+    }
     text = text.slice(0, start) + wrapped + text.slice(end + MARK_END.length);
+  } else if (start !== -1 || end !== -1) {
+    // One marker without its partner (or in reverse order): slicing here
+    // would eat or duplicate the user's own instructions. Leave the file
+    // alone and say so — a skipped update is recoverable, a corrupted
+    // instructions file is not.
+    console.warn(`WARNING: ${filePath} has broken agent-rooms markers ` +
+      "(one of the start/end pair is missing or out of order); not touching it. " +
+      "Delete the stray marker and re-run the installer.");
+    return false;
   } else {
     text = text.length ? text.trimEnd() + "\n\n" + wrapped + "\n" : wrapped + "\n";
   }
   mkdirSync(dirname(filePath), { recursive: true });
   writeFileSync(filePath, text);
+  return true;
 }
 
 const MACHINE_SECTION = `## Agent Rooms (machine-level)
@@ -196,8 +215,12 @@ function detectHarnesses() {
  */
 function installSkill(h) {
   if (!h.skillsDir) return false;
+  // The canonical SKILL.md already speaks in bare `room-post` (the PATH
+  // shim this flavor installs), so no command rewrite is needed here. That
+  // also fixes the plain `npx skills add` channel, which copies the skill
+  // verbatim and used to ship `scripts/room-post` commands that only exist
+  // in vendoring repos.
   let text = readFileSync(join(KIT_SRC, "SKILL.md"), "utf8");
-  text = text.replaceAll("scripts/room-post", "room-post");
   if (h.rovoRename)
     text = text.replace(/^name:\s*.*$/m, `name: ${h.rovoRename}`);
   mkdirSync(h.skillsDir, { recursive: true });
@@ -228,36 +251,97 @@ function writeManifest(destDir, version) {
 
 function writeShim(shimPath, kitPath) {
   mkdirSync(dirname(shimPath), { recursive: true });
+  // The old generation of this shim baked in an absolute path; when the kit
+  // directory moved, every pre-move install kept executing the fossil with no
+  // signal (that happened once: ~/.archastro/team-room -> agent-rooms).
+  // This one resolves at run time and says so when it has to fall back.
   writeFileSync(
     shimPath,
-    `#!/usr/bin/env bash\n# Agent Rooms shim (written by the agent-rooms installer).\nexec python3 "${kitPath}/room_post.py" "$@"\n`
+    `#!/usr/bin/env bash
+# Agent Rooms shim (written by the agent-rooms installer).
+KIT="${kitPath}"
+if [ ! -f "$KIT/room_post.py" ]; then
+  for alt in "$HOME/.archastro/agent-rooms" "$HOME/.archastro/team-room"; do
+    if [ -f "$alt/room_post.py" ]; then
+      KIT="$alt"
+      echo "room-post: kit missing at ${kitPath}, using $alt — re-run: npx github:ArchAstro/agent-rooms --machine" >&2
+      break
+    fi
+  done
+fi
+exec python3 "$KIT/room_post.py" "$@"
+`
   );
   chmodSync(shimPath, 0o755);
+}
+
+/**
+ * Heal installs from before the kit directory moved
+ * (~/.archastro/team-room -> ~/.archastro/agent-rooms). Old shims and any
+ * other reference bake in the old absolute path, so the fossil kept running
+ * frozen code with no signal. Replace the old script with a forwarder that
+ * execs the current kit — every stale reference self-heals on next use —
+ * and carry the old identity forward if the machine config doesn't exist.
+ */
+function migrateLegacyKit(home, kitDir) {
+  const legacyDir = join(home, ".archastro", "team-room");
+  const legacyScript = join(legacyDir, "room_post.py");
+  if (!existsSync(legacyScript)) return;
+
+  const legacyRoom = join(legacyDir, "room.json");
+  const roomConfig = join(home, ".config", "team-room", "room.json");
+  if (existsSync(legacyRoom) && !existsSync(roomConfig)) {
+    mkdirSync(dirname(roomConfig), { recursive: true });
+    cpSync(legacyRoom, roomConfig);
+    chmodSync(roomConfig, 0o600);
+    console.log(`migrated room identity: ${legacyRoom} -> ${roomConfig}`);
+  }
+
+  writeFileSync(
+    legacyScript,
+    `#!/usr/bin/env python3
+# Forwarder left by the agent-rooms installer. This directory was the kit's
+# old home; the kit now lives at ~/.archastro/agent-rooms. Anything still
+# pointing here (old shims, scripts, muscle memory) runs the current kit.
+import os, sys
+target = os.path.expanduser("~/.archastro/agent-rooms/room_post.py")
+os.execv(sys.executable, [sys.executable, target] + sys.argv[1:])
+`
+  );
+  console.log(`forwarded legacy kit: ${legacyScript} now execs ${kitDir}/room_post.py`);
 }
 
 function installMachine(args) {
   const home = homedir();
   const kitDir = join(home, ".archastro", "agent-rooms");
   const roomConfig = join(home, ".config", "team-room", "room.json");
-  const cfg = loadRoomConfig(args.flags, roomConfig);
+  // Identity is optional on --machine: `room-post login` discovers the room
+  // from the user's account, so an install with no identity is the normal
+  // first-run path, not an error.
+  const cfg = loadRoomConfig({ ...args.flags, allowMissingIdentity: true }, roomConfig);
   mkdirSync(kitDir, { recursive: true });
   for (const f of KIT_FILES) cpSync(join(KIT_SRC, f), join(kitDir, f));
-  // Room identity goes to the machine config location — the SAME place
-  // `room-post init` writes and an npx-skills install reads — so both
-  // install paths converge on one config, not two.
-  mkdirSync(dirname(roomConfig), { recursive: true });
-  writeFileSync(roomConfig, JSON.stringify(cfg, null, 2) + "\n");
-  chmodSync(roomConfig, 0o600);
+  if (cfg) {
+    // Room identity goes to the machine config location — the SAME place
+    // `room-post init` writes and an npx-skills install reads — so both
+    // install paths converge on one config, not two.
+    mkdirSync(dirname(roomConfig), { recursive: true });
+    writeFileSync(roomConfig, JSON.stringify(cfg, null, 2) + "\n");
+    chmodSync(roomConfig, 0o600);
+  } else {
+    console.log("no room identity yet — `room-post login` will discover and save it.");
+  }
   writeManifest(kitDir, PKG_VERSION);
   const shim = join(home, ".local", "bin", "room-post");
   writeShim(shim, kitDir);
+  migrateLegacyKit(home, kitDir);
 
   const harnesses = detectHarnesses();
   for (const h of harnesses) {
     const wired = [];
     if (h.instructions) {
-      upsertMarkedBlock(h.instructions, MACHINE_SECTION);
-      wired.push("instructions");
+      if (upsertMarkedBlock(h.instructions, MACHINE_SECTION)) wired.push("instructions");
+      else wired.push("instructions SKIPPED (fix the markers above)");
     }
     if (installSkill(h)) wired.push("skill");
     console.log(`wired ${h.name}: ${wired.join(" + ")}`);
@@ -295,7 +379,38 @@ function installRepo(args) {
   // files and you commit the diff.
   const kitDir = join(repo, ".claude", "skills", "team-room");
   mkdirSync(kitDir, { recursive: true });
-  for (const f of KIT_FILES) cpSync(join(KIT_SRC, f), join(kitDir, f));
+
+  // A room.json beside the kit outranks the user's machine config
+  // (room_post.py resolves it second, after ROOM_JSON). Committed, that's
+  // the point — the repo pins its room. But an UNTRACKED one is a fossil
+  // from an older install, and leaving it would silently route this
+  // machine's posts to whatever room it froze on. Quarantine it loudly.
+  const adjacent = join(kitDir, "room.json");
+  if (existsSync(adjacent)) {
+    const tracked = spawnSync("git", ["-C", repo, "ls-files", "--error-unmatch", adjacent], { stdio: "ignore" }).status === 0;
+    if (tracked) {
+      console.log(`keeping committed room pin: ${adjacent} (this repo's room outranks machine config)`);
+    } else {
+      const quarantine = adjacent + ".pre-agent-rooms";
+      renameSync(adjacent, quarantine);
+      console.warn(`WARNING: found an uncommitted room.json beside the kit — it would have\n` +
+        `silently overridden your machine's room. Moved it to ${quarantine};\n` +
+        `restore it only if this repo really should pin that room (then commit it).`);
+    }
+  }
+
+  for (const f of KIT_FILES) {
+    if (f === "SKILL.md") {
+      // The canonical skill speaks in bare `room-post`; the vendored flavor
+      // runs through this repo's shim, so commands become
+      // `scripts/room-post`. \b keeps `room_post.py` and `team-room` intact.
+      const text = readFileSync(join(KIT_SRC, f), "utf8")
+        .replace(/\broom-post\b/g, "scripts/room-post");
+      writeFileSync(join(kitDir, f), text);
+    } else {
+      cpSync(join(KIT_SRC, f), join(kitDir, f));
+    }
+  }
   writeManifest(kitDir, PKG_VERSION);
 
   // In-repo shim resolves the vendored kit relative to the repo, so it travels

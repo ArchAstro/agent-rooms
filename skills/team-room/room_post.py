@@ -202,7 +202,7 @@ ROOM_SOURCE_ID = _ROOM_CFG.get("source_id") or ""
 ROOM_TEAM_ID = _ROOM_CFG.get("team_id", "")
 RECORD_SCHEMA = "team-record"   # custom-object schema key for team records
 PRODUCTION_SERVER = _ROOM_CFG.get("server", "")
-KIT_VERSION = "2026.07.24"
+KIT_VERSION = "2026.07.25"
 ROOM_APP_NAME = "ArchAgents"
 MAX_HEADLINE = 300
 EXPIRY_SKEW_SECONDS = 60
@@ -667,6 +667,10 @@ def http_json(
         data=json.dumps(body).encode() if body is not None else None,
         headers={
             "Content-Type": "application/json",
+            # The kit version rides on every request so the server can see
+            # which versions the fleet actually runs. A week of stale-kit
+            # drift once went unmeasurable because this header didn't exist.
+            "User-Agent": f"room-post/{KIT_VERSION}",
             **({"Authorization": f"Bearer {token}"} if token else {}),
         },
         method="POST" if body is not None else "GET",
@@ -827,7 +831,32 @@ def refresh_session(creds, key, creds_path, server=None, lock_path=None):
     lock_path = lock_path or ROOM_LOCK_PATH
     os.makedirs(os.path.dirname(lock_path), exist_ok=True)
     lock = open(lock_path, "w")
-    fcntl.flock(lock, fcntl.LOCK_EX)
+    # Bounded wait, never a hang: a crashed holder of a plain LOCK_EX would
+    # stall every future command on this machine forever. Ten seconds is
+    # plenty for a real refresh (one HTTP round trip); after that, fail the
+    # ROOM command softly — the developer's session must not inherit our
+    # deadlock.
+    deadline = time.time() + 10
+    while True:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            if time.time() >= deadline:
+                lock.close()
+                # One last read: whoever holds the lock may have finished.
+                try:
+                    fresh = json.load(open(creds_path))
+                    fs = fresh["orgSessions"].get(key)
+                    if fs and (fs.get("expiresAt") or 0) / 1000 > time.time() + EXPIRY_SKEW_SECONDS:
+                        creds["orgSessions"][key] = fs
+                        return fs
+                except Exception:
+                    pass
+                die("another room-post is holding the login lock and hasn't "
+                    "finished in 10s. Just retry; if it persists, delete "
+                    f"{lock_path}", 3)
+            time.sleep(0.2)
     try:
         # Another process may have refreshed while we waited: re-read and
         # use its fresh token instead of consuming the rotated one twice.
@@ -1879,26 +1908,56 @@ def doctor():
     # A mismatch is information, not failure: forks and local edits are
     # legitimate — the point is that changes are VISIBLE, never silent.
     import hashlib
-    manifest_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "manifest.json")
-    try:
-        manifest = json.load(open(manifest_path))
-        changed = []
-        for name, want in (manifest.get("files") or {}).items():
-            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
-            try:
-                got = hashlib.sha256(open(path, "rb").read()).hexdigest()
-            except OSError:
-                changed.append(f"{name} (missing)")
-                continue
-            if got != want:
-                changed.append(name)
-        if changed:
-            print(f"warn kit modified since install: {', '.join(changed)} "
-                  "(fine if intentional; re-run the installer to restore)")
-        else:
-            print(f"ok  kit integrity: matches install manifest ({manifest.get('version', '?')})")
-    except OSError:
-        pass  # no manifest: hand-copied kit or fork; nothing to verify
+    kit_dir = os.path.dirname(os.path.abspath(__file__))
+    manifest_path = os.path.join(kit_dir, "manifest.json")
+    if not os.path.exists(manifest_path):
+        # Not silent: "no manifest" is itself a finding. Hand-copied kits and
+        # forks are legitimate, but the reader deserves to know this copy has
+        # no integrity baseline at all.
+        print("warn kit integrity: no install manifest beside this script "
+              "(hand-copied kit or fork?) — nothing to verify against. "
+              "Installer-managed kits carry one.")
+    else:
+        try:
+            manifest = json.load(open(manifest_path))
+            files = manifest.get("files") or {}
+            if not files:
+                print("warn kit integrity: manifest lists no files — vacuous, "
+                      "verifies nothing. Re-run the installer.")
+            else:
+                changed = []
+                for name, want in files.items():
+                    path = os.path.join(kit_dir, name)
+                    try:
+                        got = hashlib.sha256(open(path, "rb").read()).hexdigest()
+                    except OSError:
+                        changed.append(f"{name} (missing)")
+                        continue
+                    if got != want:
+                        changed.append(name)
+                if changed:
+                    print(f"warn kit modified since install: {', '.join(changed)} "
+                          "(fine if intentional; re-run the installer to restore)")
+                else:
+                    print(f"ok  kit integrity: matches install manifest ({manifest.get('version', '?')})")
+        except (OSError, ValueError):
+            print("warn kit integrity: manifest.json unreadable or malformed — "
+                  "re-run the installer to restore it.")
+
+    # A superseded machine install alongside the current one means some
+    # reference somewhere may still execute the fossil. Say so.
+    legacy_dir = os.path.expanduser("~/.archastro/team-room")
+    if (os.path.exists(os.path.join(legacy_dir, "room_post.py"))
+            and not os.path.abspath(__file__).startswith(legacy_dir)):
+        head = ""
+        try:
+            head = open(os.path.join(legacy_dir, "room_post.py")).read(300)
+        except OSError:
+            pass
+        if "orwarder" not in head:
+            print(f"warn superseded kit still present at {legacy_dir} — anything "
+                  "pointing there runs frozen code. Re-run: "
+                  "npx github:ArchAstro/agent-rooms --machine (it forwards it)")
 
     print("doctor: all good" if ok else "doctor: fix the FAILs above")
     sys.exit(0 if ok else 4)
@@ -2051,6 +2110,15 @@ def _run_never_blocking():
     debugging us. Writes still say loudly that the post did not land (a lost
     post is worth knowing about); they just don't derail the session.
     """
+    # Superseded install location: this exact path once ran a frozen kit for
+    # days with no signal. One line, stderr, never blocks — but the drift is
+    # visible instead of silent.
+    if os.path.abspath(__file__).startswith(
+            os.path.expanduser("~/.archastro/team-room")):
+        print("room-post: this copy runs from a superseded location. Update once with:\n"
+              "  npx github:ArchAstro/agent-rooms --machine",
+              file=sys.stderr)
+
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd not in _NEVER_BLOCK:
         main()
