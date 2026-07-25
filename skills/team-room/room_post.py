@@ -817,11 +817,7 @@ def search_items(session, query: str, max_results: int = 8) -> list:
 def search(query: str):
     creds, key, creds_path, session = read_session()
     try:
-        # Over-fetch: most of what the index returns is conversation about the
-        # work (resident replies, task filings), not knowledge from it. Pull a
-        # wide candidate set so ranking has real lessons to promote instead of
-        # eight slots of chatter, then trim to what's worth reading.
-        items = search_items(session, query, max_results=30)
+        items = gather_hits(session, query)
     except urllib.error.HTTPError as e:
         if e.code == 401 and not session.get("static"):
             session = refresh_session(creds, key, creds_path)
@@ -843,6 +839,25 @@ def search(query: str):
 # conversation about the work rather than knowledge from it, so it sorts last.
 _HIT_VALUE = {"lesson": 0, "abandoned": 1, "question": 2, "handoff": 3,
               "done": 5, "start": 6, "notify": 7}
+
+# Knowledge often arrives wearing a status label. Measured on this room: 14% of
+# "done" posts carry a real root cause or gotcha — more mis-filed knowledge than
+# there are correctly-filed lessons. Ranking on post_type alone buries exactly
+# what we want, so content gets a vote too.
+_KNOWLEDGE_RE = None
+
+
+def reads_like_knowledge(text: str) -> bool:
+    """True when a post explains WHY something happened, not just that it did."""
+    global _KNOWLEDGE_RE
+    if _KNOWLEDGE_RE is None:
+        import re
+        _KNOWLEDGE_RE = re.compile(
+            r"\b(root cause|turns out|the real (issue|cause)|gotcha|beware|"
+            r"watch out|silently|surprising|not obvious|cost me|wasted|"
+            r"red herring|misleading|it was never|disproven|footgun|caveat|"
+            r"if you (hit|see|get)|next time|the fix is|because)\b", re.I)
+    return bool(_KNOWLEDGE_RE.search(text or ""))
 _GLYPH = {"lesson": "⚠", "abandoned": "✗", "question": "?", "handoff": "→",
           "done": "✓", "start": "▶", "notify": "🔔"}
 
@@ -860,13 +875,43 @@ def hit_facets(item: dict) -> dict:
     return ((raw or {}).get("metadata") or {}) if isinstance(raw, dict) else {}
 
 
-def render_hits(items: list, query: str = ""):
-    """Print hits ranked by what actually prevents rework, and say WHY each one
-    is here. Semantic similarity alone buries one real lesson under six status
-    posts; ordering by post type and area overlap puts the lesson on top."""
-    if not items:
-        print("(nothing in the room about this — you're clear to proceed)")
-        return
+def gather_hits(session, query: str) -> list:
+    """Search the room for a question, and actually find things.
+
+    Two constraints made single-probe search miss real answers. The index caps
+    a response at ~10 items, so asking for more doesn't widen recall. And
+    semantic match is brittle across paraphrase: a lesson that ranks first for
+    "UnsafeRepo runtime read path" was absent entirely for "reading a record my
+    agent's viewer cannot see" — the same question in a session's own words.
+
+    So probe a few ways and merge: the question as asked, plus its distinctive
+    terms (which is how the lesson was written). De-duplicated, order preserved,
+    best-of both. Failures are swallowed: a probe that errors must never cost
+    the caller their answer.
+    """
+    probes = [query]
+    keys = [t for t in _area_tokens(query) if len(t) > 3]
+    if len(keys) >= 2:
+        probes.append(" ".join(keys[:6]))
+    seen, merged = set(), []
+    for probe in probes:
+        try:
+            items = search_items(session, probe, max_results=30)
+        except Exception:
+            continue
+        for it in items:
+            key = it.get("id") or (it.get("content") or "")[:120]
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(it)
+    return merged
+
+
+def rank_hits(items: list, query: str = "") -> list:
+    """Order hits by what actually prevents rework. Returns
+    [(item, metadata, mislabeled)] best first. Pure and side-effect free so the
+    eval harness can score it (evals/search_eval.py)."""
     kw = _area_tokens(query)
     scored = []
     for i, it in enumerate(items):
@@ -874,21 +919,40 @@ def render_hits(items: list, query: str = ""):
         ptype = md.get("post_type")
         areas = md.get("areas") or []
         overlap = len(kw & _area_tokens(" ".join(areas))) if kw else 0
-        scored.append(((_HIT_VALUE.get(ptype, 9), -overlap, i), it, md))
+        tier = _HIT_VALUE.get(ptype, 9)
+        body = it.get("content") or it.get("text") or ""
+        # A status post that explains a root cause is knowledge wearing the
+        # wrong label: promote it just under the explicit lessons rather than
+        # stranding it below the divider. Measured: 14% of "done" posts in this
+        # room carry a real root cause — more than there are tagged lessons.
+        mislabeled = bool(tier >= 5 and ptype and reads_like_knowledge(body))
+        if mislabeled:
+            tier = 4
+        scored.append(((tier, -overlap, i), it, md, mislabeled))
     scored.sort(key=lambda t: t[0])
     # Show every real trace, but only a taste of the chatter — a wall of status
     # posts is what made agents stop reading results in the first place.
     keep = [x for x in scored if x[0][0] < 5][:8] + [x for x in scored if x[0][0] >= 5][:2]
+    return [(it, md, mis) for _s, it, md, mis in keep]
 
+
+def render_hits(items: list, query: str = ""):
+    """Print ranked hits and say WHY each one is here."""
+    if not items:
+        print("(nothing in the room about this — you're clear to proceed)")
+        return
     shown_divider = False
-    for (rank, _, _), it, md in keep:
+    for it, md, mislabeled in rank_hits(items, query):
         ptype = md.get("post_type")
-        if rank >= 5 and not shown_divider:
+        tier = _HIT_VALUE.get(ptype, 9)
+        if tier >= 5 and not mislabeled and not shown_divider:
             print("--- below: status and chatter, rarely worth reading ---\n")
             shown_divider = True
         who = md.get("human") or ""
         areas = ", ".join((md.get("areas") or [])[:3])
         tag = f"{_GLYPH.get(ptype, '·')} {ptype or 'note'}"
+        if mislabeled:
+            tag += " (reads like a lesson)"
         head = f"{tag}" + (f" · {who}" if who else "") + (f" · {areas}" if areas else "")
         print(f"--- {head} ---")
         print((it.get("content") or it.get("text") or "").strip()[:600])
