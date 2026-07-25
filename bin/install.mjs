@@ -13,7 +13,7 @@
 // vendor is safe to commit anywhere (even a public repo) and there's no
 // room.json to drift or leak. (--machine writes identity to ~/.config only.)
 
-import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, symlinkSync, renameSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, symlinkSync, renameSync, lstatSync, realpathSync, unlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -225,6 +225,9 @@ function installSkill(h) {
     text = text.replace(/^name:\s*.*$/m, `name: ${h.rovoRename}`);
   mkdirSync(h.skillsDir, { recursive: true });
   writeFileSync(join(h.skillsDir, "SKILL.md"), text);
+  // SKILL.md links to reference.md relatively; shipping the skill without it
+  // gave every machine-flavor harness a dead link.
+  cpSync(join(KIT_SRC, "reference.md"), join(h.skillsDir, "reference.md"));
   if (h.cursorPluginRoot) {
     const metaDir = join(h.cursorPluginRoot, ".cursor-plugin");
     mkdirSync(metaDir, { recursive: true });
@@ -291,10 +294,35 @@ function migrateLegacyKit(home, kitDir) {
   const legacyRoom = join(legacyDir, "room.json");
   const roomConfig = join(home, ".config", "team-room", "room.json");
   if (existsSync(legacyRoom) && !existsSync(roomConfig)) {
-    mkdirSync(dirname(roomConfig), { recursive: true });
-    cpSync(legacyRoom, roomConfig);
-    chmodSync(roomConfig, 0o600);
-    console.log(`migrated room identity: ${legacyRoom} -> ${roomConfig}`);
+    // Only carry identity forward if it's complete — a partial fossil would
+    // hard-fail the new kit on every command. And say how to check it: the
+    // pin may predate later room moves.
+    let legacyCfg = null;
+    try { legacyCfg = JSON.parse(readFileSync(legacyRoom, "utf8")); } catch { /* malformed */ }
+    if (legacyCfg && ROOM_KEYS.every((k) => legacyCfg[k])) {
+      mkdirSync(dirname(roomConfig), { recursive: true });
+      cpSync(legacyRoom, roomConfig);
+      chmodSync(roomConfig, 0o600);
+      console.log(`migrated room identity: ${legacyRoom} -> ${roomConfig}`);
+      console.log("  (an old pin can point at an old room — `room-post doctor` verifies it)");
+    } else {
+      console.warn(`WARNING: ${legacyRoom} is malformed or incomplete; not migrating it. ` +
+        "`room-post login` will discover the room fresh.");
+    }
+  }
+
+  // NEVER write through a link: if room_post.py here is a symlink (someone
+  // healed the rename by hand), writing would follow it and destroy the real
+  // kit — and a forwarder in its place would exec itself forever. If it
+  // already resolves into the current kit dir, there's nothing to heal.
+  const st = lstatSync(legacyScript);
+  if (st.isSymbolicLink()) {
+    const target = realpathSync(legacyScript);
+    if (target.startsWith(join(home, ".archastro", "agent-rooms"))) {
+      console.log(`legacy kit already links to the current one (${legacyScript}); leaving it`);
+      return;
+    }
+    unlinkSync(legacyScript); // stale link elsewhere: replace the entry itself
   }
 
   writeFileSync(
@@ -305,6 +333,13 @@ function migrateLegacyKit(home, kitDir) {
 # pointing here (old shims, scripts, muscle memory) runs the current kit.
 import os, sys
 target = os.path.expanduser("~/.archastro/agent-rooms/room_post.py")
+if not os.path.isfile(target) or os.path.realpath(target) == os.path.realpath(__file__):
+    # Kit gone or the forwarder would exec itself: fail SOFT — a room command
+    # must never break the session it runs in.
+    print("room-post: kit missing — reinstall with: "
+          "npx github:ArchAstro/agent-rooms --machine. Carry on without the room.",
+          file=sys.stderr)
+    sys.exit(0)
 os.execv(sys.executable, [sys.executable, target] + sys.argv[1:])
 `
   );
@@ -390,18 +425,23 @@ function installRepo(args) {
     const tracked = spawnSync("git", ["-C", repo, "ls-files", "--error-unmatch", adjacent], { stdio: "ignore" }).status === 0;
     if (tracked) {
       console.log(`keeping committed room pin: ${adjacent} (this repo's room outranks machine config)`);
+    } else if (spawnSync("git", ["-C", repo, "check-ignore", "-q", adjacent]).status === 0) {
+      // Gitignored = someone configured a per-developer local pin on purpose
+      // (the reference documents that setup). Keep it, but say it wins.
+      console.log(`keeping gitignored local room pin: ${adjacent} (it outranks machine config)`);
     } else {
-      const quarantine = adjacent + ".pre-agent-rooms";
+      let quarantine = adjacent + ".pre-agent-rooms";
+      for (let n = 1; existsSync(quarantine); n++) quarantine = `${adjacent}.pre-agent-rooms.${n}`;
       renameSync(adjacent, quarantine);
       console.warn(`WARNING: found an uncommitted room.json beside the kit — it would have\n` +
         `silently overridden your machine's room. Moved it to ${quarantine};\n` +
-        `restore it only if this repo really should pin that room (then commit it).`);
+        `restore it only if this repo really should pin that room (then commit or gitignore it).`);
     }
   }
 
   for (const f of KIT_FILES) {
-    if (f === "SKILL.md") {
-      // The canonical skill speaks in bare `room-post`; the vendored flavor
+    if (f === "SKILL.md" || f === "reference.md") {
+      // The canonical docs speak in bare `room-post`; the vendored flavor
       // runs through this repo's shim, so commands become
       // `scripts/room-post`. \b keeps `room_post.py` and `team-room` intact.
       const text = readFileSync(join(KIT_SRC, f), "utf8")
