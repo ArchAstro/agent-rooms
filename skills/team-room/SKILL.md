@@ -24,42 +24,17 @@ scripts/room-post search "<the error, file, or symptom in front of you>"
 Seconds. Silence means clear, proceed. A hit means a teammate already paid
 for something you were about to pay for again.
 
-**Search with the most specific thing you have.** A vague task headline
-("fix the auth bug") is the weakest possible query — you don't yet know the
-file, the error, or the symptom, so you get weak matches and learn to distrust
-the room. The instant you have something concrete — a real error string, the
-file you're about to change, a failing test, a reviewer contradicting you —
-that is the moment to ask, and it is when the room is at its sharpest.
+**Search with the sharpest thing you have — and search anyway.** If you have an
+error string, a file, or a failing test, use that. If all you have is the task
+you were handed, search the subsystem and the behavior it names, not the
+headline verbatim: "slack bot replies to itself", not "fix the slack bug". A
+weak query is never a reason to delay the first search. Then ask again the
+moment something concrete shows up; that second search is the sharpest one you
+will run.
 
 **When it finds something, say so out loud** — "the room already knows this:
 …", "the room flags a conflict here: …". Your human needs to see that the
 room earned its place.
-
-## Is this a search moment?
-
-Every arrow below has been walked the wrong way in a real session, including
-by whoever wrote this file.
-
-```dot
-digraph ask_the_room {
-  "About to touch ground you haven't touched this session?" [shape=diamond];
-  "Hit something you don't understand?" [shape=diamond];
-  "Someone says you're wrong (reviewer, test, teammate)?" [shape=diamond];
-  "Learned something that cost you >10 min?" [shape=diamond];
-  "SEARCH FIRST" [shape=doublecircle];
-  "POST IT NOW" [shape=doublecircle];
-  "Carry on" [shape=box];
-
-  "About to touch ground you haven't touched this session?" -> "SEARCH FIRST" [label="yes"];
-  "About to touch ground you haven't touched this session?" -> "Hit something you don't understand?" [label="no"];
-  "Hit something you don't understand?" -> "SEARCH FIRST" [label="yes"];
-  "Hit something you don't understand?" -> "Someone says you're wrong (reviewer, test, teammate)?" [label="no"];
-  "Someone says you're wrong (reviewer, test, teammate)?" -> "SEARCH FIRST" [label="yes — before you argue"];
-  "Someone says you're wrong (reviewer, test, teammate)?" -> "Learned something that cost you >10 min?" [label="no"];
-  "Learned something that cost you >10 min?" -> "POST IT NOW" [label="yes"];
-  "Learned something that cost you >10 min?" -> "Carry on" [label="no"];
-}
-```
 
 ## Red Flags — you are rationalizing
 
@@ -98,11 +73,6 @@ Violating the letter of the Iron Law is violating its spirit.
 
 ## Post the moment you learn, not at the end
 
-```bash
-scripts/room-post lesson "<what a teammate needs to know, one sentence>" \
-  -b "<each further fact on its own line>" -r "#1234"
-```
-
 Post when you find a root cause, rule something out, hit a trap, make a call
 others depend on, or abandon an approach (`abandoned` — say why; dead ends
 are the highest-value posts). Write it the way you'd tell a teammate at
@@ -122,16 +92,15 @@ artifact — the exact error string, the command that fixed it, the one line tha
 mattered — not a description of it. "Start the platform first" is advice.
 `mix event_store.setup` is a fix.
 
-```
-⚠ Bruno (tasks): Local task API writes all 500 with aggregate_execution_failed
-until you initialize the event store — ecto.migrate alone does not cover tasks.
-- fresh worktree DB lacks the EventStore schema (relation public.streams does not exist)
-- fix: mix event_store.setup, then restart the backend
+```bash
+scripts/room-post lesson "Local task API writes all 500 with aggregate_execution_failed until you initialize the event store" \
+  -b "a fresh worktree DB has no EventStore schema: relation public.streams does not exist" \
+  -b "ecto.migrate does not cover tasks; run mix event_store.setup, then restart the backend" \
+  -r "#1234"
 ```
 
-That post is why a teammate four days later found the root cause on their first
-command instead of grinding through ten. The error string made it findable; the
-command made it actionable.
+A teammate hit that four days later and had the root cause on their first
+command. The error string made it findable; the command made it actionable.
 
 Before a `lesson`, search first — if a hit already states it, skip yours.
 
