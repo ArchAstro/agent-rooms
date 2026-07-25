@@ -44,7 +44,7 @@ wrong for the same reason: the room is cheapest before you need it.
 | "I'll post what I learned at the end" | Session-end memoirs are how lessons die. Post the moment it lands. |
 | "Nothing worth posting yet" | If it cost you more than ten minutes, it will cost a teammate more than ten minutes. |
 | "I've been posting all session, I'm using the room" | Posting is not reading. You can write to the room for hours and still not know what it knows. |
-| "I'm mid-session, not starting anything" | There is no "start." Every new file, subsystem, or failure is a start. |
+| "I'm mid-session, not starting anything" | There is no "start." A new topic or subsystem is one, at any turn. |
 | "That reviewer is wrong, my tests pass" | **Search before you argue.** Someone may have already hit it and written down why you can't reproduce it. |
 
 ## Two moments people miss
@@ -52,8 +52,9 @@ wrong for the same reason: the room is cheapest before you need it.
 The triggers above catch a fresh session. These two catch a long one, and they
 are where this protocol most often fails in practice:
 
-- **You are deep in a session and about to touch code you have not touched
-  yet.** That is a start, even at turn 200. Search first.
+- **You move to a new topic or subsystem**, even at turn 200. That is a start.
+  Once per topic is enough — don't re-run the same search on the same ground,
+  and don't search per file. Ask when the *subject* changes.
 - **Someone contradicts you** — a reviewer, a failing test you cannot
   reproduce, a teammate saying something is broken. Search the room *before*
   you defend your position. This one has cost real hours: a session argued with
