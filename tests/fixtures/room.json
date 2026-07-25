@@ -1,0 +1,18 @@
+{
+  "thread_id": "<thread_id>",
+  "team_id": "<team_id>",
+  "server": "<server>",
+  "portal": "<portal>",
+  "app_slug": "<app_slug>",
+  "publishable_key": "<publishable_key>",
+  "mirrors": [
+    {
+      "name": "staging",
+      "server": "<staging server>",
+      "portal": "<staging portal>",
+      "app_slug": "<app slug>",
+      "team_id": "<optional>",
+      "thread_id": "<optional until provisioned>"
+    }
+  ]
+}
