@@ -71,6 +71,44 @@ def test_bookkeeping_never_breaks_a_command():
     return "ok"
 
 
+def test_nudge_reaches_a_coding_agent():
+    # Coding agents invoke this through a subprocess pipe, so stderr is never a
+    # tty. Gating on isatty() silenced the nudge for exactly the audience it
+    # exists for — the feature was 100% dead in real use and the unit tests
+    # could not see it.
+    _fresh_state()
+    for _ in range(3):
+        rp.record_session("post")
+    assert rp.session_nudge(), "nudge must fire for an agent on a piped stderr"
+    return "ok"
+
+
+def test_ci_is_not_nagged():
+    _fresh_state()
+    os.environ["CI"] = "true"
+    try:
+        for _ in range(3):
+            rp.record_session("post")
+        assert rp.session_nudge() == "", "CI has nobody reading; stay silent"
+    finally:
+        os.environ.pop("CI", None)
+    return "ok"
+
+
+def test_a_corrupt_state_file_does_not_break_pruning():
+    # The file is hand-editable and shared; one non-dict value must not wedge
+    # every future write.
+    import json
+    _fresh_state()
+    os.makedirs(os.path.dirname(rp.SESSION_STATE_PATH), exist_ok=True)
+    bad = {f"k{i}": {"last_at": i} for i in range(205)}
+    bad["junk"] = "not-a-dict"
+    with open(rp.SESSION_STATE_PATH, "w") as f:
+        json.dump(bad, f)
+    rp.record_session("post")          # must not raise
+    return "ok"
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
