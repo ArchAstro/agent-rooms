@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Session-state and nudge behaviour.
+
+    python3 tests/test_session_state.py
+
+No network, no room. These pin the two things the nudge must get right: it
+fires when a session is writing without ever reading, and it shuts up
+otherwise. A tool that nags gets ignored, which is worse than silence.
+"""
+import os
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "..", "skills", "team-room"))
+os.environ.setdefault("ROOM_JSON", os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "fixtures", "room.json"))
+
+import room_post as rp  # noqa: E402
+
+
+def _fresh_state():
+    """Point state at an empty temp file so tests never touch the real one."""
+    rp.SESSION_STATE_PATH = os.path.join(tempfile.mkdtemp(), "sessions.json")
+
+
+def test_writing_without_reading_is_called_out():
+    # The measured failure: sessions post all day and never search, then
+    # rediscover something the room already knew.
+    _fresh_state()
+    for _ in range(3):
+        rp.record_session("post")
+    msg = rp.session_nudge()
+    assert "never asked the room" in msg, f"expected a read nudge, got {msg!r}"
+    return "ok"
+
+
+def test_a_session_that_searches_is_left_alone():
+    _fresh_state()
+    rp.record_session("search", topic="slack response brake", hits=4)
+    for _ in range(3):
+        rp.record_session("post")
+    assert rp.session_nudge() == "", "a session that reads should not be nagged"
+    return "ok"
+
+
+def test_the_same_nudge_is_not_repeated():
+    # Rate limiting is the difference between a useful signal and a linter
+    # everyone disables.
+    _fresh_state()
+    for _ in range(3):
+        rp.record_session("post")
+    assert rp.session_nudge(), "first nudge should fire"
+    assert rp.session_nudge() == "", "second nudge within the cooldown must not"
+    return "ok"
+
+
+def test_quiet_session_says_nothing():
+    _fresh_state()
+    rp.record_session("post")
+    assert rp.session_nudge() == "", "one post is not a pattern worth nagging"
+    return "ok"
+
+
+def test_bookkeeping_never_breaks_a_command():
+    # The room must never fail a post because of its own state file.
+    _fresh_state()
+    rp.SESSION_STATE_PATH = "/proc/nonexistent/cannot/write/sessions.json"
+    rp.record_session("post")          # must not raise
+    assert rp.session_nudge() == ""    # must not raise
+    return "ok"
+
+
+if __name__ == "__main__":
+    failures = 0
+    for name, fn in sorted(globals().items()):
+        if not name.startswith("test_"):
+            continue
+        try:
+            fn()
+            print(f"PASS  {name}")
+        except Exception as exc:                       # noqa: BLE001
+            failures += 1
+            print(f"FAIL  {name}: {exc}")
+    sys.exit(1 if failures else 0)
