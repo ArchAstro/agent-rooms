@@ -301,6 +301,23 @@ def git(*args: str) -> str:
         return ""
 
 
+def git_rc(*args: str, timeout: float = 2.0) -> tuple[int, str]:
+    """Like git(), but the return code survives. git() collapses "succeeded
+    with empty output" and "failed" into "" — useless for an ancestry check
+    whose success prints nothing. Short timeout on purpose: everything built
+    on this is best-effort exhaust, never worth waiting for. LC_ALL=C pins
+    git's output to English — --shortstat is localized, and a de_DE machine
+    would otherwise print "1 Datei geändert" past the parser."""
+    try:
+        out = subprocess.run(
+            ["git", *args], capture_output=True, text=True, timeout=timeout,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+        return out.returncode, out.stdout.strip()
+    except Exception:
+        return 1, ""
+
+
 
 
 def parse_args(argv):
@@ -624,6 +641,148 @@ def session_nudge(areas=None) -> str:
         return ""
 
 
+# (head, marker_path) captured when exhaust was computed. The post-success
+# marker advance writes THIS pair, never a re-read of HEAD or a re-resolved
+# gitdir, so a commit landing mid-post (or a cwd change) can't shift the
+# window. Consumed on advance; the process model is one post per CLI
+# invocation, and the consume keeps even a reused process from advancing
+# twice on one computation.
+_EXHAUST_TOKEN = None
+
+
+def _git_exhaust(budget_seconds: float = 3.0) -> dict:
+    """Git facts for this post, from the local checkout only: repo identity,
+    and the posting author's commits since this worktree's last post.
+
+    The metric is "unique commits observed", never "the session's work" —
+    there is no cheap git primitive for the latter (pulls import teammates'
+    commits, rebases rewrite shas, squashes reassign authorship). Hence the
+    OIDs ride along: two sessions racing the same base, or two worktrees on
+    one branch, double-EMIT — and downstream dedup by (repo, sha) makes the
+    overlap harmless. Counts alone could never be repaired.
+
+    Everything is best-effort under one monotonic deadline: any failure or
+    timeout means fields are absent. Absent beats guessed."""
+    global _EXHAUST_TOKEN
+    _EXHAUST_TOKEN = None  # never let a previous computation leak
+    deadline = time.monotonic() + budget_seconds
+
+    def out_of_time():
+        return time.monotonic() > deadline
+
+    def budget():
+        # Each subprocess gets at most the REMAINING budget (capped at 2s),
+        # so two slow calls can't stack past the deadline between checks.
+        return max(0.1, min(2.0, deadline - time.monotonic()))
+
+    if out_of_time():
+        return {}  # a spent budget means no calls at all, not "just repo"
+
+    rc, git_dir = git_rc("rev-parse", "--git-dir", timeout=budget())
+    if rc != 0 or not git_dir or out_of_time():
+        return {}
+
+    exhaust = {}
+    # Stable repo identity, so cross-repo charts are possible downstream.
+    rc, origin = git_rc("remote", "get-url", "origin", timeout=budget())
+    if rc == 0 and origin:
+        # Both https://host/org/repo.git and git@host:repo.git shapes: the
+        # name is whatever follows the last "/" or ":", minus ".git" —
+        # never any host text.
+        name = origin.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+        exhaust["repo"] = name[:-4] if name.endswith(".git") else name
+    else:
+        rc, top = git_rc("rev-parse", "--show-toplevel", timeout=budget())
+        if rc == 0 and top:
+            exhaust["repo"] = os.path.basename(top)
+    if out_of_time():
+        return exhaust
+
+    rc, head = git_rc("rev-parse", "HEAD", timeout=budget())
+    if rc != 0 or not head:
+        return exhaust
+    _EXHAUST_TOKEN = (head, os.path.join(git_dir, "room-last-head"))
+
+    rc, email = git_rc("config", "user.email", timeout=budget())
+    if rc != 0 or not email or out_of_time():
+        return exhaust
+
+    # Base resolution. The recorded sha is only trusted if it is still an
+    # ancestor of HEAD: after a rebase the old sha stays in the object
+    # store, so rev-list on it SUCCEEDS with a garbage range — ancestry is
+    # the guard, not error handling. The merge-base fallback doubles as the
+    # cold start, so a single-post ephemeral worktree (most agent sessions)
+    # still emits its branch's own work on its only post.
+    base = None
+    marker = os.path.join(git_dir, "room-last-head")
+    try:
+        recorded = open(marker).read().strip()
+    except OSError:
+        recorded = ""
+    if recorded:
+        rc, _ = git_rc("merge-base", "--is-ancestor", recorded, "HEAD", timeout=budget())
+        if rc == 0:
+            base = recorded
+    if base is None and not out_of_time():
+        rc, mb = git_rc("merge-base", "HEAD", "origin/main", timeout=budget())
+        if rc == 0 and mb:
+            base = mb
+    if not base or out_of_time():
+        return exhaust
+
+    # --author: this human's commits, not the world's after a pull.
+    # --first-parent: merges count once, not per merged commit.
+    rc, shas = git_rc("rev-list", "--first-parent", f"--author={email}",
+                      "--max-count=200", f"{base}..HEAD", timeout=budget())
+    if rc != 0:
+        return exhaust  # no window, so no diff either: omit over guess
+    sha_list = [s.strip()[:9] for s in shas.splitlines() if s.strip()]
+    exhaust["commits"] = len(sha_list)
+    if not sha_list:
+        return exhaust  # zero commits: a zero-filled diff would be filler
+    exhaust["commit_shas"] = sha_list[:50]
+    if out_of_time():
+        return exhaust
+
+    rc, stats = git_rc("log", "--first-parent", f"--author={email}",
+                       "--max-count=200",  # same window as the count above
+                       "--shortstat", "--format=", f"{base}..HEAD", timeout=budget())
+    if rc == 0 and stats:
+        import re
+        files = added = deleted = 0
+        for line in stats.splitlines():
+            m = re.search(r"(\d+) files? changed", line)
+            if not m:
+                continue
+            files += int(m.group(1))
+            ma = re.search(r"(\d+) insertions?\(\+\)", line)
+            md = re.search(r"(\d+) deletions?\(-\)", line)
+            added += int(ma.group(1)) if ma else 0
+            deleted += int(md.group(1)) if md else 0
+        exhaust["diff"] = {"files": files, "added": added, "deleted": deleted}
+    return exhaust
+
+
+def _advance_room_marker():
+    """After a successful post, the next exhaust window starts where this
+    post's exhaust ended. The marker lives in the worktree's own gitdir
+    (.git/worktrees/<name>/ in a linked worktree) — per-worktree by nature,
+    dies with the worktree, immune to the session file's dropped writes and
+    idle resets. Atomic temp+rename; best-effort like everything here."""
+    global _EXHAUST_TOKEN
+    if not _EXHAUST_TOKEN:
+        return
+    head, marker = _EXHAUST_TOKEN
+    _EXHAUST_TOKEN = None  # consume: one computation advances at most once
+    try:
+        tmp = marker + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(head + "\n")
+        os.replace(tmp, marker)
+    except OSError:
+        pass
+
+
 def build_metadata(post_type, refs, addressee=None, answers=None) -> dict:
     """Structured exhaust attached to every post (message `metadata`, never
     rendered): the correlation-food downstream readers (librarian, views,
@@ -655,7 +814,17 @@ def build_metadata(post_type, refs, addressee=None, answers=None) -> dict:
     areas = sorted({"/".join(f.split("/")[:2]) for f in files if f})[:8]
     if areas:
         meta["areas"] = areas
-    return {k: v for k, v in meta.items() if v}
+    try:
+        meta.update(_git_exhaust())
+    except Exception:
+        pass  # exhaust is a bonus, never a blocker
+    # NOTE: "commits": 0 is meaningful coverage data (a post with no new
+    # commits) — the falsy-filter below would drop it, so filter first and
+    # re-attach.
+    filtered = {k: v for k, v in meta.items() if v}
+    if meta.get("commits") == 0:
+        filtered["commits"] = 0
+    return filtered
 
 
 def framed_headline(post_type: str, headline: str) -> str:
@@ -2132,6 +2301,7 @@ def main():
             print("metadata: " + json.dumps(metadata, indent=2))
         return
     session = post(message, metadata, uploads)
+    _advance_room_marker()  # next exhaust window starts where this one ended
     record_session("post", areas=(metadata or {}).get("areas"))
     nudge = session_nudge((metadata or {}).get("areas"))
     if nudge:
