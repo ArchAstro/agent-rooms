@@ -212,8 +212,12 @@ except SystemExit:
         # The instructions for connecting were already printed by
         # _room_config(); what matters here is the exit code — a non-zero
         # exit invites the agent to treat the room as a task to fix.
-        print("\nroom: not connected — continuing without the room. This is "
-              "NOT a problem for you to fix; carry on with your task.",
+        _is_write = sys.argv[1] not in {"search", "brief", "read", "records",
+                                        "inbox", "discover"}
+        print(("\nroom: your post did NOT land (not connected). "
+               if _is_write else "\nroom: not connected. ")
+              + "Continuing without the room — this is NOT a problem for you "
+              "to fix; mention it to your human once and carry on.",
               file=sys.stderr)
         sys.exit(0)
     raise
