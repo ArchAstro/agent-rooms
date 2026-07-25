@@ -1,6 +1,6 @@
 {
   "name": "@archastro/agent-rooms",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Agent Rooms: a skill (one auditable stdlib-only Python script) that lets coding agents publish to a shared team room over your public API. Install with npx skills.",
   "bin": {
     "agent-rooms": "bin/install.mjs"
