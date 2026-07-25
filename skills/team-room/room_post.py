@@ -477,19 +477,40 @@ def _with_session_lock(fn):
     pattern the credential refresh already uses.
     """
     import fcntl
+    import threading
 
     os.makedirs(os.path.dirname(SESSION_STATE_PATH), exist_ok=True)
+    os.chmod(os.path.dirname(SESSION_STATE_PATH), 0o700)
     lock_path = SESSION_STATE_PATH + ".lock"
-    with open(lock_path, "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    # NEVER block a developer for bookkeeping. A blocking LOCK_EX hangs
+    # forever behind a wedged holder or a sick filesystem (NFS, FUSE), which
+    # would stall the command an agent is running. This state is a nudge
+    # cache: if we cannot get the lock in ~50ms, skipping the write costs
+    # nothing and stalling costs everything.
+    deadline = time.time() + 0.05
+    with open(lock_path, "a") as lock:
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.time() >= deadline:
+                    return
+                time.sleep(0.005)
+        tmp = SESSION_STATE_PATH + f".tmp.{os.getpid()}.{threading.get_ident()}"
         try:
             all_s = _load_sessions()
             fn(all_s)
-            tmp = SESSION_STATE_PATH + f".tmp.{os.getpid()}"
-            with open(tmp, "w", encoding="utf-8") as f:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(all_s, f, indent=2)
             os.replace(tmp, SESSION_STATE_PATH)
         finally:
+            try:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)          # never leave partial files behind
+            except OSError:
+                pass
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
@@ -526,8 +547,10 @@ def record_session(event: str, topic: str = "", hits: int = 0, areas=None):
             # time, and this is a nudge cache, not a record of anything.
             all_s[key] = st
             if len(all_s) > 200:
-                for k, _v in sorted(all_s.items(),
-                                    key=lambda kv: kv[1].get("last_at", 0))[:50]:
+                def _last(kv):
+                    return kv[1].get("last_at", 0) if isinstance(kv[1], dict) else 0
+
+                for k, _v in sorted(all_s.items(), key=_last)[:50]:
                     all_s.pop(k, None)
 
         _with_session_lock(mutate)
@@ -544,20 +567,28 @@ def session_nudge(areas=None) -> str:
     a tool that nags gets ignored, which is worse than saying nothing.
     """
     try:
+        # Suppress in CI, NOT on pipes. Coding agents invoke this through a
+        # subprocess pipe, so stderr is never a tty — gating on isatty() would
+        # silence the nudge for exactly the audience it exists for. CI is the
+        # thing with nobody reading, and it announces itself in the env.
+        if any(os.environ.get(v) for v in
+               ("CI", "GITHUB_ACTIONS", "BUILDKITE", "JENKINS_URL",
+                "GITLAB_CI", "CIRCLECI", "TEAMCITY_VERSION")):
+            return ""
         st = session_state()
         if time.time() - st.get("last_nudge_at", 0) < NUDGE_COOLDOWN_SECONDS:
             return ""
         posts, searches = st.get("posts", 0), st.get("searches", 0)
-        known = set(st.get("topics", []))
         msg = ""
-        fresh = [a for a in (areas or []) if a.lower() not in known][:2]
+        # ONE rule, from a failure we actually measured: sessions write to the
+        # room for hours and never read from it. A second "new area" rule was
+        # tried and cut — it fired only for people who HAD searched, so the
+        # reward for reading was more nagging, and it matched file paths
+        # against query text, which is too crude to be worth the noise.
         if posts >= 3 and searches == 0:
             msg = (f"you've posted {posts} times this session and never asked the "
                    "room anything. Posting is not reading — try "
                    'room-post search "<what you\'re working on>"')
-        elif fresh and searches and not (set(a.lower() for a in fresh) & known):
-            msg = (f"new ground this session ({', '.join(fresh)}) that you haven't "
-                   "asked the room about yet")
         if msg:
             key = _session_key()
 
