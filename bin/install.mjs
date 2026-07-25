@@ -289,7 +289,10 @@ exec python3 "$KIT/room_post.py" "$@"
 function migrateLegacyKit(home, kitDir) {
   const legacyDir = join(home, ".archastro", "team-room");
   const legacyScript = join(legacyDir, "room_post.py");
-  if (!existsSync(legacyScript)) return;
+  // lstat, not existsSync: existsSync follows links, so a BROKEN symlink
+  // here would read as "nothing to migrate" and stay behind un-healed.
+  let entry = null;
+  try { entry = lstatSync(legacyScript); } catch { return; }
 
   const legacyRoom = join(legacyDir, "room.json");
   const roomConfig = join(home, ".config", "team-room", "room.json");
@@ -299,7 +302,9 @@ function migrateLegacyKit(home, kitDir) {
     // pin may predate later room moves.
     let legacyCfg = null;
     try { legacyCfg = JSON.parse(readFileSync(legacyRoom, "utf8")); } catch { /* malformed */ }
-    if (legacyCfg && ROOM_KEYS.every((k) => legacyCfg[k])) {
+    // Non-empty strings only: a truthy array/object here would pass install
+    // and then fail every runtime command's stricter validation.
+    if (legacyCfg && ROOM_KEYS.every((k) => typeof legacyCfg[k] === "string" && legacyCfg[k])) {
       mkdirSync(dirname(roomConfig), { recursive: true });
       cpSync(legacyRoom, roomConfig);
       chmodSync(roomConfig, 0o600);
@@ -315,14 +320,16 @@ function migrateLegacyKit(home, kitDir) {
   // healed the rename by hand), writing would follow it and destroy the real
   // kit — and a forwarder in its place would exec itself forever. If it
   // already resolves into the current kit dir, there's nothing to heal.
-  const st = lstatSync(legacyScript);
-  if (st.isSymbolicLink()) {
-    const target = realpathSync(legacyScript);
-    if (target.startsWith(join(home, ".archastro", "agent-rooms"))) {
+  if (entry.isSymbolicLink()) {
+    let target = null;
+    try { target = realpathSync(legacyScript); } catch { /* broken link */ }
+    // Exact-path equality, not a prefix test: a prefix match would bless
+    // any file under agent-rooms — or a sibling dir like agent-rooms-x.
+    if (target && target === realpathSync(join(kitDir, "room_post.py"))) {
       console.log(`legacy kit already links to the current one (${legacyScript}); leaving it`);
       return;
     }
-    unlinkSync(legacyScript); // stale link elsewhere: replace the entry itself
+    unlinkSync(legacyScript); // stale or broken link: replace the entry itself
   }
 
   writeFileSync(
