@@ -427,6 +427,115 @@ def expand_ref(ref: str, remote_url: str) -> str:
     return ref
 
 
+# ── Session state ───────────────────────────────────────────────────
+#
+# Persistent state for one working session, so the tool can react to what a
+# session ACTUALLY did rather than to prose it read hours ago. Some harnesses
+# have a todo list we could write to; most don't, and none share a format — so
+# the state lives here, in the one file every harness runs identically.
+#
+# The session key is worktree + branch: stable across invocations, meaningful
+# (one session works one branch in one worktree), and requiring no harness API.
+SESSION_STATE_PATH = os.path.expanduser("~/.config/team-room/sessions.json")
+SESSION_IDLE_RESET_HOURS = 12
+NUDGE_COOLDOWN_SECONDS = 900
+
+
+def _session_key() -> str:
+    top = git("rev-parse", "--show-toplevel") or "no-repo"
+    return f"{os.path.basename(top)}:{git('branch', '--show-current') or 'detached'}"
+
+
+def _load_sessions() -> dict:
+    try:
+        with open(SESSION_STATE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def session_state() -> dict:
+    """This session's record, reset if it's been idle long enough to be a new
+    working session rather than a continuation."""
+    all_s = _load_sessions()
+    st = all_s.get(_session_key()) or {}
+    last = st.get("last_at", 0)
+    if last and time.time() - last > SESSION_IDLE_RESET_HOURS * 3600:
+        st = {}
+    return st
+
+
+def record_session(event: str, topic: str = "", hits: int = 0, areas=None):
+    """Note that this session searched or posted. Best-effort and silent: the
+    room must never fail a command over its own bookkeeping."""
+    try:
+        all_s = _load_sessions()
+        key = _session_key()
+        st = session_state()
+        st.setdefault("started_at", time.time())
+        st["last_at"] = time.time()
+        if event == "search":
+            st["searches"] = st.get("searches", 0) + 1
+            st["last_search_at"] = time.time()
+            topics = st.setdefault("topics", [])
+            t = (topic or "").strip().lower()[:80]
+            if t and t not in topics:
+                topics.append(t)
+            st["topics"] = topics[-40:]
+            st["hits"] = st.get("hits", 0) + hits
+        elif event == "post":
+            st["posts"] = st.get("posts", 0) + 1
+        for a in areas or []:
+            seen = st.setdefault("areas", [])
+            if a not in seen:
+                seen.append(a)
+        st["areas"] = st.get("areas", [])[-40:]
+        all_s[key] = st
+        os.makedirs(os.path.dirname(SESSION_STATE_PATH), exist_ok=True)
+        tmp = SESSION_STATE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(all_s, f, indent=2)
+        os.replace(tmp, SESSION_STATE_PATH)
+    except Exception:
+        pass
+
+
+def session_nudge(areas=None) -> str:
+    """One line telling this session what it is failing to do, or "".
+
+    Two rules only, both drawn from measured failures: sessions write to the
+    room without ever reading it, and sessions move onto new ground without
+    asking what is already known there. Rate-limited and never repeated —
+    a tool that nags gets ignored, which is worse than saying nothing.
+    """
+    try:
+        st = session_state()
+        if time.time() - st.get("last_nudge_at", 0) < NUDGE_COOLDOWN_SECONDS:
+            return ""
+        posts, searches = st.get("posts", 0), st.get("searches", 0)
+        known = set(st.get("topics", []))
+        msg = ""
+        fresh = [a for a in (areas or []) if a.lower() not in known][:2]
+        if posts >= 3 and searches == 0:
+            msg = (f"you've posted {posts} times this session and never asked the "
+                   "room anything. Posting is not reading — try "
+                   'room-post search "<what you\'re working on>"')
+        elif fresh and searches and not (set(a.lower() for a in fresh) & known):
+            msg = (f"new ground this session ({', '.join(fresh)}) that you haven't "
+                   "asked the room about yet")
+        if msg:
+            all_s = _load_sessions()
+            cur = all_s.get(_session_key(), {})
+            cur["last_nudge_at"] = time.time()
+            all_s[_session_key()] = cur
+            os.makedirs(os.path.dirname(SESSION_STATE_PATH), exist_ok=True)
+            with open(SESSION_STATE_PATH, "w", encoding="utf-8") as f:
+                json.dump(all_s, f, indent=2)
+        return msg
+    except Exception:
+        return ""
+
+
 def build_metadata(post_type, refs, addressee=None, answers=None) -> dict:
     """Structured exhaust attached to every post (message `metadata`, never
     rendered): the correlation-food downstream readers (librarian, views,
@@ -830,6 +939,7 @@ def search(query: str):
             die(f"search failed ({e.code}): {e.read().decode()[:200]}")
     except RuntimeError as e:
         die(str(e), 3)
+    record_session("search", topic=query, hits=len(items))
     render_hits(items, query)
 
 
@@ -1851,6 +1961,10 @@ def main():
             print("metadata: " + json.dumps(metadata, indent=2))
         return
     session = post(message, metadata, uploads)
+    record_session("post", areas=(metadata or {}).get("areas"))
+    nudge = session_nudge((metadata or {}).get("areas"))
+    if nudge:
+        print(f"\nroom: {nudge}", file=sys.stderr)
     mirror_fanout(message, metadata, uploads)
 
 
