@@ -84,5 +84,53 @@ with tempfile.TemporaryDirectory() as tmp:
     check("a missing skill path aborts instead of grading an empty skill",
           proc.returncode != 0 and "does-not-exist.md" in proc.stderr)
 
+
+# --- an agent that never answered must RAISE, not score ------------------
+# The defect this guards: subprocess.run does not raise on a non-zero exit,
+# so a dead API key or a network outage came back as ordinary output and got
+# scored. A no-network run reported "5 passed, 2 failed, 0 errors" while the
+# model was unreachable the whole time, which run.sh would have published as
+# an agent behavior regression.
+import subprocess as _sp
+
+mod = load_eval()
+_real_run = _sp.run
+
+
+class _FakeCompleted:
+    def __init__(self, rc, out="", err=""):
+        self.returncode, self.stdout, self.stderr = rc, out, err
+
+
+mod.subprocess.run = lambda *a, **k: _FakeCompleted(1, "", "stream disconnected before completion")
+try:
+    mod.ask("codex", "anything")
+    check("a non-zero agent exit raises instead of being scored", False)
+except RuntimeError as exc:
+    check("a non-zero agent exit raises instead of being scored",
+          "exited 1" in str(exc))
+except Exception:
+    check("a non-zero agent exit raises instead of being scored", False)
+
+# Exiting 0 while producing no answer is the same incident, not a silent pass.
+mod.subprocess.run = lambda *a, **k: _FakeCompleted(0, "some transcript noise", "")
+try:
+    mod.ask("codex", "anything")
+    check("an empty final message raises rather than scoring the transcript", False)
+except RuntimeError as exc:
+    check("an empty final message raises rather than scoring the transcript",
+          "no final message" in str(exc))
+
+# --- the skill's own words can never satisfy a scorer --------------------
+# codex echoes the prompt (which embeds the whole SKILL.md) into stdout, and
+# the skill documents the very commands the scorers grep for. Scoring the
+# transcript therefore passes scenarios on the skill's text alone.
+skill_only = mod.SKILL
+scored_by_skill = [sc["name"] for sc in mod.SCENARIOS if sc["score"](skill_only)]
+check("the skill text alone would satisfy scorers, so answers must be isolated",
+      len(scored_by_skill) > 0)
+
+mod.subprocess.run = _real_run
+
 print(f"\n{PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
