@@ -947,6 +947,12 @@ def build_metadata(post_type, refs, addressee=None, answers=None) -> dict:
         st = session_state()
         meta["session_reads"] = st.get("searches", 0) + st.get("reads", 0)
         meta["posts_since_read"] = st.get("posts_since_read", 0)
+        started = st.get("started_at")
+        if started:
+            # Minutes into the session at post time: a lesson's value is what
+            # discovery COST its author; a done's value is the cycle it closed.
+            # These two numbers turn "the room saves time" into arithmetic.
+            meta["session_minutes"] = int((time.time() - started) / 60)
         assist = st.get("last_assist") or {}
         if assist.get("msg_id") and time.time() - assist.get("at", 0) < 4 * 3600:
             meta["assisted_by"] = assist["msg_id"]
@@ -954,12 +960,14 @@ def build_metadata(post_type, refs, addressee=None, answers=None) -> dict:
                 meta["assisted_author"] = assist["author"]
     except Exception:
         pass
-    # NOTE: "commits": 0 is meaningful coverage data (a post with no new
-    # commits) — the falsy-filter below would drop it, so filter first and
-    # re-attach.
+    # Zero is data for the counting fields (a post with no new commits, a
+    # post in a session's first minute, zero posts since reading) — the
+    # falsy filter must not eat them.
+    _ZERO_OK = ("commits", "session_minutes", "posts_since_read", "session_reads")
     filtered = {k: v for k, v in meta.items() if v}
-    if meta.get("commits") == 0:
-        filtered["commits"] = 0
+    for k in _ZERO_OK:
+        if meta.get(k) == 0:
+            filtered[k] = 0
     return filtered
 
 
