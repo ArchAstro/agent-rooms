@@ -8,6 +8,11 @@ Each scenario hands an agent the skill plus a situation and mechanically
 scores the reply. This is the formalization of the A/B pressure tests that
 drove the skill rewrite; run it after ANY skill or kit change that could
 move behavior. Scores print per scenario; exit 1 if any agent fails a MUST.
+
+TEAM_ROOM_SKILL points the eval at the SKILL.md to grade against, so a
+consumer that vendors the kit (a repo's .claude/skills/team-room, an
+operations image) can run this file verbatim against the copy its agents
+actually load, rather than a second copy that drifts.
 """
 import json
 import os
@@ -16,7 +21,9 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SKILL = open(os.path.join(HERE, "..", "skills", "team-room", "SKILL.md")).read()
+SKILL_PATH = os.environ.get("TEAM_ROOM_SKILL") or os.path.join(
+    HERE, "..", "skills", "team-room", "SKILL.md")
+SKILL = open(SKILL_PATH).read()
 
 SCENARIOS = [
     {
@@ -148,6 +155,17 @@ def ask(agent, prompt):
     return (r.stdout or "") + (r.stderr or "")
 
 
+def result_line(agent, passed, failed, warned, errored):
+    """One machine-readable line per agent, for unattended runners.
+
+    `errored` is reported separately from `failed` on purpose: a run where
+    the agent binary never answered (bad key, no network, missing CLI) must
+    never be published as "behavior regressed" — those are different
+    incidents with different owners."""
+    return (f"RESULT agent={agent} pass={passed} fail={failed} "
+            f"warn={warned} error={errored}")
+
+
 def main():
     targets = sys.argv[1:] or ["codex", "agy"]
     if targets == ["all"]:
@@ -155,19 +173,27 @@ def main():
     hard_fail = False
     for agent in targets:
         print(f"\n=== {agent} ===")
+        passed = failed = warned = errored = 0
         for sc in SCENARIOS:
             try:
                 out = ask(agent, sc["prompt"])
                 ok = bool(sc["score"](out))
             except Exception as exc:
                 ok, out = False, f"(runner error: {exc})"
+                errored += 1
             tag = "PASS" if ok else ("FAIL" if sc["must"] else "warn")
-            if not ok and sc["must"]:
+            if ok:
+                passed += 1
+            elif sc["must"]:
+                failed += 1
                 hard_fail = True
+            else:
+                warned += 1
             print(f"{tag:5} {sc['name']:24} {sc['label']}")
             if not ok:
                 tail = " | ".join(out.strip().splitlines()[-3:])[:200]
                 print(f"      last output: {tail}")
+        print(result_line(agent, passed, failed, warned, errored))
     sys.exit(1 if hard_fail else 0)
 
 
