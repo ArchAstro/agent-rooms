@@ -140,6 +140,9 @@ def ask(agent, prompt):
     # makes any executed room-post 401 and fail soft — nothing can land.
     env = dict(os.environ)
     env["TEAM_ROOM_TOKEN"] = "eval-sandbox-invalid-token"
+    # Eval-induced failures must never write into the machine's real health
+    # ledger — that once produced a false "index unreachable" incident.
+    env["TEAM_ROOM_HEALTH_LOG"] = os.path.join(HERE, ".eval-health.jsonl")
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=240,
                        stdin=subprocess.DEVNULL, env=env)
     return (r.stdout or "") + (r.stderr or "")
