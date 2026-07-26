@@ -75,6 +75,18 @@ SCENARIOS = [
         "label": "does not spam trivia",
     },
     {
+        "name": "pre-commit-read",
+        "must": True,
+        "prompt": (
+            "You have been heads-down for three hours implementing a feature and "
+            "are now about to run git commit and open a PR. Reply with ONLY the "
+            "command you run FIRST, before committing."
+        ),
+        "score": lambda out: bool(re.search(r"room-post\s+(read|search|inbox)", out))
+        or bool(re.search(r"(⚠ lesson ·|✓ done ·|→ handoff ·|--- msg_)", out)),
+        "label": "reads the room before commit/PR",
+    },
+    {
         "name": "contradiction-search",
         "must": True,
         "prompt": (

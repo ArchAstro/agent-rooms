@@ -1,0 +1,66 @@
+I0725 21:35:06.196099 26931 server.go:1423] Starting language server process with pid 26931
+I0725 21:35:06.196946 26931 server.go:1473] Language server version: 1.1.7
+I0725 21:35:06.196961 26931 server.go:545] Language server will attempt to listen on host localhost
+I0725 21:35:06.197760 26931 server.go:560] Language server listening on random port at 65524 for HTTPS (gRPC)
+I0725 21:35:06.197948 26931 server.go:568] Language server listening on random port at 65525 for HTTP
+E0725 21:35:06.354877 26931 log.go:398] Failed to poll ListExperiments: error getting token source: You are not logged into Antigravity.
+W0725 21:35:06.355030 26931 log_context.go:117] Cache(loadCodeAssistResponse): Singleflight refresh failed: error getting token source: You are not logged into Antigravity.
+E0725 21:35:06.355049 26931 log.go:398] error getting token source: You are not logged into Antigravity.
+W0725 21:35:06.355104 26931 log_context.go:117] Cache(availableModels): Singleflight refresh failed: failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+E0725 21:35:06.355126 26931 log.go:398] failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+E0725 21:35:06.355175 26931 log.go:398] Failed to poll FetchAvailableModels: failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+W0725 21:35:06.356575 26931 launchmanager.go:69] Entering local chrome mode! This is WRONG unless you are running tests or in eval mode on Linux.
+I0725 21:35:06.356934 26931 manager.go:98] Creating trajectory store manager with proto store and SQLite store
+I0725 21:35:06.357529 26931 manager.go:76] Migration [MIGRATION_ID_SIDECAR_USER_CONFIG_BYPASS] is disabled, skipping entirely
+I0725 21:35:06.357853 26931 manager.go:79] Migration [MIGRATION_ID_SANITY_CHECK_PROJECT_URIS] is enabled
+I0725 21:35:06.357880 26931 manager.go:88] Migration [MIGRATION_ID_SANITY_CHECK_PROJECT_URIS] already has status MIGRATION_STATUS_COMPLETED, skipping
+I0725 21:35:06.362083 26931 server.go:2689] Auth succeeded, refreshing features and managers
+E0725 21:35:06.362169 26931 log.go:398] Failed to poll ListExperiments: error getting token source: You are not logged into Antigravity.
+W0725 21:35:06.362244 26931 log_context.go:117] Cache(loadCodeAssistResponse): Singleflight refresh failed: error getting token source: You are not logged into Antigravity.
+E0725 21:35:06.362264 26931 log.go:398] error getting token source: You are not logged into Antigravity.
+W0725 21:35:06.362304 26931 log_context.go:117] Cache(availableModels): Singleflight refresh failed: failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+E0725 21:35:06.362318 26931 log.go:398] failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+E0725 21:35:06.362354 26931 log.go:398] Failed to poll FetchAvailableModels: failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+I0725 21:35:06.362379 26931 server.go:2695] State refresh took 0ms
+I0725 21:35:06.362395 26931 server.go:2705] [RemoteControl] Subscription callback triggered.
+I0725 21:35:06.362400 26931 server.go:2707] [RemoteControl] RemoteControlEnabled value: false
+I0725 21:35:06.362406 26931 server.go:2845] [RemoteControl] Resolved proxyServerURL: ""
+I0725 21:35:06.362421 26931 profiler.go:154] Continuous pprof profiling is disabled.
+I0725 21:35:06.362610 26931 server.go:2246] initialized server successfully in 166.445ms
+I0725 21:35:06.362954 26931 auto_updater.go:217] Last check was less than 15 minutes ago, skipping update (fast path)
+I0725 21:35:06.362985 26931 common.go:132] Launching CLI mode
+E0725 21:35:06.362998 26931 common.go:147] Failed to resolve GeminiDir ".gemini": .gemini must be an absolute path: path is not absolute, falling back to default
+I0725 21:35:06.363015 26931 common.go:178] CLI app data directory: /private/tmp/claude-501/-Users-vivek-archastro-firstlanding-wt1/4faa2146-ced3-48a3-a0af-5c4cb465eb60/scratchpad/agent-rooms/evals/.eval-home/.gemini/antigravity-cli
+I0725 21:35:06.363047 26931 server.go:244] Creating CLI server backend: product=antigravity workspaceDirs=[/private/tmp/claude-501/-Users-vivek-archastro-firstlanding-wt1/4faa2146-ced3-48a3-a0af-5c4cb465eb60/scratchpad/agent-rooms] appDataDir=/private/tmp/claude-501/-Users-vivek-archastro-firstlanding-wt1/4faa2146-ced3-48a3-a0af-5c4cb465eb60/scratchpad/agent-rooms/evals/.eval-home/.gemini/antigravity-cli cascadeManager=true codeAssist=true
+W0725 21:35:06.363942 26931 log_context.go:117] Cache(loadCodeAssistResponse): Singleflight refresh failed: error getting token source: You are not logged into Antigravity.
+E0725 21:35:06.363969 26931 log.go:398] error getting token source: You are not logged into Antigravity.
+W0725 21:35:06.364027 26931 log_context.go:117] Cache(userInfo): Singleflight refresh failed: failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+E0725 21:35:06.364041 26931 log.go:398] failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+I0725 21:35:06.364696 26931 store_client.go:490] summary store: starting background reconciliation (trigger=empty_on_open)
+E0725 21:35:06.364785 26931 server.go:2384] Failed to read conversations directory /private/tmp/claude-501/-Users-vivek-archastro-firstlanding-wt1/4faa2146-ced3-48a3-a0af-5c4cb465eb60/scratchpad/agent-rooms/evals/.eval-home/.gemini/antigravity/conversations: open /private/tmp/claude-501/-Users-vivek-archastro-firstlanding-wt1/4faa2146-ced3-48a3-a0af-5c4cb465eb60/scratchpad/agent-rooms/evals/.eval-home/.gemini/antigravity/conversations: no such file or directory
+I0725 21:35:06.364820 26931 server.go:2262] ListConversations returning 0 summaries
+I0725 21:35:06.364831 26931 store_client.go:503] summary store: reconcile func returned 0 records, skipping
+W0725 21:35:06.364957 26931 log_context.go:117] Cache(loadCodeAssistResponse): Singleflight refresh failed: error getting token source: You are not logged into Antigravity.
+E0725 21:35:06.364973 26931 log.go:398] error getting token source: You are not logged into Antigravity.
+W0725 21:35:06.365019 26931 log_context.go:117] Cache(userInfo): Singleflight refresh failed: failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+E0725 21:35:06.365031 26931 log.go:398] failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+I0725 21:35:06.365050 26931 server.go:1620] Backend project ID updated dynamically to: default-cli-project
+I0725 21:35:06.365068 26931 printmode.go:108] Print mode: starting (promptLength=7127, model="", conversationID="")
+I0725 21:35:06.365083 26931 manager.go:332] Initializing CLI store manager for workspace /private/tmp/claude-501/-Users-vivek-archastro-firstlanding-wt1/4faa2146-ced3-48a3-a0af-5c4cb465eb60/scratchpad/agent-rooms
+W0725 21:35:06.365159 26931 cli_setting_manager.go:358] cli settings not available, using defaults: failed to read cli settings: open /private/tmp/claude-501/-Users-vivek-archastro-firstlanding-wt1/4faa2146-ced3-48a3-a0af-5c4cb465eb60/scratchpad/agent-rooms/evals/.eval-home/.gemini/antigravity-cli/settings.json: no such file or directory
+I0725 21:35:06.365213 26931 cli_setting_manager.go:138] applyUserSettings: no shared config permissions from /private/tmp/claude-501/-Users-vivek-archastro-firstlanding-wt1/4faa2146-ced3-48a3-a0af-5c4cb465eb60/scratchpad/agent-rooms/evals/.eval-home/.gemini/config/config.json
+I0725 21:35:06.365242 26931 cli_setting_manager.go:820] Skipping telemetry propagation because user is not logged in
+I0725 21:35:06.365268 26931 cli_setting_manager.go:81] CLI settings initialized: permissions=<nil>, toolPermission=request-review
+I0725 21:35:06.365431 26931 hooks_manager.go:53] loaded 0 named hooks from 0 hooks.json file(s)
+I0725 21:35:06.365453 26931 manager.go:502] CLI store manager initialized successfully
+I0725 21:35:06.365462 26931 printmode.go:330] Print mode: not authenticated, trying silent auth
+I0725 21:35:06.390600 26931 printmode.go:336] Print mode: silent auth failed
+I0725 21:35:06.390645 26931 printmode.go:353] Print mode: triggering interactive OAuth
+I0725 21:35:06.390677 26931 auth_manager.go:110] Starting OAuth authentication flow
+I0725 21:35:06.390686 26931 browser.go:56] consumerOAuth: starting OAuth flow
+E0725 21:35:11.356363 26931 server.go:717] Failed to get OAuth token: error getting token source from auth provider: You are not logged into Antigravity.
+I0725 21:35:59.671627 26931 server.go:2529] Got signal terminated, shutting down
+I0725 21:35:59.672113 26931 server.go:2570] Language server shutting down
+W0725 21:35:59.672145 26931 printmode.go:393] Print mode: auth cancelled or interrupted
+I0725 21:35:59.672281 26931 server.go:2575] Waiting for migrations to complete to prevent partial migration state...
+I0725 21:35:59.672339 26931 manager.go:682] CLI store manager shutting down
