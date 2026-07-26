@@ -568,6 +568,10 @@ def record_session(event: str, topic: str = "", hits: int = 0, areas=None):
             if event == "search":
                 st["searches"] = st.get("searches", 0) + 1
                 st["last_search_at"] = time.time()
+                st["posts_since_read"] = 0
+            elif event == "read":
+                st["reads"] = st.get("reads", 0) + 1
+                st["posts_since_read"] = 0
                 topics = st.setdefault("topics", [])
                 t = (topic or "").strip().lower()[:80]
                 if t and t not in topics:
@@ -576,6 +580,7 @@ def record_session(event: str, topic: str = "", hits: int = 0, areas=None):
                 st["hits"] = st.get("hits", 0) + hits
             elif event == "post":
                 st["posts"] = st.get("posts", 0) + 1
+                st["posts_since_read"] = st.get("posts_since_read", 0) + 1
             for a in areas or []:
                 seen = st.setdefault("areas", [])
                 if a not in seen:
@@ -623,10 +628,18 @@ def session_nudge(areas=None) -> str:
         # tried and cut — it fired only for people who HAD searched, so the
         # reward for reading was more nagging, and it matched file paths
         # against query text, which is too crude to be worth the noise.
+        since = st.get("posts_since_read", 0)
         if posts >= 3 and searches == 0:
             msg = (f"you've posted {posts} times this session and never asked the "
                    "room anything. Posting is not reading — try "
                    'room-post search "<what you\'re working on>"')
+        elif since >= 4:
+            # One early search must not immunize a marathon session: a real
+            # session posted for hours past a bug flagged AT it because its
+            # morning search zeroed the rule above out forever.
+            msg = (f"{since} posts since you last read the room. Teammates may "
+                   "have flagged things at you — room-post read 15, or search "
+                   "what you're working on")
         if msg:
             key = _session_key()
 
@@ -922,6 +935,7 @@ def read_session():
 
 
 def read(limit: int = 30):
+    record_session("read")
     # One line of protocol currency: sessions load instructions once at
     # start, but this tool always runs current. If the room's rules have
     # moved since a session began, this is how it finds out.
@@ -1607,6 +1621,7 @@ def records_supersede(old_id: str, new_id: str):
 
 
 def brief():
+    record_session("read")
     """Session-start read path: the approved records, compact, grouped."""
     _, _, _, session = authed_session()
     rows = fetch_records(session, status="approved")
@@ -1926,6 +1941,7 @@ def login(mirror: dict | None = None, best_effort: bool = False,
 
 
 def inbox():
+    record_session("read")
     """Open requests addressed to me, matched on structured metadata —
     never by scraping post text. A request is a member post (it carries
     the tool's metadata) whose addressee is my first name; it clears
