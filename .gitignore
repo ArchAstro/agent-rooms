@@ -1,3 +1,10 @@
 node_modules/
 *.pyc
 __pycache__/
+
+# Sandboxed HOME captured by an eval run. The eval must never override HOME
+# (that once relaunched a browser login at the operator), so nothing should
+# recreate this; ignored so a stray run cannot commit another vendor's
+# builtin skill docs into a public repo.
+evals/.eval-home/
+evals/.eval-health.jsonl
