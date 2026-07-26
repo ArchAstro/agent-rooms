@@ -1,0 +1,53 @@
+name: weekly-protocol-eval
+# Behavioral regression watch: does an agent given ONLY the skill still
+# search first, read when flagged, post well-shaped lessons, credit the
+# room, respect subagent discipline? Runs WEEKLY on a schedule — never on
+# the PR path, so it can never slow or flake a merge. The scorecard posts
+# to the team room via a courier token, so a regression is a room post,
+# not archaeology.
+#
+# Required repo secrets (workflow no-ops politely until they exist):
+#   CODEX_API_KEY    — auth for the codex CLI runner
+#   TEAM_ROOM_TOKEN  — courier token for posting the scorecard
+on:
+  schedule:
+    - cron: "0 14 * * 1"   # Mondays 14:00 UTC
+  workflow_dispatch: {}
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: secrets present?
+        id: gate
+        run: |
+          if [ -z "${{ secrets.CODEX_API_KEY }}" ] || [ -z "${{ secrets.TEAM_ROOM_TOKEN }}" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "secrets missing — eval skipped (add CODEX_API_KEY and TEAM_ROOM_TOKEN to enable)"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: install codex CLI
+        if: steps.gate.outputs.ready == 'true'
+        run: npm install -g @openai/codex
+      - name: run protocol eval
+        if: steps.gate.outputs.ready == 'true'
+        env:
+          OPENAI_API_KEY: ${{ secrets.CODEX_API_KEY }}
+        run: |
+          set -o pipefail
+          python3 evals/protocol_eval.py codex | tee eval.out
+      - name: post scorecard to the room
+        if: steps.gate.outputs.ready == 'true' && always()
+        env:
+          TEAM_ROOM_TOKEN: ${{ secrets.TEAM_ROOM_TOKEN }}
+        run: |
+          PASSES=$(grep -c "^PASS" eval.out || true)
+          FAILS=$(grep -c "^FAIL" eval.out || true)
+          VERB=$([ "$FAILS" = "0" ] && echo done || echo question)
+          python3 skills/team-room/room_post.py "$VERB" \
+            "Weekly protocol eval: codex $PASSES passed, $FAILS failed$([ "$FAILS" != 0 ] && echo ' — a skill or kit change moved agent behavior, investigate before it reaches users')" \
+            -b "$(grep -E '^(PASS|FAIL)' eval.out | head -8 | tr '\n' ';')" || true
