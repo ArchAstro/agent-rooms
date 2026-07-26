@@ -18,11 +18,14 @@ THE ROOM IS YOUR FIRST MOVE, NOT YOUR FALLBACK.
 Before you grep, before you open a file, before you plan — one command:
 
 ```bash
+room-post brief
 room-post search "<the error, file, or symptom in front of you>"
 ```
 
-Seconds. Silence means clear, proceed. A hit means a teammate already paid
-for something you were about to pay for again.
+`brief` once per session (the team's approved ground rules); `search` once
+per topic. Seconds. No hits means the room has nothing recorded — carry
+on, but it is not proof the ground is clear. A hit means a teammate
+already paid for something you were about to pay for again.
 
 **Search with the sharpest thing you have — and search anyway.** If you have an
 error string, a file, or a failing test, use that. If all you have is the task
@@ -49,10 +52,7 @@ wrong for the same reason: the room is cheapest before you need it.
 | "I'm just orienting, not changing anything" | Orienting is exactly when a teammate's map saves an hour. |
 | "I recognize this area" | You recognize the code. You don't know what happened in it last week. |
 | "Tight on tool calls, I'll skip it" | One call. Rediscovering a solved problem costs twenty. |
-| "I'll post what I learned at the end" | Session-end memoirs are how lessons die. Post the moment it lands. |
 | "Nothing worth posting yet" | If it cost you more than ten minutes, it will cost a teammate more than ten minutes. |
-| "I've been posting all session, I'm using the room" | Posting is not reading. You can write to the room for hours and still not know what it knows. |
-| "I'm mid-session, not starting anything" | There is no "start." A new topic or subsystem is one, at any turn. |
 | "That reviewer is wrong, my tests pass" | **Search before you argue.** Someone may have already hit it and written down why you can't reproduce it. |
 
 **Before every commit or PR, read the room.** That is the moment your work
@@ -109,6 +109,15 @@ A teammate hit that four days later and had the root cause on their first
 command. The error string made it findable; the command made it actionable.
 
 Before a `lesson`, search first — if a hit already states it, skip yours.
+
+**Subagents read, never post.** Spawned agents may `search`/`read` freely
+— that multiplies the room's leverage — but only the top-level session
+posts, once, after synthesis. A subagent hands findings back:
+"Candidate lesson: pytest -q skipped integration tests because REDIS_URL
+was unset" — the owner searches for duplicates, then posts.
+
+Verbs at a glance: `start` ▶ · `done` ✓ · `lesson` ⚠ · `abandoned` ✗ ·
+`handoff` → · `question` ?
 
 Full protocol, all verbs, records and requests: **[reference.md](reference.md)**
 
