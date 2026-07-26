@@ -97,7 +97,9 @@ configure_ca_bundle()
 # team's traffic into another team's thread.
 _ROOM_KEYS = ("thread_id", "team_id", "server", "portal", "app_slug", "publishable_key")
 ROOM_CONFIG_PATH = os.path.expanduser("~/.config/team-room/room.json")
-HEALTH_LOG_PATH = os.path.expanduser("~/.config/team-room/health.jsonl")
+HEALTH_LOG_PATH = os.environ.get(
+    "TEAM_ROOM_HEALTH_LOG",
+    os.path.expanduser("~/.config/team-room/health.jsonl"))
 
 
 def health_event(component: str, reason: str):
@@ -123,7 +125,13 @@ def health_event(component: str, reason: str):
                 r["last_seen"] = now
                 break
         else:
-            rows.append({"component": component, "reason": reason[:200],
+            srv = ""
+        try:
+            srv = (PRODUCTION_SERVER or "").replace("https://", "")[:40]
+        except Exception:
+            pass
+        rows.append({"component": component, "reason": reason[:200],
+                     "server": srv,
                          "count": 1, "first_seen": now, "last_seen": now})
         tmp = HEALTH_LOG_PATH + ".tmp"
         with open(tmp, "w") as f:
@@ -1331,7 +1339,10 @@ def search_items(session, query: str, max_results: int = 8) -> list:
     def do(sid):
         url = (f"{PRODUCTION_SERVER}/protected/api/v1/developer/apps/"
                f"{session['appId']}/context/sources/{sid}/search")
-        return http_json(url, body, token=session["accessToken"])
+        # Reads must never hang a session toward the 30s default — a slow
+        # index once had searches "not responding" for real; 8s is the most
+        # a read is worth before failing soft.
+        return http_json(url, body, token=session["accessToken"], timeout=8)
 
     src = ROOM_SOURCE_ID or resolve_room_source(session)
     if not src:
@@ -1438,13 +1449,20 @@ def gather_hits(session, query: str) -> list:
     if len(keys) >= 2:
         probes.append(" ".join(keys[:6]))
     seen, merged, failures = set(), [], 0
-    for probe in probes:
-        try:
-            items = search_items(session, probe, max_results=30)
-        except Exception as exc:
-            failures += 1
-            health_event("search-probe", f"{type(exc).__name__}: {exc}")
-            continue
+    # Probes run in PARALLEL: sequential probes doubled search latency for
+    # every session (809ms vs 479ms measured) — the second probe is a
+    # recall widener, not a dependency.
+    import concurrent.futures as _cf
+    results = []
+    with _cf.ThreadPoolExecutor(max_workers=len(probes)) as _ex:
+        futs = [_ex.submit(search_items, session, pr, 30) for pr in probes]
+        for f in futs:
+            try:
+                results.append(f.result(timeout=12))
+            except Exception as exc:
+                failures += 1
+                health_event("search-probe", f"{type(exc).__name__}: {exc}")
+    for items in results:
         for it in items:
             key = it.get("id") or (it.get("content") or "")[:120]
             if key in seen:
@@ -2591,13 +2609,30 @@ def _run_never_blocking():
               file=sys.stderr)
 
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    _t0 = time.monotonic()
+
+    def _note_latency():
+        # "It felt slow" must be answerable with data: any command over
+        # 3s gets one deduped ledger line that doctor will surface.
+        try:
+            took = time.monotonic() - _t0
+            if took > 3.0:
+                bucket = "3-8s" if took <= 8 else "8-30s" if took <= 30 else ">30s"
+                health_event(f"slow:{cmd or 'help'}", bucket)
+        except Exception:
+            pass
+
     if cmd not in _NEVER_BLOCK:
-        main()
+        try:
+            main()
+        finally:
+            _note_latency()
         return
     is_write = cmd not in {"search", "brief", "read", "records", "inbox", "discover"}
     try:
         main()
     except SystemExit as e:
+        _note_latency()
         if e.code in (0, None):
             raise
         what = (("your post DID land, but the kit failed after sending — do "
