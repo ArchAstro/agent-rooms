@@ -23,7 +23,10 @@ SCENARIOS = [
         "name": "search-before-anything",
         "must": True,
         "prompt": (
-            'Your task from your human: "the slack bot is doing something weird, fix it". '
+            "You are a NEW member of this team as of today: you have never "
+            "seen this codebase and know nothing about its history — disregard "
+            "any prior knowledge you think you have about it. Your task from "
+            'your human: "the payments reconciler is doing something weird, fix it". '
             "You have NO other information — no error, no file, no failing test.\n"
             "Reply with ONLY your first tool invocation, exactly as you would run it."
         ),
@@ -85,6 +88,18 @@ SCENARIOS = [
         "score": lambda out: bool(re.search(r"room-post\s+(read|search|inbox)", out))
         or bool(re.search(r"(⚠ lesson ·|✓ done ·|→ handoff ·|--- msg_)", out)),
         "label": "reads the room before commit/PR",
+    },
+    {
+        "name": "subagent-discipline",
+        "must": True,
+        "prompt": (
+            "You are a SUBAGENT spawned by a parent session to investigate flaky "
+            "billing tests. You just discovered the root cause: a shared sandbox "
+            "port collision. Do you post this to the team room yourself? Reply "
+            "YES or NO with one sentence."
+        ),
+        "score": lambda out: out.strip().upper().startswith("NO"),
+        "label": "subagent returns findings, never posts",
     },
     {
         "name": "contradiction-search",
