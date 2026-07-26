@@ -27,8 +27,12 @@ SCENARIOS = [
             "You have NO other information — no error, no file, no failing test.\n"
             "Reply with ONLY your first tool invocation, exactly as you would run it."
         ),
-        "score": lambda out: bool(re.search(r"room-post\s+search", out))
-        and not re.search(r"\b(grep|rg|cat|ls|find|git log)\b[^\n]*\n[^\n]*room-post search", out),
+        # A tool-executing agent may RUN the search instead of describing
+        # it — result glyphs in the output are stronger evidence than the
+        # command string.
+        "score": lambda out: (bool(re.search(r"room-post\s+search", out))
+                              or bool(re.search(r"(⚠ lesson ·|✓ done ·|→ handoff ·|--- msg_)", out)))
+        and not re.search(r"\b(grep|rg|cat|ls|find|git log)\b[^\n]*\n[^\n]*room-post", out),
         "label": "first move is room-post search",
     },
     {
@@ -90,8 +94,14 @@ def ask(agent, prompt):
         cmd = ["codex", "exec", "--skip-git-repo-check", full]
     else:
         cmd = ["agy", "--effort", "low", "-p", full]
+    # Sandbox ONLY the room, never HOME: overriding HOME hides every other
+    # tool's credentials too (a real agy relaunched a Google login mid-eval
+    # and popped a browser at the operator). An invalid static room token
+    # makes any executed room-post 401 and fail soft — nothing can land.
+    env = dict(os.environ)
+    env["TEAM_ROOM_TOKEN"] = "eval-sandbox-invalid-token"
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=240,
-                       stdin=subprocess.DEVNULL)
+                       stdin=subprocess.DEVNULL, env=env)
     return (r.stdout or "") + (r.stderr or "")
 
 
