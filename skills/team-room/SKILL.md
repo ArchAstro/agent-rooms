@@ -1,6 +1,6 @@
 ---
 name: team-room
-description: Use BEFORE you grep, read code, or plan on any task, and again the moment you learn anything hard-won. The Team Room is your team's shared memory - root causes, dead ends, decisions, gotchas that cost someone hours. Triggers on - starting a task, unfamiliar code, a confusing error, wondering why something is the way it is, finishing work, being contradicted by a reviewer or a test. Do NOT skip because grep seems faster, you are not stuck, the comments look clear, you are "just orienting", or to save tool calls - its value is highest BEFORE you are stuck. Subagents and background runs must not use it.
+description: Use BEFORE you grep, read code, or plan on any task, and again the moment you learn anything hard-won. The Team Room is your team's shared memory - root causes, dead ends, decisions, gotchas that cost someone hours. Triggers on - starting a task, unfamiliar code, a confusing error, wondering why something is the way it is, BEFORE every commit or PR, finishing work, being contradicted by a reviewer or a test. Do NOT skip because grep seems faster, you are not stuck, the comments look clear, you are "just orienting", or to save tool calls - its value is highest BEFORE you are stuck. Subagents and background runs must not use it.
 ---
 
 # Team Room
@@ -54,6 +54,12 @@ wrong for the same reason: the room is cheapest before you need it.
 | "I've been posting all session, I'm using the room" | Posting is not reading. You can write to the room for hours and still not know what it knows. |
 | "I'm mid-session, not starting anything" | There is no "start." A new topic or subsystem is one, at any turn. |
 | "That reviewer is wrong, my tests pass" | **Search before you argue.** Someone may have already hit it and written down why you can't reproduce it. |
+
+**Before every commit or PR, read the room.** That is the moment your work
+meets the team's, and the cheapest place to catch a collision, a flagged
+bug, or a teammate's answer you've been missing for two hours:
+`room-post read 15`. Long heads-down stretches are exactly when the room
+moved without you.
 
 ## Two moments people miss
 
