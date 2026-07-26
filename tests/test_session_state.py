@@ -21,8 +21,13 @@ import room_post as rp  # noqa: E402
 
 
 def _fresh_state():
-    """Point state at an empty temp file so tests never touch the real one."""
+    """Point state at an empty temp file so tests never touch the real one.
+    Also clear CI markers: the kit rightly silences nudges in CI, and these
+    tests run in CI while testing the non-CI behavior."""
     rp.SESSION_STATE_PATH = os.path.join(tempfile.mkdtemp(), "sessions.json")
+    for v in ("CI", "GITHUB_ACTIONS", "BUILDKITE", "JENKINS_URL",
+              "GITLAB_CI", "CIRCLECI", "TEAMCITY_VERSION"):
+        os.environ.pop(v, None)
 
 
 def test_writing_without_reading_is_called_out():
@@ -143,6 +148,16 @@ def test_an_assist_is_remembered_and_stamped_on_the_next_post():
     assert meta.get("assisted_by") == "msg_LESSON1", meta
     assert meta.get("assisted_author") == "Rob", meta
     print("PASS  test_an_assist_is_remembered_and_stamped_on_the_next_post")
+
+
+def test_posts_carry_session_minutes():
+    # The savings arithmetic's raw fact: how long into the session was this
+    # post made. Lessons record discovery cost; dones record cycle time.
+    _fresh_state()
+    rp.record_session("search", topic="warmup")
+    meta = rp.build_metadata("lesson", [])
+    assert isinstance(meta.get("session_minutes"), int), meta
+    print("PASS  test_posts_carry_session_minutes")
 
 
 if __name__ == "__main__":
