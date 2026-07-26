@@ -202,7 +202,9 @@ def test_mention_peek_is_throttled_per_worktree():
     _fresh_state()
     calls = []
     real = rp._http_json_short
+    real_auth = rp.authed_session
     rp._http_json_short = lambda *a, **k: (calls.append(1), {"data": []})[1]
+    rp.authed_session = lambda: (None, None, None, {"accessToken": "t", "appId": "a"})
     try:
         rp.record_session("post")
         rp.mention_peek()
@@ -210,8 +212,26 @@ def test_mention_peek_is_throttled_per_worktree():
         rp.mention_peek()
     finally:
         rp._http_json_short = real
+        rp.authed_session = real_auth
     assert len(calls) == 1, f"expected 1 network call, got {len(calls)}"
     print("PASS  test_mention_peek_is_throttled_per_worktree")
+
+
+def test_mention_peek_survives_a_disconnected_machine():
+    # authed_session die()s with SystemExit(3) when not connected — the
+    # peek must swallow it or every post on a fresh machine crashes.
+    # CI (credential-less) caught this; local creds masked it.
+    _fresh_state()
+    real = rp.authed_session
+    def dies():
+        raise SystemExit(3)
+    rp.authed_session = dies
+    try:
+        rp.record_session("post")
+        rp.mention_peek()   # must not raise
+    finally:
+        rp.authed_session = real
+    print("PASS  test_mention_peek_survives_a_disconnected_machine")
 
 
 if __name__ == "__main__":

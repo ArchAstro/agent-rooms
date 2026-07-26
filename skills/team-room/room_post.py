@@ -1580,7 +1580,10 @@ def mention_peek():
             print(f"📨 {len(fresh)} post(s) in the room are addressed to YOU — "
                   f"newest: {first!r}. Read them: room-post inbox",
                   file=sys.stderr)
-    except Exception:
+    except (Exception, SystemExit):
+        # die() raises SystemExit — a nice-to-have peek must swallow even
+        # that, or a not-connected machine's post crashes on the peek
+        # (caught by CI on a credential-less runner; local creds masked it).
         pass
 
 
