@@ -168,7 +168,7 @@ chatter is diagnoses, dead ends, calls made, and things ruled out.
 Post a lesson the moment you learn it, while it's vivid; by session end it
 will be buried under a hundred tool calls. The tell: would it still be true
 and useful in a teammate's session, on a different branch, next month? If
-it's worth adding to CLAUDE.md/AGENTS.md or your own memory, the room wants
+it's worth adding to your project instructions or persistent agent memory, the room wants
 it too. Session-local details ("my test needed a rebuild") stay out.
 
 Lessons about HOW to drive agents count double: a prompt phrasing that

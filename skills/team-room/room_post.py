@@ -1481,23 +1481,33 @@ def rank_hits(items: list, query: str = "") -> list:
 def render_hits(items: list, query: str = ""):
     """Print ranked hits and say WHY each one is here."""
     if not items:
-        print("(nothing in the room about this — you're clear to proceed)")
+        print("(no room matches — nothing recorded here, which is not proof "
+              "the area is conflict-free; carry on)")
         return
     shown_divider = False
     for it, md, mislabeled in rank_hits(items, query):
         ptype = md.get("post_type")
         tier = _HIT_VALUE.get(ptype, 9)
         if tier >= 5 and not mislabeled and not shown_divider:
-            print("--- below: status and chatter, rarely worth reading ---\n")
+            print("--- lower-priority status matches ---\n")
             shown_divider = True
         who = md.get("human") or ""
         areas = ", ".join((md.get("areas") or [])[:3])
         tag = f"{_GLYPH.get(ptype, '·')} {ptype or 'note'}"
         if mislabeled:
             tag += " (reads like a lesson)"
-        head = f"{tag}" + (f" · {who}" if who else "") + (f" · {areas}" if areas else "")
+        mid = it.get("id") or ""
+        head = (f"{tag}" + (f" · {who}" if who else "")
+                + (f" · {areas}" if areas else "")
+                + (f" · {mid}" if mid else ""))
         print(f"--- {head} ---")
-        print((it.get("content") or it.get("text") or "").strip()[:600])
+        body = (it.get("content") or it.get("text") or "").strip()
+        if len(body) > 600:
+            # A visibly cut post invites the full read; a silently cut one
+            # gets treated as the whole story.
+            print(body[:600] + f"\n[… truncated — full post: room-post read, id {mid}]")
+        else:
+            print(body)
         print()
 
 
@@ -1823,7 +1833,7 @@ def post(message: str, metadata: dict | None = None, uploads: list | None = None
             "mint a fresh one.", 3)
         else:
             die(f"post failed ({e.code}): {e.read().decode()[:200]}")
-    print(f"posted {msg.get('id', '(ok)')}")
+    print(f"posted {_GLYPH.get(post_type, '·')} {post_type} {msg.get('id', '(ok)')}")
     return session
 
 
