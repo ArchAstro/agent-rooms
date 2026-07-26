@@ -312,6 +312,14 @@ if PRODUCTION_SERVER and not os.environ.get("TEAM_ROOM_TRUST_SERVER"):
         sys.exit(0 if (len(sys.argv) > 1 and sys.argv[1] in _NEVER_BLOCK) else 3)
 KIT_VERSION = "2026.07.25"
 ROOM_APP_NAME = "ArchAgents"
+
+# Where `doctor` looks to answer "is this copy behind?". The script itself is
+# the comparison subject, not the docs: room_post.py is byte-identical across
+# every install flavor, while SKILL.md and reference.md are rewritten by the
+# repo-flavor installer, so hashing those would report permanent false drift.
+UPSTREAM_SOURCE_URL = (
+    "https://raw.githubusercontent.com/ArchAstro/agent-rooms/main"
+    "/skills/team-room/room_post.py")
 MAX_HEADLINE = 300
 EXPIRY_SKEW_SECONDS = 60
 
@@ -1509,6 +1517,52 @@ def rank_hits(items: list, query: str = "") -> list:
     return [(it, md, mis) for _s, it, md, mis in keep]
 
 
+def _source_version(data: bytes) -> str:
+    """Short content hash of the kit script. Twelve hex chars is plenty to
+    tell two builds apart and short enough to read aloud in a room post."""
+    import hashlib
+    return hashlib.sha256(data).hexdigest()[:12]
+
+
+def _local_source_version() -> str | None:
+    try:
+        with open(os.path.abspath(__file__), "rb") as fh:
+            return _source_version(fh.read())
+    except OSError:
+        return None
+
+
+def _upstream_source_version(timeout: int = 4) -> str | None:
+    """Upstream's kit script hash, or None if that cannot be established.
+
+    None is an ordinary outcome, not an error: while the repo is private
+    this 404s for everyone, and it will start answering the day the repo goes
+    public with no kit change. Unauthenticated on purpose — a freshness check
+    must never be a reason to hold a credential.
+    """
+    try:
+        req = urllib.request.Request(
+            UPSTREAM_SOURCE_URL,
+            headers={"User-Agent": f"room-post/{KIT_VERSION}"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if getattr(resp, "status", 200) != 200:
+                return None
+            return _source_version(resp.read())
+    except urllib.error.HTTPError as exc:
+        # 404 is the normal answer while the repo is unpublished, and 403 is
+        # GitHub's rate limit. Neither is an incident, and writing them to the
+        # ledger would put a red line under every doctor run for a condition
+        # nobody should act on. Anything else is a genuine surprise.
+        if exc.code not in (403, 404):
+            health_event("freshness-check", f"HTTP {exc.code}")
+        return None
+    except Exception as exc:
+        # Absorbed, but not invisible: the ledger is where swallowed errors
+        # go so `doctor` can tell the truth about the last two weeks.
+        health_event("freshness-check", f"{type(exc).__name__}: {exc}"[:120])
+        return None
+
+
 def _fresh_mentions(rows, my_first, my_name, since):
     """Pure matcher: posts by OTHERS whose first line addresses @me, newer
     than `since`. Content-based on purpose — the REST list neither applies
@@ -2469,9 +2523,31 @@ def doctor():
                           "(fine if intentional; re-run the installer to restore)")
                 else:
                     print(f"ok  kit integrity: matches install manifest ({manifest.get('version', '?')})")
+
         except (OSError, ValueError):
             print("warn kit integrity: manifest.json unreadable or malformed — "
                   "re-run the installer to restore it.")
+
+    # 7b. Freshness. The integrity check above only proves this copy matches
+    # what it was INSTALLED from, so a kit six versions behind still reports
+    # "ok" forever. This is the only thing that can say "behind": compare the
+    # local script against upstream's.
+    #
+    # Deliberately silent when it cannot answer (repo private, offline,
+    # GitHub down, proxy in the way). A diagnostic that prints "could not
+    # check" on every run trains people to ignore it, and this must never be
+    # the reason `doctor` looks broken. The absorbed error still lands in the
+    # health ledger, which is where absorbed errors are supposed to be
+    # visible.
+    local_source = _local_source_version()
+    upstream_source = _upstream_source_version()
+    if local_source and upstream_source:
+        if local_source == upstream_source:
+            print(f"ok  kit freshness: current with upstream ({local_source})")
+        else:
+            print(f"warn kit is BEHIND upstream (local {local_source}, "
+                  f"upstream {upstream_source}) — re-run the installer, or in "
+                  "a repo that vendors the kit, re-run its sync script")
 
     # A superseded machine install alongside the current one means some
     # reference somewhere may still execute the fossil. Say so.
