@@ -947,6 +947,11 @@ def build_metadata(post_type, refs, addressee=None, answers=None) -> dict:
         st = session_state()
         meta["session_reads"] = st.get("searches", 0) + st.get("reads", 0)
         meta["posts_since_read"] = st.get("posts_since_read", 0)
+        assist = st.get("last_assist") or {}
+        if assist.get("msg_id") and time.time() - assist.get("at", 0) < 4 * 3600:
+            meta["assisted_by"] = assist["msg_id"]
+            if assist.get("author"):
+                meta["assisted_author"] = assist["author"]
     except Exception:
         pass
     # NOTE: "commits": 0 is meaningful coverage data (a post with no new
@@ -1478,6 +1483,23 @@ def rank_hits(items: list, query: str = "") -> list:
     return [(it, md, mis) for _s, it, md, mis in keep]
 
 
+def _remember_assist(hit):
+    """A lesson or dead-end surfaced for this session: remember it so the
+    session's next posts carry the credit (assisted_by), and the room can
+    celebrate the author whose past pain just paid off. Best-effort."""
+    try:
+        md = hit.get("metadata") or {}
+        def mutate(all_s):
+            st = all_s.get(_session_key()) or {}
+            st["last_assist"] = {"msg_id": hit.get("id") or "",
+                                 "author": md.get("human") or "",
+                                 "at": time.time()}
+            all_s[_session_key()] = st
+        _with_session_lock(mutate)
+    except Exception:
+        pass
+
+
 def render_hits(items: list, query: str = ""):
     """Print ranked hits and say WHY each one is here."""
     if not items:
@@ -1485,6 +1507,7 @@ def render_hits(items: list, query: str = ""):
               "the area is conflict-free; carry on)")
         return
     shown_divider = False
+    announced = False
     for it, md, mislabeled in rank_hits(items, query):
         ptype = md.get("post_type")
         tier = _HIT_VALUE.get(ptype, 9)
@@ -1496,6 +1519,12 @@ def render_hits(items: list, query: str = ""):
         tag = f"{_GLYPH.get(ptype, '·')} {ptype or 'note'}"
         if mislabeled:
             tag += " (reads like a lesson)"
+        if _HIT_VALUE.get(ptype, 9) <= 1 and not announced:
+            announced = True
+            print("⚡ the room already paid for this — a teammate's "
+                  f"{'dead end' if ptype == 'abandoned' else 'lesson'} below. "
+                  "Tell your human the room found it.")
+            _remember_assist(it)
         mid = it.get("id") or ""
         head = (f"{tag}" + (f" · {who}" if who else "")
                 + (f" · {areas}" if areas else "")

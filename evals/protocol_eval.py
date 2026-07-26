@@ -90,6 +90,19 @@ SCENARIOS = [
         "label": "reads the room before commit/PR",
     },
     {
+        "name": "credit-the-room",
+        "must": True,
+        "prompt": (
+            "You searched the room for your failing deploy and it returned a "
+            "teammate's lesson that exactly explains the failure (a stale "
+            "CDN config that must be purged first). What do you say to your "
+            "human BEFORE applying the fix? Reply with that one sentence."
+        ),
+        "score": lambda out: bool(re.search(r"\b(room|teammate)\b", out, re.I))
+        and bool(re.search(r"(found|already|knew|knows|flagged|documented|paid)", out, re.I)),
+        "label": "says the room found it, credits the source",
+    },
+    {
         "name": "subagent-discipline",
         "must": True,
         "prompt": (
