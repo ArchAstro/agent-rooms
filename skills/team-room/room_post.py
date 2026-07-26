@@ -1508,6 +1508,15 @@ def _remember_assist(hit):
         pass
 
 
+def _posted_line(metadata, msg) -> str:
+    """The post confirmation, teaching the verb it carried. Pure so a unit
+    test can pin it — the last version referenced a variable outside its
+    scope and broke every post, which only the health ledger caught."""
+    pt = (metadata or {}).get("post_type", "")
+    glyph = _GLYPH.get(pt, "·")
+    return f"posted {glyph} {pt} {msg.get('id', '(ok)')}".replace("  ", " ")
+
+
 def render_hits(items: list, query: str = ""):
     """Print ranked hits and say WHY each one is here."""
     if not items:
@@ -1870,7 +1879,7 @@ def post(message: str, metadata: dict | None = None, uploads: list | None = None
             "mint a fresh one.", 3)
         else:
             die(f"post failed ({e.code}): {e.read().decode()[:200]}")
-    print(f"posted {_GLYPH.get(post_type, '·')} {post_type} {msg.get('id', '(ok)')}")
+    print(_posted_line(metadata, msg))
     return session
 
 
