@@ -872,6 +872,39 @@ def _advance_room_marker():
         pass
 
 
+def lint_post(post_type: str, headline: str, bullets, refs) -> list:
+    """Deterministic exhaust-quality checks, applied to EVERY post from any
+    harness. Never blocks — the result is printed once, health-logged, and
+    stamped into metadata so the room can tally its own signal quality.
+    Each rule exists because a real post violated it and got lost:
+    branch-name headlines are unfindable, artifact-free lessons are advice
+    nobody can follow, ref-less done posts orphan their work."""
+    warns = []
+    h = (headline or "").strip()
+    words = h.split()
+    if len(words) < 4:
+        warns.append("headline is not a sentence (under 4 words)")
+    if len(words) == 1 and ("/" in h or "-" in h) and " " not in h:
+        warns.append("headline looks like a branch or issue code, not plain English")
+    if len(h) > 220:
+        warns.append("headline over 220 chars — move detail into -b bullets")
+    if post_type == "lesson":
+        blob = " ".join([h] + list(bullets or []))
+        concrete = any(m in blob for m in ("`", "Error", "error:", "mix ", "npm ",
+                                           "git ", "http", "exit ", "::", ".ex",
+                                           ".py", ".ts", "$ "))
+        if not concrete:
+            warns.append("lesson carries no concrete artifact (command, error "
+                         "string, or file) — demonstrations get followed, advice gets skimmed")
+    if post_type == "done" and not refs:
+        warns.append("done post has no -r ref — the work it finished is unfindable from here")
+    for b in bullets or []:
+        if len(b.strip()) < 15:
+            warns.append(f"bullet too thin to be a fact: {b.strip()[:30]!r}")
+            break
+    return warns
+
+
 def build_metadata(post_type, refs, addressee=None, answers=None) -> dict:
     """Structured exhaust attached to every post (message `metadata`, never
     rendered): the correlation-food downstream readers (librarian, views,
@@ -907,6 +940,15 @@ def build_metadata(post_type, refs, addressee=None, answers=None) -> dict:
         meta.update(_git_exhaust())
     except Exception:
         pass  # exhaust is a bonus, never a blocker
+    try:
+        # Read-discipline rides along, so the ROOM can tally deaf sessions
+        # (posting without reading) from exhaust alone — compliance becomes
+        # a weekly signal instead of a scolding.
+        st = session_state()
+        meta["session_reads"] = st.get("searches", 0) + st.get("reads", 0)
+        meta["posts_since_read"] = st.get("posts_since_read", 0)
+    except Exception:
+        pass
     # NOTE: "commits": 0 is meaningful coverage data (a post with no new
     # commits) — the falsy-filter below would drop it, so filter first and
     # re-attach.
@@ -2433,6 +2475,20 @@ def main():
             metadata = build_metadata(post_type, refs, addressee, answers)
         except Exception:
             metadata = None  # exhaust enrichment must never block a post
+    # Exhaust quality: lint every post, stamp the verdict, say it once.
+    # Never blocks — but the room can now TALLY its own signal quality, and
+    # a harness that keeps posting junk becomes visible instead of vague.
+    try:
+        _warns = lint_post(post_type, headline, bullets, refs)
+        if _warns:
+            if metadata is not None:
+                metadata["quality_warnings"] = _warns[:4]
+            health_event("post-quality", _warns[0])
+            print("post-quality: " + "; ".join(_warns[:2]) +
+                  " — posting anyway, but a better-shaped post gets found "
+                  "and followed", file=sys.stderr)
+    except Exception:
+        pass
     if dry:
         print(message)
         if uploads:
