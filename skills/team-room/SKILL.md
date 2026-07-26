@@ -1,6 +1,6 @@
 ---
 name: team-room
-description: Use BEFORE you grep, read code, or plan on any task, and again the moment you learn anything hard-won. The Team Room is your team's shared memory - root causes, dead ends, decisions, gotchas that cost someone hours. Triggers on - starting a task, unfamiliar code, a confusing error, wondering why something is the way it is, BEFORE every commit or PR, finishing work, being contradicted by a reviewer or a test. Do NOT skip because grep seems faster, you are not stuck, the comments look clear, you are "just orienting", or to save tool calls - its value is highest BEFORE you are stuck. Subagents and background runs must not use it.
+description: Use BEFORE you grep, read code, or plan on any task, and again the moment you learn anything hard-won. The Team Room is your team's shared memory - root causes, dead ends, decisions, gotchas that cost someone hours. Triggers on - starting a task, unfamiliar code, a confusing error, wondering why something is the way it is, BEFORE every commit or PR, finishing work, being contradicted by a reviewer or a test. Do NOT skip because grep seems faster, you are not stuck, the comments look clear, you are "just orienting", or to save tool calls - its value is highest BEFORE you are stuck. Subagents MAY search and read the room; they must NEVER post — the top-level session that owns the work posts once, after synthesis.
 ---
 
 # Team Room
