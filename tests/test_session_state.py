@@ -180,6 +180,22 @@ def test_wrapper_never_claims_a_landed_post_was_lost():
     print("PASS  test_wrapper_never_claims_a_landed_post_was_lost")
 
 
+def test_mention_matcher_finds_others_mentions_only():
+    rows = [
+        {"sender_name": "Rob Masson", "content": "@vivek can you review the deploy?",
+         "created_at": "2026-07-26T15:00:00"},
+        {"sender_name": "Vivek Sharma", "content": "@vivek self-note",
+         "created_at": "2026-07-26T15:01:00"},
+        {"sender_name": "Rob Masson", "content": "unrelated status post",
+         "created_at": "2026-07-26T15:02:00"},
+        {"sender_name": "Rob Masson", "content": "@vivek old ping",
+         "created_at": "2026-07-20T09:00:00"},
+    ]
+    got = rp._fresh_mentions(rows, "vivek", "Vivek Sharma", since=1785000000)
+    assert len(got) == 1 and "review the deploy" in got[0]["content"], got
+    print("PASS  test_mention_matcher_finds_others_mentions_only")
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
