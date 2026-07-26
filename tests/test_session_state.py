@@ -133,6 +133,18 @@ def test_reading_resets_the_recency_counter():
     print("PASS  test_reading_resets_the_recency_counter")
 
 
+def test_an_assist_is_remembered_and_stamped_on_the_next_post():
+    # The delight loop's data layer: a lesson hit -> session remembers ->
+    # the next post credits the author, so the room can celebrate them.
+    _fresh_state()
+    rp._remember_assist({"id": "msg_LESSON1",
+                         "metadata": {"human": "Rob", "post_type": "lesson"}})
+    meta = rp.build_metadata("done", [])
+    assert meta.get("assisted_by") == "msg_LESSON1", meta
+    assert meta.get("assisted_author") == "Rob", meta
+    print("PASS  test_an_assist_is_remembered_and_stamped_on_the_next_post")
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
