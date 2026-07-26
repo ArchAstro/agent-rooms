@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL_PATH = os.environ.get("TEAM_ROOM_SKILL") or os.path.join(
@@ -137,8 +138,17 @@ SCENARIOS = [
 
 def ask(agent, prompt):
     full = f"The following skill governs how you work:\n\n{SKILL}\n\n---\n{prompt}"
+    # Score the agent's ANSWER, never the transcript. codex exec echoes the
+    # prompt — which contains the whole SKILL.md — into stdout, and the skill
+    # is full of the very commands the scorers look for, so scoring stdout
+    # passes scenarios on the skill's own words no matter what the agent did.
+    # A no-network run scored 5/8 with the model unreachable, which is how
+    # this was found. -o writes only the final assistant message.
+    answer_file = None
     if agent == "codex":
-        cmd = ["codex", "exec", "--skip-git-repo-check", full]
+        fd, answer_file = tempfile.mkstemp(prefix="protocol-eval-", suffix=".txt")
+        os.close(fd)
+        cmd = ["codex", "exec", "--skip-git-repo-check", "-o", answer_file, full]
     else:
         cmd = ["agy", "--effort", "low", "-p", full]
     # Sandbox ONLY the room, never HOME: overriding HOME hides every other
@@ -150,9 +160,29 @@ def ask(agent, prompt):
     # Eval-induced failures must never write into the machine's real health
     # ledger — that once produced a false "index unreachable" incident.
     env["TEAM_ROOM_HEALTH_LOG"] = os.path.join(HERE, ".eval-health.jsonl")
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=240,
-                       stdin=subprocess.DEVNULL, env=env)
-    return (r.stdout or "") + (r.stderr or "")
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=240,
+                           stdin=subprocess.DEVNULL, env=env)
+        # An agent that never answered is NOT an agent that misbehaved. Raise
+        # so the caller counts this as an error, or an expired key reads as
+        # "agents stopped following the protocol" and the wrong team goes
+        # hunting.
+        if r.returncode != 0:
+            tail = ((r.stderr or "") + (r.stdout or "")).strip().splitlines()[-1:]
+            raise RuntimeError(f"{agent} exited {r.returncode}: {' '.join(tail)[:200]}")
+        if answer_file:
+            with open(answer_file) as fh:
+                answer = fh.read()
+            if not answer.strip():
+                raise RuntimeError(f"{agent} exited 0 but produced no final message")
+            return answer
+        return (r.stdout or "") + (r.stderr or "")
+    finally:
+        if answer_file:
+            try:
+                os.unlink(answer_file)
+            except OSError:
+                pass
 
 
 def result_line(agent, passed, failed, warned, errored):
