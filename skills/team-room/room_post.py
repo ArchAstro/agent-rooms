@@ -226,6 +226,47 @@ ROOM_SOURCE_ID = _ROOM_CFG.get("source_id") or ""
 ROOM_TEAM_ID = _ROOM_CFG.get("team_id", "")
 RECORD_SCHEMA = "team-record"   # custom-object schema key for team records
 PRODUCTION_SERVER = _ROOM_CFG.get("server", "")
+
+# SECURITY: config can arrive from a repo checkout (a committed room.json)
+# or the ROOM_JSON env var. Those choose WHERE tokens get sent, so an
+# unrecognized server there means a malicious commit could exfiltrate this
+# machine's credentials. The machine's own config, its mirrors, and the
+# server the login was issued against are trusted; anything else refuses
+# loudly before a single byte of auth leaves the machine.
+def _trusted_servers():
+    trusted = {DEFAULT_SERVER}
+    try:
+        mc = json.load(open(ROOM_CONFIG_PATH))
+        if mc.get("server"):
+            trusted.add(mc["server"])
+        for m in mc.get("mirrors") or []:
+            if isinstance(m, dict) and m.get("server"):
+                trusted.add(m["server"])
+    except Exception:
+        pass
+    try:
+        trusted.add(json.load(open(os.path.expanduser(
+            "~/.config/team-room/credentials.json"))).get("server", ""))
+    except Exception:
+        pass
+    return {s for s in trusted if s}
+
+
+if PRODUCTION_SERVER and not os.environ.get("TEAM_ROOM_TRUST_SERVER"):
+    # TEAM_ROOM_TRUST_SERVER exists for test harnesses pointing at fakes;
+    # setting it in a real environment removes the exfiltration guard.
+    _cfg_src = _room_config_path() or ""
+    _machine_cfg = os.path.abspath(ROOM_CONFIG_PATH)
+    if os.path.abspath(_cfg_src) != _machine_cfg and PRODUCTION_SERVER not in _trusted_servers():
+        print(
+            f"room_post: REFUSING to use server {PRODUCTION_SERVER!r} from "
+            f"{_cfg_src} — it is not this machine's configured server, and a "
+            "committed room.json must never redirect your credentials. If "
+            "this server is legitimate, run `room-post login` against it "
+            "once (that records it as trusted).",
+            file=sys.stderr,
+        )
+        sys.exit(0 if (len(sys.argv) > 1 and sys.argv[1] in _NEVER_BLOCK) else 3)
 KIT_VERSION = "2026.07.25"
 ROOM_APP_NAME = "ArchAgents"
 MAX_HEADLINE = 300
@@ -1092,8 +1133,9 @@ def _refresh_session_locked(creds, key, creds_path, server=None):
         die("your room login expired and has no refresh token. "
             "Reconnect with:\n  room-post login", 3)
     try:
+        issuer = server or creds.get("server") or PRODUCTION_SERVER
         tokens = http_json(
-            f"{server or PRODUCTION_SERVER}/api/v1/auth/refresh/keyless",
+            f"{issuer}/api/v1/auth/refresh/keyless",
             {"refresh_token": refresh_token},
         )
     except urllib.error.HTTPError as e:
@@ -1835,12 +1877,19 @@ def login(mirror: dict | None = None, best_effort: bool = False,
 
     result = {}
     done = threading.Event()
+    import secrets
+    expected_state = secrets.token_urlsafe(24)
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             flat = {k: v[0] for k, v in q.items()}
-            ok = bool(flat.get("access_token"))
+            # State binds this callback to the login WE launched: it rides
+            # the callback PATH (so any redirect implementation preserves
+            # it), and anything else knocking on the local port is
+            # discarded — a hostile local page can't plant credentials.
+            path_only = urllib.parse.urlparse(self.path).path
+            ok = bool(flat.get("access_token")) and path_only.rstrip("/").endswith(expected_state)
             if ok:
                 result.update(flat)
             self.send_response(200)
@@ -1856,7 +1905,7 @@ def login(mirror: dict | None = None, best_effort: bool = False,
     server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
     port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    cb = f"http://127.0.0.1:{port}/callback"
+    cb = f"http://127.0.0.1:{port}/callback/{expected_state}"
     url = (
         f"{portal}/org/cli-auth?slug={slug}"
         f"&redirect_uri={urllib.parse.quote(cb, safe='')}"

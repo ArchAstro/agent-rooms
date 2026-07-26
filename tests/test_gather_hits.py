@@ -13,6 +13,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "skills", "team-room"))
+os.environ.setdefault("TEAM_ROOM_TRUST_SERVER", "1")
 os.environ.setdefault("ROOM_JSON", os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "fixtures", "room.json"))
 
