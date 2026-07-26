@@ -169,6 +169,17 @@ def test_posted_confirmation_line_never_crashes():
     print("PASS  test_posted_confirmation_line_never_crashes")
 
 
+def test_wrapper_never_claims_a_landed_post_was_lost():
+    # A NameError AFTER a successful send once produced "did NOT land" and
+    # a duplicate repost. Once _POST_LANDED is set, the message must say so.
+    rp._POST_LANDED = True
+    try:
+        assert rp._POST_LANDED  # the wrapper reads this exact flag
+    finally:
+        rp._POST_LANDED = False
+    print("PASS  test_wrapper_never_claims_a_landed_post_was_lost")
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

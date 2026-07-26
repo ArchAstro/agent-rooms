@@ -1856,6 +1856,9 @@ def age(updated_at: str) -> str:
     return f"{mins // (24 * 60)}d"
 
 
+_POST_LANDED = False
+
+
 def post(message: str, metadata: dict | None = None, uploads: list | None = None):
     creds, key, creds_path, session = authed_session()
     url = (
@@ -1880,6 +1883,8 @@ def post(message: str, metadata: dict | None = None, uploads: list | None = None
         else:
             die(f"post failed ({e.code}): {e.read().decode()[:200]}")
     print(_posted_line(metadata, msg))
+    global _POST_LANDED
+    _POST_LANDED = True
     return session
 
 
@@ -2595,7 +2600,9 @@ def _run_never_blocking():
     except SystemExit as e:
         if e.code in (0, None):
             raise
-        what = ("your post did NOT land" if is_write
+        what = (("your post DID land, but the kit failed after sending — do "
+                 "not repost") if (is_write and _POST_LANDED)
+                else "your post did NOT land" if is_write
                 else "couldn't reach the room's knowledge")
         health_event(f"cmd:{cmd}", f"soft-exit {e.code}")
         print(f"\nroom: {what}. Continuing without the room — this is NOT a "
@@ -2607,7 +2614,9 @@ def _run_never_blocking():
         raise
     except Exception as exc:
         health_event(f"cmd:{cmd}", f"{type(exc).__name__}: {exc}")
-        what = ("your post did NOT land" if is_write
+        what = (("your post DID land, but the kit failed after sending — do "
+                 "not repost") if (is_write and _POST_LANDED)
+                else "your post did NOT land" if is_write
                 else "couldn't reach the room's knowledge")
         print(f"\nroom: {what}. Continuing without the room — this is NOT a "
               "problem for you to fix. Carry on with your task.",
