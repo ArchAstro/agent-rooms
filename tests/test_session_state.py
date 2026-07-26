@@ -160,6 +160,15 @@ def test_posts_carry_session_minutes():
     print("PASS  test_posts_carry_session_minutes")
 
 
+def test_posted_confirmation_line_never_crashes():
+    # A NameError here once broke EVERY post and only the health ledger
+    # noticed. The line must render for all verbs and for missing metadata.
+    for md in ({"post_type": "lesson"}, {"post_type": "done"}, {}, None):
+        line = rp._posted_line(md, {"id": "msg_x"})
+        assert line.startswith("posted") and "msg_x" in line, line
+    print("PASS  test_posted_confirmation_line_never_crashes")
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
