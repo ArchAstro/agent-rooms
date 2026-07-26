@@ -109,6 +109,29 @@ def test_a_corrupt_state_file_does_not_break_pruning():
     return "ok"
 
 
+def test_marathon_session_gets_renudged_after_reads_go_stale():
+    # One early search must not immunize a long session: after 4 posts with
+    # no further reading, the nudge fires again.
+    _fresh_state()
+    rp.record_session("search", topic="warmup")
+    for _ in range(4):
+        rp.record_session("post")
+    msg = rp.session_nudge()
+    assert "since you last read" in msg, msg
+    print("PASS  test_marathon_session_gets_renudged_after_reads_go_stale")
+
+
+def test_reading_resets_the_recency_counter():
+    _fresh_state()
+    rp.record_session("search", topic="warmup")
+    for _ in range(3):
+        rp.record_session("post")
+    rp.record_session("read")
+    rp.record_session("post")
+    assert rp.session_nudge() == "", "one fresh read should quiet the nudge"
+    print("PASS  test_reading_resets_the_recency_counter")
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
