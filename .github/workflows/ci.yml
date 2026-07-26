@@ -1,0 +1,26 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  kit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - name: compile
+        run: |
+          python3 -m py_compile skills/team-room/room_post.py
+          node --check bin/install.mjs
+      - name: unit suites
+        run: |
+          set -e
+          for f in tests/test_*.py; do
+            echo "== $f"; python3 "$f"
+          done
+      - name: installer sandbox battery
+        run: bash tests/installer_battery.sh
