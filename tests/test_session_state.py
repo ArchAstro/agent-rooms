@@ -196,6 +196,24 @@ def test_mention_matcher_finds_others_mentions_only():
     print("PASS  test_mention_matcher_finds_others_mentions_only")
 
 
+def test_mention_peek_is_throttled_per_worktree():
+    # The write path must stay near-free in bursts: after one peek, the
+    # next 3 minutes of posts skip the network entirely.
+    _fresh_state()
+    calls = []
+    real = rp._http_json_short
+    rp._http_json_short = lambda *a, **k: (calls.append(1), {"data": []})[1]
+    try:
+        rp.record_session("post")
+        rp.mention_peek()
+        rp.mention_peek()
+        rp.mention_peek()
+    finally:
+        rp._http_json_short = real
+    assert len(calls) == 1, f"expected 1 network call, got {len(calls)}"
+    print("PASS  test_mention_peek_is_throttled_per_worktree")
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

@@ -1535,6 +1535,16 @@ def _fresh_mentions(rows, my_first, my_name, since):
     return out
 
 
+def _http_json_short(url, token, timeout=3):
+    """A GET for nice-to-have features: a mention notice is not worth more
+    than 3 seconds of a developer's post."""
+    req = urllib.request.Request(
+        url, headers={"Authorization": f"Bearer {token}",
+                      "User-Agent": f"room-post/{KIT_VERSION}"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.load(resp)
+
+
 def mention_peek():
     """After a successful post: one cheap look at the newest room posts for
     unseen @mentions of me. Pull-based delivery riding the session's own
@@ -1547,9 +1557,14 @@ def mention_peek():
         if not my_first:
             return
         st = session_state()
+        # Throttle: bursty posters are the heavy users — one peek per 3min
+        # per worktree keeps the write path near-free in bursts while
+        # delivery stays minutes-scale, which is the design promise.
+        if time.time() - st.get("mention_peek_at", 0) < 180:
+            return
         since = max(st.get("mention_peek_at", 0), time.time() - 48 * 3600)
         _, _, _, session = authed_session()
-        data = http_get(
+        data = _http_json_short(
             f"{PRODUCTION_SERVER}/protected/api/v1/developer/apps/"
             f"{session['appId']}/threads/{THREAD_ID}/messages?page_size=15",
             session["accessToken"])
