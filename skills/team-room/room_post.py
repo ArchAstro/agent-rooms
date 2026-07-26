@@ -1509,6 +1509,66 @@ def rank_hits(items: list, query: str = "") -> list:
     return [(it, md, mis) for _s, it, md, mis in keep]
 
 
+def _fresh_mentions(rows, my_first, my_name, since):
+    """Pure matcher: posts by OTHERS whose first line addresses @me, newer
+    than `since`. Content-based on purpose — the REST list neither applies
+    metadata filters (pre-deploy builds ignore the param silently: proven
+    on prod) nor serializes metadata, and @name-on-the-first-line is the
+    room's own addressing convention."""
+    import datetime
+    out = []
+    tag = "@" + my_first
+    for m2 in rows:
+        if (m2.get("sender_name") or "").lower() == (my_name or "").lower():
+            continue
+        first_line = (m2.get("content") or "").strip().split("\n")[0].lower()
+        if tag not in first_line:
+            continue
+        try:
+            at = datetime.datetime.fromisoformat(
+                m2.get("created_at") or "").replace(
+                tzinfo=datetime.timezone.utc).timestamp()
+        except Exception:
+            continue
+        if at > since:
+            out.append(m2)
+    return out
+
+
+def mention_peek():
+    """After a successful post: one cheap look at the newest room posts for
+    unseen @mentions of me. Pull-based delivery riding the session's own
+    write cadence — the busiest sessions post most, so mentions reach
+    exactly the sessions that are hardest to reach, with no daemon and no
+    read-path cost. Best-effort; never blocks."""
+    try:
+        my_name = human_name() or ""
+        my_first = my_name.split()[0].lower() if my_name else ""
+        if not my_first:
+            return
+        st = session_state()
+        since = max(st.get("mention_peek_at", 0), time.time() - 48 * 3600)
+        _, _, _, session = authed_session()
+        data = http_get(
+            f"{PRODUCTION_SERVER}/protected/api/v1/developer/apps/"
+            f"{session['appId']}/threads/{THREAD_ID}/messages?page_size=15",
+            session["accessToken"])
+        fresh = _fresh_mentions(data.get("data") or [], my_first, my_name, since)
+
+        def stamp(all_s):
+            cur = all_s.get(_session_key()) or {}
+            cur["mention_peek_at"] = time.time()
+            all_s[_session_key()] = cur
+        _with_session_lock(stamp)
+        if fresh:
+            first = (fresh[0].get("content") or "").strip().split("\n")[0][:90]
+            print(f"📨 {len(fresh)} post(s) in the room are addressed to YOU — "
+                  f"newest: {first!r}. Read them: room-post inbox",
+                  file=sys.stderr)
+    except Exception:
+        pass
+
+
 def _remember_assist(hit):
     """A lesson or dead-end surfaced for this session: remember it so the
     session's next posts carry the credit (assisted_by), and the room can
@@ -2578,6 +2638,7 @@ def main():
         return
     session = post(message, metadata, uploads)
     _advance_room_marker()  # next exhaust window starts where this one ended
+    mention_peek()
     record_session("post", areas=(metadata or {}).get("areas"))
     nudge = session_nudge((metadata or {}).get("areas"))
     if nudge:
