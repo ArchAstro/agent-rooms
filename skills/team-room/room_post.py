@@ -97,6 +97,41 @@ configure_ca_bundle()
 # team's traffic into another team's thread.
 _ROOM_KEYS = ("thread_id", "team_id", "server", "portal", "app_slug", "publishable_key")
 ROOM_CONFIG_PATH = os.path.expanduser("~/.config/team-room/room.json")
+HEALTH_LOG_PATH = os.path.expanduser("~/.config/team-room/health.jsonl")
+
+
+def health_event(component: str, reason: str):
+    """The kit's answer to silent degradation: any error a command absorbs
+    to protect the session gets ONE durable line here, deduped by
+    (component, reason), so `doctor` can tell the truth about the last
+    week even though no session was ever interrupted. Best-effort by
+    definition — health logging must never become its own failure mode."""
+    try:
+        os.makedirs(os.path.dirname(HEALTH_LOG_PATH), exist_ok=True)
+        now = int(time.time())
+        rows = []
+        try:
+            with open(HEALTH_LOG_PATH) as f:
+                rows = [json.loads(l) for l in f if l.strip()]
+        except Exception:
+            rows = []
+        cutoff = now - 14 * 86400
+        rows = [r for r in rows if r.get("last_seen", 0) >= cutoff]
+        for r in rows:
+            if r.get("component") == component and r.get("reason") == reason:
+                r["count"] = r.get("count", 0) + 1
+                r["last_seen"] = now
+                break
+        else:
+            rows.append({"component": component, "reason": reason[:200],
+                         "count": 1, "first_seen": now, "last_seen": now})
+        tmp = HEALTH_LOG_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            for r in rows[-200:]:
+                f.write(json.dumps(r) + "\n")
+        os.replace(tmp, HEALTH_LOG_PATH)
+    except Exception:
+        pass
 
 
 def _room_config_path() -> str | None:
@@ -1351,8 +1386,9 @@ def gather_hits(session, query: str) -> list:
     for probe in probes:
         try:
             items = search_items(session, probe, max_results=30)
-        except Exception:
+        except Exception as exc:
             failures += 1
+            health_event("search-probe", f"{type(exc).__name__}: {exc}")
             continue
         for it in items:
             key = it.get("id") or (it.get("content") or "")[:120]
@@ -1366,6 +1402,9 @@ def gather_hits(session, query: str) -> list:
     # failed, say so instead of reporting silence.
     if failures == len(probes) and not merged:
         raise RuntimeError("every search probe failed")
+    if failures and merged:
+        print(f"note: {failures} of {len(probes)} search probes failed — "
+              "results may be PARTIAL (recorded for doctor)", file=sys.stderr)
     return merged
 
 
@@ -1556,17 +1595,19 @@ def fetch_records(session, status=None, kind=None):
         except urllib.error.HTTPError as e:
             if e.code == 401 and not session.get("static"):
                 die("room session expired mid-fetch; rerun (it self-renews)", 3)
+            health_event("records", f"HTTP {e.code}")
             print(
                 f"room_post: team records unavailable ({e.code}); continuing without them",
                 file=sys.stderr,
             )
-            return []
+            return None
         except urllib.error.URLError:
+            health_event("records", "network unreachable")
             print(
                 "room_post: team records unreachable (network); continuing without them",
                 file=sys.stderr,
             )
-            return []
+            return None
         rows += resp.get("data") or []
         if not resp.get("has_next"):
             break
@@ -1587,6 +1628,10 @@ def fetch_records(session, status=None, kind=None):
 def records_list(status=None, kind=None):
     _, _, _, session = authed_session()
     rows = fetch_records(session, status, kind)
+    if rows is None:
+        print("(records UNAVAILABLE right now — that is a kit/room health "
+              "issue, not an empty list; `room-post doctor` has details)")
+        return
     if not rows:
         print("(no records match)")
         return
@@ -1599,7 +1644,11 @@ def records_list(status=None, kind=None):
 
 def records_show(record_id: str):
     _, _, _, session = authed_session()
-    rows = [f for f in fetch_records(session) if f.get("record_id") == record_id]
+    fetched = fetch_records(session)
+    if fetched is None:
+        die("records unavailable right now (health issue, not a missing "
+            "record) — see room-post doctor", 3)
+    rows = [f for f in fetched if f.get("record_id") == record_id]
     if not rows:
         die(f"no record '{record_id}'")
     f = rows[0]
@@ -1667,6 +1716,10 @@ def brief():
     """Session-start read path: the approved records, compact, grouped."""
     _, _, _, session = authed_session()
     rows = fetch_records(session, status="approved")
+    if rows is None:
+        print("(team records UNAVAILABLE right now — treat this brief as "
+              "incomplete; `room-post doctor` has details)")
+        return
     if not rows:
         print("(no approved team records yet — check `room-post records` for drafts)")
         return
@@ -1804,6 +1857,7 @@ def mirror_fanout(message: str, metadata: dict | None, uploads: list | None = No
                 timeout=8,
             )
         except (Exception, SystemExit) as e:
+            health_event(f"mirror:{m['name']}", type(e).__name__)
             print(f"mirror {m['name']}: skipped ({type(e).__name__})")
 
 
@@ -2235,6 +2289,28 @@ def doctor():
                   "pointing there runs frozen code. Re-run: "
                   "npx github:ArchAstro/agent-rooms --machine (it forwards it)")
 
+    # Health history: everything the kit absorbed to protect sessions in
+    # the last week. This is the anti-silent-failure ledger — a healthy
+    # config with a page of absorbed errors is NOT healthy.
+    try:
+        cutoff = time.time() - 7 * 86400
+        events = []
+        with open(HEALTH_LOG_PATH) as f:
+            events = [json.loads(l) for l in f if l.strip()]
+        recent = [e for e in events if e.get("last_seen", 0) >= cutoff]
+        if recent:
+            print(f"warn kit absorbed {sum(e.get('count', 1) for e in recent)} "
+                  f"error(s) across {len(recent)} kind(s) this week "
+                  "(sessions were never blocked):")
+            for e in sorted(recent, key=lambda x: -x.get("last_seen", 0))[:8]:
+                import datetime
+                when = datetime.datetime.fromtimestamp(e.get("last_seen", 0)).strftime("%m-%d %H:%M")
+                print(f"      {e.get('component','?'):18} x{e.get('count',1):<4} last {when}  {e.get('reason','')[:60]}")
+    except OSError:
+        print("ok  health log: no absorbed errors recorded")
+    except Exception:
+        print("warn health log unreadable")
+
     if not ok:
         print("doctor: fix the FAILs above")
     elif _warns:
@@ -2409,6 +2485,7 @@ def _run_never_blocking():
             raise
         what = ("your post did NOT land" if is_write
                 else "couldn't reach the room's knowledge")
+        health_event(f"cmd:{cmd}", f"soft-exit {e.code}")
         print(f"\nroom: {what}. Continuing without the room — this is NOT a "
               "problem for you to fix, and not a reason to retry, debug, or "
               "pause your work. Mention it to your human once and carry on.",
@@ -2416,7 +2493,8 @@ def _run_never_blocking():
         sys.exit(0)
     except KeyboardInterrupt:
         raise
-    except Exception:
+    except Exception as exc:
+        health_event(f"cmd:{cmd}", f"{type(exc).__name__}: {exc}")
         what = ("your post did NOT land" if is_write
                 else "couldn't reach the room's knowledge")
         print(f"\nroom: {what}. Continuing without the room — this is NOT a "
