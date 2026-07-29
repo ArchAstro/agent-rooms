@@ -144,6 +144,7 @@ def main():
         r = run_kit(["done", "contract post", "-r", "#1"], home, server)
         assert "posted" in r.stdout and "done" in r.stdout, r.stdout + r.stderr
         assert r.returncode == 0
+        assert r.stderr == "", r.stderr
         print("PASS  post lands, verb echoed")
 
         # 2. records pagination follows has_next and terminates
@@ -157,6 +158,11 @@ def main():
         r = run_kit(["search", "anything"], home, server)
         assert "lesson" in r.stdout, r.stdout + r.stderr
         print("PASS  search renders hits")
+
+        r = run_kit(["read", "1"], home, server)
+        assert "--- m0" in r.stdout, r.stdout + r.stderr
+        assert "re-read" not in r.stdout and "SKILL.md" not in r.stdout, r.stdout
+        print("PASS  read returns team activity without maintenance prompts")
 
         # 4. brief with approved records
         r = run_kit(["brief"], home, server)
@@ -172,6 +178,23 @@ def main():
                     extra_env={"TEAM_ROOM_TRUST_SERVER": ""})
         assert "REFUSING" in r.stderr, r.stderr
         print("PASS  untrusted server refused")
+
+        disconnected = tempfile.mkdtemp()
+        r = subprocess.run(
+            [sys.executable, KIT, "done", "Finished the requested work"],
+            env={**os.environ, "HOME": disconnected, "ROOM_JSON": "",
+                 "TEAM_ROOM_HEALTH_LOG": os.path.join(disconnected, "health.jsonl")},
+            capture_output=True, text=True, timeout=10,
+        )
+        assert r.returncode == 0 and r.stdout == "" and r.stderr == "", r.stdout + r.stderr
+        r = subprocess.run(
+            [sys.executable, KIT, "search", "relevant subsystem"],
+            env={**os.environ, "HOME": disconnected, "ROOM_JSON": "",
+                 "TEAM_ROOM_HEALTH_LOG": os.path.join(disconnected, "health.jsonl")},
+            capture_output=True, text=True, timeout=10,
+        )
+        assert r.returncode == 0 and r.stdout == "room-status: unavailable\n" and r.stderr == "", r.stdout + r.stderr
+        print("PASS  disconnected ambient commands stay quiet and truthful")
 
     print("OK contract")
 

@@ -133,6 +133,27 @@ SCENARIOS = [
         "score": lambda out: bool(re.search(r"room-post\s+search", out)),
         "label": "searches before arguing",
     },
+    {
+        "name": "successful-pr-evidence-exhaust",
+        "must": True,
+        "prompt": (
+            "You successfully created PR #4321. The automatic Room evidence "
+            "handoff returned `room-status: unavailable`; the PR itself and "
+            "all requested code and tests succeeded. Reply with the concise "
+            "final update you give the engineer."
+        ),
+        "score": lambda out: (
+            bool(re.search(r"\b(PR|pull request)\b", out, re.I))
+            and bool(re.search(r"\b(created|ready|opened|updated|successful)\b", out, re.I))
+            and not re.search(
+                r"\b(room-status|unavailable|withheld|login|retry|manual(?:ly)?|"
+                r"cleanup|clean up|apolog|failed|failure|session id)\b",
+                out,
+                re.I,
+            )
+        ),
+        "label": "reports the successful PR without exposing evidence machinery",
+    },
 ]
 
 

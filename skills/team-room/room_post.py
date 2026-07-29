@@ -47,10 +47,13 @@ cannot race the rotating refresh token.
 """
 
 import base64
+import contextlib
+import io
 import json
 import mimetypes
 import os
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
@@ -128,25 +131,64 @@ def health_event(component: str, reason: str):
             rows = []
         cutoff = now - 14 * 86400
         rows = [r for r in rows if r.get("last_seen", 0) >= cutoff]
+        matched = False
         for r in rows:
             if r.get("component") == component and r.get("reason") == reason:
                 r["count"] = r.get("count", 0) + 1
                 r["last_seen"] = now
+                matched = True
                 break
-        else:
+        if not matched:
             srv = ""
-        try:
-            srv = (PRODUCTION_SERVER or "").replace("https://", "")[:40]
-        except Exception:
-            pass
-        rows.append({"component": component, "reason": reason[:200],
-                     "server": srv,
+            try:
+                srv = (PRODUCTION_SERVER or "").replace("https://", "")[:40]
+            except Exception:
+                pass
+            rows.append({"component": component, "reason": reason[:200],
+                         "server": srv,
                          "count": 1, "first_seen": now, "last_seen": now})
         tmp = HEALTH_LOG_PATH + ".tmp"
         with open(tmp, "w") as f:
             for r in rows[-200:]:
                 f.write(json.dumps(r) + "\n")
         os.replace(tmp, HEALTH_LOG_PATH)
+    except Exception:
+        pass
+
+
+def _consume_early_evidence_files():
+    """Remove owned private PR inputs when initialization stops before the
+    evidence module can consume them. Best-effort and intentionally narrow."""
+    try:
+        idx = sys.argv.index("--handoff")
+        handoff_path = sys.argv[idx + 1]
+        before = os.lstat(handoff_path)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_ISLNK(before.st_mode)
+            or before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_size > 16_384
+        ):
+            return
+        with open(handoff_path, "rb") as handle:
+            payload = json.loads(handle.read(16_385).decode("utf-8"))
+            opened = os.fstat(handle.fileno())
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+            opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns
+        ):
+            return
+        capture_path = payload.get("capture_path") if isinstance(payload, dict) else None
+        os.unlink(handoff_path)
+        if isinstance(capture_path, str):
+            capture = os.lstat(capture_path)
+            if (
+                stat.S_ISREG(capture.st_mode)
+                and not stat.S_ISLNK(capture.st_mode)
+                and capture.st_uid == os.getuid()
+                and stat.S_IMODE(capture.st_mode) == 0o600
+            ):
+                os.unlink(capture_path)
     except Exception:
         pass
 
@@ -248,6 +290,7 @@ DEFAULT_PUBLISHABLE_KEY = "pk_dap_032Tk6YGrHp2cnyxwABnMS_Q6M9BsvOr8HKuIkLZNRWVTC
 # config eagerly and fails loud if it's missing.
 _SOFT_CONFIG_CMDS = {"init", "login", "discover", "--help", "-h", "help"}
 _soft = len(sys.argv) > 1 and sys.argv[1] in _SOFT_CONFIG_CMDS
+_AMBIENT_PR_PUBLISH = sys.argv[1:3] == ["pr", "publish"]
 
 # Commands that must NEVER interrupt a developer's session, referenced both
 # here (missing config would otherwise exit non-zero during module load,
@@ -256,23 +299,32 @@ _soft = len(sys.argv) > 1 and sys.argv[1] in _SOFT_CONFIG_CMDS
 _NEVER_BLOCK = {"search", "brief", "read", "records", "inbox", "discover",
                 "start", "done", "lesson", "handoff", "question", "abandoned",
                 "notify", "approve", "accept", "pr"}
+_AMBIENT_CONFIG = (
+    len(sys.argv) > 1
+    and sys.argv[1] in _NEVER_BLOCK
+    and sys.argv[1] != "discover"
+)
 
 try:
-    _ROOM_CFG = {} if (_soft and _room_config_path() is None) else _room_config()
+    if _AMBIENT_CONFIG:
+        with contextlib.redirect_stderr(io.StringIO()):
+            _ROOM_CFG = _room_config()
+    else:
+        _ROOM_CFG = {} if (_soft and _room_config_path() is None) else _room_config()
 except SystemExit:
+    if _AMBIENT_PR_PUBLISH:
+        # The handoff contains ephemeral PR identity and must disappear even
+        # when publication cannot start. This small local cleanup happens
+        # before any Room configuration or network dependency is required.
+        _consume_early_evidence_files()
+        health_event("pr-evidence", "room configuration unavailable")
+        sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] in _NEVER_BLOCK:
-        # The instructions for connecting were already printed by
-        # _room_config(); what matters here is the exit code — a non-zero
-        # exit invites the agent to treat the room as a task to fix.
         _is_write = sys.argv[1] not in {"search", "brief", "read", "records",
                                         "inbox", "discover"}
-        if sys.argv[1:3] == ["pr", "publish"]:
-            print("pr evidence withheld: room configuration unavailable", file=sys.stderr)
-        print(("\nroom: your post did NOT land (not connected). "
-               if _is_write else "\nroom: not connected. ")
-              + "Continuing without the room — this is NOT a problem for you "
-              "to fix; mention it to your human once and carry on.",
-              file=sys.stderr)
+        health_event(f"cmd:{sys.argv[1]}", "room configuration unavailable")
+        if not _is_write:
+            print("room-status: unavailable")
         sys.exit(0)
     raise
 THREAD_ID = _ROOM_CFG.get("thread_id", "")
@@ -312,6 +364,8 @@ if PRODUCTION_SERVER and not os.environ.get("TEAM_ROOM_TRUST_SERVER"):
     _cfg_src = _room_config_path() or ""
     _machine_cfg = os.path.abspath(ROOM_CONFIG_PATH)
     if os.path.abspath(_cfg_src) != _machine_cfg and PRODUCTION_SERVER not in _trusted_servers():
+        if _AMBIENT_PR_PUBLISH:
+            _consume_early_evidence_files()
         print(
             f"room_post: REFUSING to use server {PRODUCTION_SERVER!r} from "
             f"{_cfg_src} — it is not this machine's configured server, and a "
@@ -386,6 +440,7 @@ MIRRORS = [
             for k in ("name", "server", "portal", "app_slug"))
 ]
 MIRRORS_DIR = os.path.expanduser("~/.config/team-room/mirrors")
+MIRROR_FANOUT_BUDGET_SECONDS = 1.0
 
 
 
@@ -1094,10 +1149,6 @@ def read_session():
 
 def read(limit: int = 30):
     record_session("read")
-    # One line of protocol currency: sessions load instructions once at
-    # start, but this tool always runs current. If the room's rules have
-    # moved since a session began, this is how it finds out.
-    print(f"[room-post {KIT_VERSION} \u00b7 protocol: SKILL.md \u00b7 re-read it if your loaded copy is older]\n")
     creds, key, creds_path, session = authed_session()
     url = (
         f"{PRODUCTION_SERVER}/protected/api/v1/developer/apps/"
@@ -1110,11 +1161,9 @@ def read(limit: int = 30):
             session = refresh_session(creds, key, creds_path)
             resp = http_json(url, token=session["accessToken"])
         elif e.code == 401:
-            die("your room credential was rejected (revoked or expired). "
-            "Reconnect with `room-post login`; for a courier token, "
-            "mint a fresh one.", 3)
+            raise RuntimeError("room credential rejected")
         else:
-            die(f"read failed ({e.code}): {e.read().decode()[:200]}")
+            raise RuntimeError(f"read failed with HTTP {e.code}")
     msgs = resp.get("data") or resp.get("messages") or []
     for m in msgs:
         sender = m.get("sender_name") or m.get("sender") or "?"
@@ -1191,7 +1240,8 @@ def load_session():
         )
 
 
-def refresh_session(creds, key, creds_path, server=None, lock_path=None):
+def refresh_session(creds, key, creds_path, server=None, lock_path=None,
+                    timeout: float = 10):
     import fcntl
     lock_path = lock_path or ROOM_LOCK_PATH
     os.makedirs(os.path.dirname(lock_path), exist_ok=True)
@@ -1201,7 +1251,7 @@ def refresh_session(creds, key, creds_path, server=None, lock_path=None):
     # plenty for a real refresh (one HTTP round trip); after that, fail the
     # ROOM command softly — the developer's session must not inherit our
     # deadlock.
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + timeout
     while True:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1237,13 +1287,20 @@ def refresh_session(creds, key, creds_path, server=None, lock_path=None):
                 creds["orgSessions"][key] = fs
         except Exception:
             pass
-        return _refresh_session_locked(creds, key, creds_path, server)
+        return _refresh_session_locked(
+            creds,
+            key,
+            creds_path,
+            server,
+            timeout=max(0.01, deadline - time.monotonic()),
+        )
     finally:
         fcntl.flock(lock, fcntl.LOCK_UN)
         lock.close()
 
 
-def _refresh_session_locked(creds, key, creds_path, server=None):
+def _refresh_session_locked(creds, key, creds_path, server=None,
+                            timeout: float = 30):
     session = creds["orgSessions"][key]
     refresh_token = session.get("refreshToken")
     if not refresh_token:
@@ -1254,6 +1311,7 @@ def _refresh_session_locked(creds, key, creds_path, server=None):
         tokens = http_json(
             f"{issuer}/api/v1/auth/refresh/keyless",
             {"refresh_token": refresh_token},
+            timeout=timeout,
         )
     except urllib.error.HTTPError as e:
         die(f"room login refresh rejected ({e.code}). Reconnect with:\n"
@@ -1396,13 +1454,9 @@ def search(query: str):
             session = refresh_session(creds, key, creds_path)
             items = search_items(session, query, max_results=30)
         elif e.code == 401:
-            die("your room credential was rejected (revoked or expired). "
-            "Reconnect with `room-post login`; for a courier token, "
-            "mint a fresh one.", 3)
+            raise RuntimeError("room credential rejected")
         else:
-            die(f"search failed ({e.code}): {e.read().decode()[:200]}")
-    except RuntimeError as e:
-        die(str(e), 3)
+            raise RuntimeError(f"search failed with HTTP {e.code}")
     record_session("search", topic=query, hits=len(items))
     render_hits(items, query)
 
@@ -1495,8 +1549,10 @@ def gather_hits(session, query: str) -> list:
     if failures == len(probes) and not merged:
         raise RuntimeError("every search probe failed")
     if failures and merged:
-        print(f"note: {failures} of {len(probes)} search probes failed — "
-              "results may be PARTIAL (recorded for doctor)", file=sys.stderr)
+        print(
+            f"room-status: partial ({failures}/{len(probes)} recall probes unavailable)",
+            file=sys.stderr,
+        )
     return merged
 
 
@@ -1733,12 +1789,12 @@ def objects_url(session, suffix=""):
     )
 
 
-def http_get(url: str, token: str) -> dict:
+def http_get(url: str, token: str, timeout: float = 8) -> dict:
     req = urllib.request.Request(
         url, headers={"Authorization": f"Bearer {token}",
                       "User-Agent": f"room-post/{KIT_VERSION}"}
     )
-    with urllib.request.urlopen(req, timeout=8) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.load(resp)
 
 
@@ -1853,19 +1909,12 @@ def fetch_records(session, status=None, kind=None):
             resp = http_get(objects_url(session, q), token)
         except urllib.error.HTTPError as e:
             if e.code == 401 and not session.get("static"):
-                die("room session expired mid-fetch; rerun (it self-renews)", 3)
+                health_event("records", "session expired mid-fetch")
+                return None
             health_event("records", f"HTTP {e.code}")
-            print(
-                f"room_post: team records unavailable ({e.code}); continuing without them",
-                file=sys.stderr,
-            )
             return None
         except urllib.error.URLError:
             health_event("records", "network unreachable")
-            print(
-                "room_post: team records unreachable (network); continuing without them",
-                file=sys.stderr,
-            )
             return None
         rows += resp.get("data") or []
         if not resp.get("has_next"):
@@ -1888,8 +1937,7 @@ def records_list(status=None, kind=None):
     _, _, _, session = authed_session()
     rows = fetch_records(session, status, kind)
     if rows is None:
-        print("(records UNAVAILABLE right now — that is a kit/room health "
-              "issue, not an empty list; `room-post doctor` has details)")
+        print("room-status: unavailable")
         return
     if not rows:
         print("(no records match)")
@@ -1905,8 +1953,7 @@ def records_show(record_id: str):
     _, _, _, session = authed_session()
     fetched = fetch_records(session)
     if fetched is None:
-        die("records unavailable right now (health issue, not a missing "
-            "record) — see room-post doctor", 3)
+        raise RuntimeError("records unavailable")
     rows = [f for f in fetched if f.get("record_id") == record_id]
     if not rows:
         die(f"no record '{record_id}'")
@@ -1976,8 +2023,7 @@ def brief():
     _, _, _, session = authed_session()
     rows = fetch_records(session, status="approved")
     if rows is None:
-        print("(team records UNAVAILABLE right now — treat this brief as "
-              "incomplete; `room-post doctor` has details)")
+        print("room-status: unavailable")
         return
     if not rows:
         print("(no approved team records yet — check `room-post records` for drafts)")
@@ -2059,7 +2105,7 @@ def _mirror_has_creds(m: dict) -> bool:
     )
 
 
-def _mirror_session(m: dict) -> dict | None:
+def _mirror_session(m: dict, timeout: float) -> dict | None:
     """Auth for one mirror: TEAM_ROOM_TOKEN_<NAME> env / token file, else
     the mirror's browser-login session (refreshed if expired). None means
     'no credentials yet' — the caller prints the hint and moves on."""
@@ -2070,7 +2116,7 @@ def _mirror_session(m: dict) -> dict | None:
     except OSError:
         tok = env
     if tok:
-        me = http_get(f"{m['server']}/api/v1/users/me", tok)
+        me = http_get(f"{m['server']}/api/v1/users/me", tok, timeout=timeout)
         return {
             "accessToken": tok,
             "appId": me.get("app_id") or me.get("app"),
@@ -2084,11 +2130,15 @@ def _mirror_session(m: dict) -> dict | None:
         return None
     session = creds["orgSessions"][key]
     if (session.get("expiresAt") or 0) / 1000 < time.time() + EXPIRY_SKEW_SECONDS:
-        session = refresh_session(
-            creds, key, creds_path,
-            server=m["server"],
-            lock_path=os.path.join(MIRRORS_DIR, f"{m['name']}.lock"),
-        )
+        with contextlib.redirect_stderr(io.StringIO()):
+            session = refresh_session(
+                creds,
+                key,
+                creds_path,
+                server=m["server"],
+                lock_path=os.path.join(MIRRORS_DIR, f"{m['name']}.lock"),
+                timeout=timeout,
+            )
     return session
 
 
@@ -2096,17 +2146,19 @@ def mirror_fanout(message: str, metadata: dict | None, uploads: list | None = No
     """Best-effort copy of a post to each configured mirror tier. The
     prod post already succeeded; nothing here may fail the command, so
     every problem becomes one quiet line and we move on."""
+    deadline = time.monotonic() + MIRROR_FANOUT_BUDGET_SECONDS
     for m in MIRRORS:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            health_event("mirrors", "shared deadline exhausted")
+            break
         try:
             if not m.get("thread_id"):
-                print(f"mirror {m['name']}: no thread_id yet (room not provisioned)")
+                health_event(f"mirror:{m['name']}", "room not provisioned")
                 continue
-            session = _mirror_session(m)
+            session = _mirror_session(m, remaining)
             if not session:
-                print(
-                    f"mirror {m['name']}: no login yet "
-                    f"(room-post login {m['name']})"
-                )
+                health_event(f"mirror:{m['name']}", "credentials unavailable")
                 continue
             body = {"content": message, "user": session["userId"]}
             if metadata:
@@ -2118,11 +2170,10 @@ def mirror_fanout(message: str, metadata: dict | None, uploads: list | None = No
                 f"{session['appId']}/threads/{m['thread_id']}/messages",
                 body,
                 token=session["accessToken"],
-                timeout=8,
+                timeout=max(0.01, deadline - time.monotonic()),
             )
         except (Exception, SystemExit) as e:
             health_event(f"mirror:{m['name']}", type(e).__name__)
-            print(f"mirror {m['name']}: skipped ({type(e).__name__})")
 
 
 def login_page_html(ok: bool) -> str:
@@ -2485,12 +2536,11 @@ def doctor():
 
     # 6. mirrors (informational — a mirror never blocks anything)
     for m in MIRRORS:
-        has_creds = (
-            os.path.exists(os.path.join(MIRRORS_DIR, f"{m['name']}.json"))
-            or os.path.exists(os.path.join(MIRRORS_DIR, f"{m['name']}.token"))
-            or bool(os.environ.get(f"TEAM_ROOM_TOKEN_{m['name'].upper()}"))
-        )
-        if has_creds:
+        try:
+            mirror_session = _mirror_session(m, 2)
+        except (Exception, SystemExit):
+            mirror_session = None
+        if mirror_session:
             print(f"ok  mirror {m['name']}: {m['server']}")
         else:
             print(
@@ -2639,6 +2689,7 @@ def _pr_publish_args(argv):
 
 def publish_pr(argv):
     """Publish local-only evidence; any room failure is deliberately non-blocking."""
+    automatic = "--handoff" in argv or "--envelope-stdin" in argv
     try:
         os.environ["GIT_NO_LAZY_FETCH"] = "1"
         from dataclasses import replace
@@ -2650,7 +2701,7 @@ def publish_pr(argv):
         from evidence.artifacts import deterministic_name
         from evidence.bundle import build_bundle, git_evidence_from_repo
         from evidence.git_pr import automatic_envelope, consume_private_file, handoff, is_ancestor, local_commits, parse_pr, repository_identity
-        from evidence.model import ExecutionSpan, ProvenanceValue, Subject
+        from evidence.model import Detection, ExecutionSpan, ProvenanceValue, Subject
         from evidence.policy import policy_for_mode
         from evidence.publisher import ArtifactClient, Publisher, PublishRequest
 
@@ -2707,6 +2758,13 @@ def publish_pr(argv):
             "--harness must be astrodev, issue-fixer, codex, claude, or generic"
         )
         detection = adapter.detect(os.environ, cwd)
+        if detection is None and session and adapter_name in {"codex", "claude"}:
+            home_var = "CODEX_HOME" if adapter_name == "codex" else "CLAUDE_HOME"
+            default_dir = ".codex" if adapter_name == "codex" else ".claude"
+            root = os.environ.get(
+                home_var, str(Path(os.environ.get("HOME", "")) / default_dir)
+            )
+            detection = Detection(adapter_name, "", root)
         if detection is None: raise ValueError("exact evidence session unavailable; pass --session and a configured harness")
         source = adapter.resolve_session(detection, session)
         chapter, checkpoint = adapter.chapter(source)
@@ -2745,10 +2803,28 @@ def publish_pr(argv):
             args["replace_head_from"], args["from_artifact_version"], False)
         publisher = Publisher(client, state_path, policy, ancestor=lambda old, new: is_ancestor(cwd, old, new))
         result = publisher.publish(request)
-        print(f"pr evidence {result.status}" + (f" artifact={result.artifact_id} version={result.version}" if result.artifact_id else ""))
-    except Exception as exc:
+        if not automatic:
+            print(result.status)
+    except (Exception, SystemExit) as exc:
         # This command is exhaust for a successful PR creation, never a gate.
-        print(f"pr evidence withheld: {type(exc).__name__}: {str(exc)[:200]}", file=sys.stderr)
+        # Automatic callers get a quiet outcome; operators invoking the
+        # diagnostic form directly still receive one truthful status.
+        reason = str(exc)
+        health_event("pr-evidence", f"{type(exc).__name__}: {reason[:160]}")
+        unsafe_input = any(
+            marker in reason.lower()
+            for marker in (
+                "owned regular file",
+                "mode 0600",
+                "symlink",
+                "changed while read",
+                "changed before consumption",
+            )
+        )
+        if unsafe_input:
+            print("room security refusal: unsafe PR evidence input", file=sys.stderr)
+        elif not automatic:
+            print("pr evidence withheld", file=sys.stderr)
 
 
 def main():
@@ -2875,9 +2951,6 @@ def main():
             if metadata is not None:
                 metadata["quality_warnings"] = _warns[:4]
             health_event("post-quality", _warns[0])
-            print("post-quality: " + "; ".join(_warns[:2]) +
-                  " — posting anyway, but a better-shaped post gets found "
-                  "and followed", file=sys.stderr)
     except Exception:
         pass
     if dry:
@@ -2892,9 +2965,7 @@ def main():
     _advance_room_marker()  # next exhaust window starts where this one ended
     mention_peek()
     record_session("post", areas=(metadata or {}).get("areas"))
-    nudge = session_nudge((metadata or {}).get("areas"))
-    if nudge:
-        print(f"\nroom: {nudge}", file=sys.stderr)
+    session_nudge((metadata or {}).get("areas"))
     mirror_fanout(message, metadata, uploads)
 
 
@@ -2912,14 +2983,10 @@ def _run_never_blocking():
     debugging us. Writes still say loudly that the post did not land (a lost
     post is worth knowing about); they just don't derail the session.
     """
-    # Superseded install location: this exact path once ran a frozen kit for
-    # days with no signal. One line, stderr, never blocks — but the drift is
-    # visible instead of silent.
+    # Superseded install location is an operator-health fact, not coding work.
     if os.path.abspath(__file__).startswith(
             os.path.expanduser("~/.archastro/team-room")):
-        print("room-post: this copy runs from a superseded location. Update once with:\n"
-              "  npx github:ArchAstro/agent-rooms --machine",
-              file=sys.stderr)
+        health_event("install", "superseded location")
 
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     _t0 = time.monotonic()
@@ -2948,27 +3015,16 @@ def _run_never_blocking():
         _note_latency()
         if e.code in (0, None):
             raise
-        what = (("your post DID land, but the kit failed after sending — do "
-                 "not repost") if (is_write and _POST_LANDED)
-                else "your post did NOT land" if is_write
-                else "couldn't reach the room's knowledge")
         health_event(f"cmd:{cmd}", f"soft-exit {e.code}")
-        print(f"\nroom: {what}. Continuing without the room — this is NOT a "
-              "problem for you to fix, and not a reason to retry, debug, or "
-              "pause your work. Mention it to your human once and carry on.",
-              file=sys.stderr)
+        if not is_write:
+            print("room-status: unavailable")
         sys.exit(0)
     except KeyboardInterrupt:
         raise
     except Exception as exc:
         health_event(f"cmd:{cmd}", f"{type(exc).__name__}: {exc}")
-        what = (("your post DID land, but the kit failed after sending — do "
-                 "not repost") if (is_write and _POST_LANDED)
-                else "your post did NOT land" if is_write
-                else "couldn't reach the room's knowledge")
-        print(f"\nroom: {what}. Continuing without the room — this is NOT a "
-              "problem for you to fix. Carry on with your task.",
-              file=sys.stderr)
+        if not is_write:
+            print("room-status: unavailable")
         sys.exit(0)
 
 
