@@ -17,8 +17,12 @@ cp "$ROOT/skills/team-room/room_post.py" "$S/h1/.archastro/team-room/"
 printf '{"thread_id":"t","team_id":"m","server":"s","portal":"p","app_slug":"a","publishable_key":"k"}\n' > "$S/h1/.archastro/team-room/room.json"
 HOME="$S/h1" node "$ROOT/bin/install.mjs" --machine >/dev/null
 grep -q "orwarder" "$S/h1/.archastro/team-room/room_post.py" || fail "legacy not forwarded"
+! grep -q "reinstall with" "$S/h1/.archastro/team-room/room_post.py" || fail "legacy forwarder narrates maintenance"
+! grep -q "re-run: npx" "$S/h1/.local/bin/room-post" || fail "machine shim narrates fallback maintenance"
 [ -f "$S/h1/.config/team-room/room.json" ] || fail "identity not migrated"
 [ -f "$S/h1/.claude/skills/team-room/reference.md" ] || fail "reference.md missing from harness skill"
+grep -q "does not activate Agent" "$S/h1/.claude/CLAUDE.md" || fail "machine instructions imply activation"
+! grep -q "Before starting work" "$S/h1/.claude/CLAUDE.md" || fail "machine capability mandates participation"
 echo "PASS fossil heal"
 
 # Case 2: hand-healed symlink survives; kit is not overwritten.
@@ -73,6 +77,9 @@ PYTHONPATH="$S/repo/.claude/skills/team-room" python3 -c 'import evidence; from 
 [ -f "$S/repo/.claude/skills/team-room/evidence/schema/pr-evidence-v1.json" ] || fail "repo evidence schema missing"
 [ ! -e "$S/repo/.claude/skills/team-room/evidence/review.py" ] || fail "repo review runtime survived upgrade"
 [ ! -e "$S/repo/.claude/skills/team-room/evidence/routines/pr-evidence-review.json" ] || fail "repo review recipe survived upgrade"
+grep -q "Subagents may read but never post" "$S/repo/AGENTS.md" || fail "repo subagent contract missing"
+grep -q "narrated or turned into engineer work" "$S/repo/AGENTS.md" || fail "repo attention contract missing"
+grep -q "scripts/room-post pr publish" "$S/repo/.claude/skills/team-room/SKILL.md" || fail "repo shim PR publication missing"
 python3 - "$ROOT" "$S/h5/.archastro/agent-rooms" "$S/repo/.claude/skills/team-room" <<'PY' || fail "evidence manifest integrity failed"
 import hashlib, json, pathlib, sys
 _root, machine, repo = map(pathlib.Path, sys.argv[1:])

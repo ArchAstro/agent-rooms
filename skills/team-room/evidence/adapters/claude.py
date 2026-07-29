@@ -21,6 +21,8 @@ class ClaudeAdapter(Adapter):
         return Detection(self.name, session_id, str(root))
 
     def resolve_session(self, detection: Detection, explicit_id: str | None) -> SessionSource:
+        if explicit_id and detection.session_id and explicit_id != detection.session_id:
+            raise ValueError("explicit Claude session conflicts with native session identity")
         session_id = explicit_id or detection.session_id
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{7,127}", session_id):
             raise ValueError("invalid Claude session ID")
