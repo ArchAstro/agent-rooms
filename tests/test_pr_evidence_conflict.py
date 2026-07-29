@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """Adversarial publisher contracts: current ordering, hostile input, recovery."""
 import json
+import os
 from pathlib import Path
 import tempfile
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "team-room"))
+os.environ.setdefault("TEAM_ROOM_TRUST_SERVER", "1")
+os.environ.setdefault(
+    "ROOM_JSON", str(Path(__file__).resolve().parent / "fixtures" / "room.json")
+)
 from evidence.artifacts import ArtifactValidationError, semantic_hash
 from evidence.policy import Policy, policy_for_mode, restrict_payload
 from evidence.publisher import Publisher, PublishRequest
