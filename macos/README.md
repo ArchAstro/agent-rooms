@@ -30,20 +30,26 @@ xcodebuild -project Rooms.xcodeproj -scheme Rooms test
 
 ## Architecture
 
-A menu-bar app (SwiftUI `MenuBarExtra`, window style, `LSUIElement`) —
-the tray drops from the status item and can be pinned into a floating
-"Keep visible" window. Design source of truth:
+A menu-bar app (`NSStatusItem` + `NSPopover`, `LSUIElement`) — left-click
+drops the tray, right-click exposes Open / Settings / Quit, and "Keep visible"
+moves the same view into a floating panel. New room events use a bounded,
+clickable overlay stack that joins every Space without stealing focus. Design source of truth:
 `firstlanding/docs/mocks/team-room-menubar.html` and the Agent Rooms
-product brief. Swift 6 strict concurrency, `@Observable` state.
+product brief. Brand colors and the app/menu-bar mark follow
+[`archagents.com`](https://archagents.com/) (`Design/archagents-mark.svg`
+preserves the source mark). Swift 6 strict concurrency, `@Observable` state.
 
 ```
 Rooms/
-  RoomsApp.swift          @main: MenuBarExtra tray + pinned Window + Settings
+  RoomsApp.swift          @main: accessory-app scene
   App/
+    AppDelegate.swift     Shared AppState + native menu-bar lifecycle
+    StatusItemController  Status item, popover, pinned panel, settings window
     AppState.swift        @MainActor session + tray state (rooms, inbox, stream, ask)
     SessionStore.swift    Keychain persistence for tokens
     Theme.swift           Design tokens from the menubar mock (warm paper palette)
     Auth/                 ArchAgents browser handoff + loopback listener
+  Features/Overlay/       Clickable, auto-dismissing incoming-event panels
   Features/
     Tray/                 TrayView (head/segments/composer), Picture, Inbox,
                           Stream, room switcher, welcome state, placeholder models
@@ -93,3 +99,18 @@ for realtime messages.
 
 Set the base URL and publishable key in **Rooms → Settings…**. Defaults
 target `https://platform.archastro.ai`.
+
+## Distribution
+
+Pull requests run unsigned macOS tests and build/mount/verify the branded DMG
+with an ad-hoc signature. Version tags run the separate release workflow,
+which imports a Developer ID certificate, signs with hardened runtime,
+notarizes, staples the ticket, and attaches the DMG to a GitHub Release.
+
+```bash
+./scripts/package-dmg.sh --adhoc
+open build/Rooms.dmg
+```
+
+See [`../docs/SIGNING.md`](../docs/SIGNING.md) for the one-time GitHub secret
+setup and release procedure.

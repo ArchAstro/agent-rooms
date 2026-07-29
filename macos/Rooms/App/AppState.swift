@@ -9,6 +9,10 @@ import ArchAstroPlatform
 @MainActor
 @Observable
 final class AppState {
+    /// UI shell hooks kept as closures so the product state remains testable
+    /// without owning AppKit windows.
+    var onNewEvent: ((StreamEvent) -> Void)?
+
     enum SessionPhase {
         case restoring
         case signedOut
@@ -94,7 +98,7 @@ final class AppState {
         let pending = requests
         Task {
             for request in pending {
-                _ = withAnimation(.easeOut(duration: 0.25)) {
+                withAnimation(.easeOut(duration: 0.25)) {
                     requests.removeAll { $0.id == request.id }
                 }
                 try? await Task.sleep(nanoseconds: 55_000_000)
@@ -161,6 +165,7 @@ final class AppState {
                 newEventIDs.insert(event.id)
             }
         }
+        onNewEvent?(event)
     }
 
     private let sessionStore = SessionStore()
@@ -199,6 +204,39 @@ final class AppState {
     var publishableKey: String {
         get { UserDefaults.standard.string(forKey: "publishableKey") ?? "" }
         set { UserDefaults.standard.set(newValue, forKey: "publishableKey") }
+    }
+
+    var overlayEnabled: Bool = {
+        let defaults = UserDefaults.standard
+        // Event bodies may contain private room context, so previews are opt-in.
+        guard defaults.object(forKey: "overlayEnabled") != nil else { return false }
+        return defaults.bool(forKey: "overlayEnabled")
+    }() {
+        didSet {
+            UserDefaults.standard.set(overlayEnabled, forKey: "overlayEnabled")
+        }
+    }
+
+    var overlayAutoDismiss: Bool = {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: "overlayAutoDismiss") != nil else { return true }
+        return defaults.bool(forKey: "overlayAutoDismiss")
+    }() {
+        didSet {
+            UserDefaults.standard.set(
+                overlayAutoDismiss,
+                forKey: "overlayAutoDismiss"
+            )
+        }
+    }
+
+    var overlayDuration: Double = {
+        let value = UserDefaults.standard.double(forKey: "overlayDuration")
+        return value > 0 ? value : 6
+    }() {
+        didSet {
+            UserDefaults.standard.set(overlayDuration, forKey: "overlayDuration")
+        }
     }
 
     // MARK: Session lifecycle

@@ -5,11 +5,12 @@ options:
     macOS: "14.0"
   createIntermediateGroups: true
 
-# Tracks main until the first tagged release — then pin with `from: x.y.z`.
+# Keep release builds reproducible. Update this revision deliberately when
+# adopting a newer ArchAstroPlatform commit.
 packages:
   ArchAstroPlatform:
     url: https://github.com/ArchAstro/archastro-swift
-    branch: main
+    revision: 984cec2ddc74f554c8a57748d52868a70c019414
 
 settings:
   base:

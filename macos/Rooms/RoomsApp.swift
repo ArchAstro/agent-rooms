@@ -1,35 +1,25 @@
 import SwiftUI
 
-/// Rooms lives in the menu bar: the tray panel drops from the status
-/// item, and "Keep visible" moves it into a floating window — per
-/// docs/mocks/team-room-menubar.html.
+/// Rooms lives in the menu bar. AppKit owns the status item so left-click can
+/// open the tray while right-click provides the native Open / Settings / Quit
+/// menu that `MenuBarExtra` cannot express.
 @main
 struct RoomsApp: App {
-    @State private var appState = AppState()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        MenuBarExtra {
-            TrayView()
-                .environment(appState)
-        } label: {
-            Image(systemName: "bubble.left.and.bubble.right.fill")
-            if appState.isSignedIn && appState.inboxCount > 0 {
-                Text("\(appState.inboxCount)")
-            }
-        }
-        .menuBarExtraStyle(.window)
-
-        // The pinned "Keep visible" panel.
-        Window("Rooms", id: "rooms-panel") {
-            TrayView(isPinned: true)
-                .environment(appState)
-        }
-        .windowResizability(.contentSize)
-        .defaultPosition(.topTrailing)
-
+        // Accessory apps still need a Scene. User-facing windows are hosted by
+        // StatusItemController so the popover and pinned panel share one state.
         Settings {
-            SettingsView()
-                .environment(appState)
+            EmptyView()
+        }
+        .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") {
+                    appDelegate.showSettings()
+                }
+                .keyboardShortcut(",", modifiers: .command)
+            }
         }
     }
 }

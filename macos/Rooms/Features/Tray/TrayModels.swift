@@ -189,7 +189,7 @@ enum TrayPlaceholders {
         SummaryPerson(
             id: "vivek", initials: "VK", name: "Vivek",
             work: "magic-link callback stack · CI running",
-            status: "watching", statusKind: .wait, avatarColor: Color(hex: 0x6557C7)
+            status: "watching", statusKind: .wait, avatarColor: Color(hex: 0x0D8B6A)
         ),
         SummaryPerson(
             id: "calvin", initials: "CG", name: "Calvin",
