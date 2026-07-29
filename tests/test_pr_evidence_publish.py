@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -500,7 +501,8 @@ def test_pr_creation_handoff_runs_the_real_cli_without_github_credentials():
         base = commit(repo, "base"); head = commit(repo, "head"); producer(home / "producer.py")
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         result = run_publish(repo, home, f"http://127.0.0.1:{srv.server_address[1]}", base, head, "handoff-session", handoff_only=True)
-        assert result.returncode == 0 and "published" in result.stdout, result.stdout + result.stderr
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert result.stdout == "" and result.stderr == "", result.stdout + result.stderr
         assert not (home / "handoff.json").exists()
         artifact = json.loads(ContractServer.artifacts["artifact-1"]["raw"])
         assert artifact["subject"]["base_ref"] == "main"
@@ -576,9 +578,8 @@ def test_astrodev_capture_runs_the_real_cli_without_generic_producer():
                 },
             ],
         )
-        assert result.returncode == 0 and "published" in result.stdout, (
-            result.stdout + result.stderr
-        )
+        assert result.returncode == 0
+        assert result.stdout == "" and result.stderr == "", result.stdout + result.stderr
         assert not handoff.exists() and not capture.exists()
         artifact = json.loads(ContractServer.artifacts["artifact-1"]["raw"])
         chapter = artifact["chapters"][0]
@@ -668,9 +669,8 @@ def test_issue_fixer_capture_keeps_both_real_codex_json_rounds():
                 },
             ],
         )
-        assert result.returncode == 0 and "published" in result.stdout, (
-            result.stdout + result.stderr
-        )
+        assert result.returncode == 0
+        assert result.stdout == "" and result.stderr == "", result.stdout + result.stderr
         assert not handoff.exists() and not capture.exists()
         artifact = json.loads(ContractServer.artifacts["artifact-1"]["raw"])
         chapter = artifact["chapters"][0]
@@ -864,6 +864,15 @@ def test_astrodev_production_wrapper_crosses_real_cli_and_adapter():
     ) as srv:
         root = Path(td)
         repo, home, base, head = local_repo(root)
+        (repo / "scripts").mkdir()
+        shutil.copy2(
+            firstlanding / "scripts" / "room-post",
+            repo / "scripts" / "room-post",
+        )
+        shutil.copytree(
+            firstlanding / ".claude" / "skills" / "team-room",
+            repo / ".claude" / "skills" / "team-room",
+        )
         endpoint = f"http://127.0.0.1:{srv.server_address[1]}"
         room = home / "room.json"
         room.write_text(json.dumps({
@@ -954,9 +963,7 @@ def test_astrodev_production_wrapper_crosses_real_cli_and_adapter():
                 "sessionPath": str(session),
             })
             + "), publishEvidence:(handoff, deadlineAt)=>publishPrEvidence("
-            + "handoff, { deadlineAt, roomPostCommand: "
-            + json.dumps(str(KIT))
-            + " })});\n"
+            + "handoff, { deadlineAt })});\n"
             + "await controller.createPr('--submit');\n"
         )
         threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -1051,7 +1058,7 @@ def test_automatic_envelope_is_capped_one_shot_and_rejects_symlink_sessions():
             symlink,
         )
         assert linked.returncode == 0
-        assert b"owned regular file" in linked.stderr
+        assert linked.stderr == b"room security refusal: unsafe PR evidence input\n"
 
         oversized = run_automatic_astrodev_envelope(
             repo,
@@ -1064,7 +1071,7 @@ def test_automatic_envelope_is_capped_one_shot_and_rejects_symlink_sessions():
             envelope_override=(16 * 1024 + 1).to_bytes(4, "big"),
         )
         assert oversized.returncode == 0
-        assert b"header exceeds byte cap" in oversized.stderr
+        assert oversized.stderr == b""
 
         payload = {
             "pr_url": "https://github.com/owner/repository/pull/7",
@@ -1090,7 +1097,7 @@ def test_automatic_envelope_is_capped_one_shot_and_rejects_symlink_sessions():
             ),
         )
         assert trailing.returncode == 0
-        assert b"trailing bytes" in trailing.stderr
+        assert trailing.stderr == b""
         assert ContractServer.artifacts == {}
 
 
@@ -1132,10 +1139,135 @@ def test_every_evidence_git_command_disables_promisor_lazy_fetch():
 
 
 def test_pr_publish_is_nonblocking_without_room_configuration():
-    env = {**os.environ, "HOME": tempfile.mkdtemp(), "ROOM_JSON": ""}
-    result = subprocess.run([sys.executable, str(KIT), "pr", "publish", "7"], env=env, text=True, capture_output=True, timeout=10)
-    assert result.returncode == 0 and "pr evidence withheld" in result.stderr, result.stdout + result.stderr
-    print("PASS  PR publication is nonblocking without room configuration")
+    home = Path(tempfile.mkdtemp())
+    capture = home / "capture.jsonl"
+    capture.write_text("private prompt and trajectory\n")
+    capture.chmod(0o600)
+    handoff = home / "handoff.json"
+    handoff.write_text(json.dumps({
+        "pr_url": "https://github.com/owner/repository/pull/7",
+        "base_ref": "main",
+        "base_sha": "a" * 40,
+        "head_sha": "b" * 40,
+        "harness": "codex",
+        "capture_path": str(capture),
+    }))
+    handoff.chmod(0o600)
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "ROOM_JSON": "",
+        "TEAM_ROOM_HEALTH_LOG": str(home / "health.jsonl"),
+    }
+    result = subprocess.run(
+        [sys.executable, str(KIT), "pr", "publish", "--handoff", str(handoff)],
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout == "" and result.stderr == "", result.stdout + result.stderr
+    assert not handoff.exists(), "private handoff must be consumed on every outcome"
+    assert not capture.exists(), "private capture must be consumed on every outcome"
+    rows = [
+        json.loads(line)
+        for line in (home / "health.jsonl").read_text().splitlines()
+    ]
+    assert any(row["component"] == "pr-evidence" for row in rows), rows
+    print("PASS  unavailable automatic PR publication is quiet and self-cleaning")
+
+
+def test_configured_pr_handoff_without_session_identity_is_quiet():
+    reset_contract_server()
+    with tempfile.TemporaryDirectory() as td, http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), ContractServer
+    ) as srv:
+        root = Path(td)
+        repo, home, base, head = local_repo(root)
+        endpoint = f"http://127.0.0.1:{srv.server_address[1]}"
+        room = home / "room.json"
+        room.write_text(json.dumps({
+            "thread_id": "thread-test",
+            "team_id": "team-test",
+            "server": endpoint,
+            "portal": endpoint,
+            "app_slug": "test",
+            "publishable_key": "pk",
+        }))
+        handoff = home / "handoff.json"
+        handoff.write_text(json.dumps({
+            "pr_url": "https://github.com/owner/repository/pull/7",
+            "base_ref": "main",
+            "base_sha": base,
+            "head_sha": head,
+            "harness": "codex",
+        }))
+        handoff.chmod(0o600)
+        env = {
+            **os.environ,
+            "HOME": str(home),
+            "ROOM_JSON": str(room),
+            "TEAM_ROOM_TRUST_SERVER": "1",
+            "TEAM_ROOM_TOKEN": "room-test-token",
+            "TEAM_ROOM_HEALTH_LOG": str(home / "health.jsonl"),
+            "CODEX_THREAD_ID": "",
+        }
+        result = subprocess.run(
+            [sys.executable, str(KIT), "pr", "publish", "--handoff", str(handoff)],
+            cwd=repo,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert result.stdout == "" and result.stderr == "", result.stdout + result.stderr
+        assert not handoff.exists()
+        assert ContractServer.artifacts == {}
+    print("PASS  configured missing session identity is quiet")
+
+
+def test_untrusted_room_refusal_consumes_private_handoff_and_capture():
+    home = Path(tempfile.mkdtemp())
+    capture = home / "capture.jsonl"
+    capture.write_text("private prompt and trajectory\n")
+    capture.chmod(0o600)
+    handoff = home / "handoff.json"
+    handoff.write_text(json.dumps({
+        "pr_url": "https://github.com/owner/repository/pull/7",
+        "base_ref": "main",
+        "base_sha": "a" * 40,
+        "head_sha": "b" * 40,
+        "harness": "astrodev",
+        "capture_path": str(capture),
+    }))
+    handoff.chmod(0o600)
+    room = home / "room.json"
+    room.write_text(json.dumps({
+        "thread_id": "thread-test",
+        "team_id": "team-test",
+        "server": "https://untrusted.invalid",
+        "portal": "https://untrusted.invalid",
+        "app_slug": "test",
+        "publishable_key": "pk",
+    }))
+    result = subprocess.run(
+        [sys.executable, str(KIT), "pr", "publish", "--handoff", str(handoff)],
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "ROOM_JSON": str(room),
+            "TEAM_ROOM_TRUST_SERVER": "",
+        },
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == 0
+    assert "REFUSING" in result.stderr
+    assert not handoff.exists() and not capture.exists()
+    print("PASS  untrusted destination refusal consumes private evidence files")
 
 
 if __name__ == "__main__":
@@ -1151,3 +1283,5 @@ if __name__ == "__main__":
     test_automatic_envelope_is_capped_one_shot_and_rejects_symlink_sessions()
     test_every_evidence_git_command_disables_promisor_lazy_fetch()
     test_pr_publish_is_nonblocking_without_room_configuration()
+    test_configured_pr_handoff_without_session_identity_is_quiet()
+    test_untrusted_room_refusal_consumes_private_handoff_and_capture()

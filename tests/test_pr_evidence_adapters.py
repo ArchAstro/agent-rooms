@@ -17,7 +17,7 @@ from evidence.adapters.claude import ClaudeAdapter  # noqa: E402
 from evidence.adapters.codex import CodexAdapter  # noqa: E402
 from evidence.adapters.first_party import FirstPartyAdapter  # noqa: E402
 from evidence.adapters.generic import GenericAdapter  # noqa: E402
-from evidence.model import UNKNOWN  # noqa: E402
+from evidence.model import Detection, UNKNOWN  # noqa: E402
 
 
 def write(path: Path, lines: list[dict]) -> None:
@@ -55,6 +55,23 @@ def test_explicit_native_sessions_never_choose_the_newest_transcript():
         assert claude_detection is not None
         assert [event.summary for event in claude.iter_events(claude.resolve_session(claude_detection, None), None)] == ["Claude wanted"]
         print("PASS  test_explicit_native_sessions_never_choose_the_newest_transcript")
+
+
+def test_native_and_explicit_session_identity_conflict_fails_closed():
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        for adapter, harness, native, other in (
+            (CodexAdapter(), "codex", "codex-native-session", "codex-other-session"),
+            (ClaudeAdapter(), "claude", "claude-native-session", "claude-other-session"),
+        ):
+            detection = Detection(harness, native, str(root))
+            try:
+                adapter.resolve_session(detection, other)
+            except ValueError as exc:
+                assert "conflict" in str(exc).lower(), str(exc)
+            else:
+                raise AssertionError(f"{harness} must reject conflicting identities")
+    print("PASS  native and explicit session identity conflicts fail closed")
 
 
 def test_multiple_native_harnesses_require_an_explicit_choice():
@@ -349,6 +366,7 @@ def test_claude_requires_authoritative_session_metadata_and_codex_effort_field()
 
 if __name__ == "__main__":
     test_explicit_native_sessions_never_choose_the_newest_transcript()
+    test_native_and_explicit_session_identity_conflict_fails_closed()
     test_multiple_native_harnesses_require_an_explicit_choice()
     test_generic_subprocess_gets_minimal_environment_and_stable_session_id()
     test_spans_are_stable_and_missing_model_provenance_stays_unknown()

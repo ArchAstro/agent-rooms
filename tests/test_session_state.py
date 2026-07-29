@@ -10,6 +10,10 @@ otherwise. A tool that nags gets ignored, which is worse than silence.
 import os
 import sys
 import tempfile
+import json
+import contextlib
+import io
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "skills", "team-room"))
@@ -18,6 +22,138 @@ os.environ.setdefault("ROOM_JSON", os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "fixtures", "room.json"))
 
 import room_post as rp  # noqa: E402
+
+
+def test_repeated_health_event_increments_one_logical_row():
+    original = rp.HEALTH_LOG_PATH
+    try:
+        rp.HEALTH_LOG_PATH = os.path.join(tempfile.mkdtemp(), "health.jsonl")
+        rp.health_event("mirror:staging", "TimeoutError")
+        rp.health_event("mirror:staging", "TimeoutError")
+        with open(rp.HEALTH_LOG_PATH) as handle:
+            rows = [json.loads(line) for line in handle if line.strip()]
+        assert len(rows) == 1, rows
+        assert rows[0]["count"] == 2, rows
+    finally:
+        rp.HEALTH_LOG_PATH = original
+    return "ok"
+
+
+def test_optional_mirrors_share_one_quiet_deadline():
+    real_mirrors = rp.MIRRORS
+    real_budget = rp.MIRROR_FANOUT_BUDGET_SECONDS
+    real_session = rp._mirror_session
+    real_http = rp.http_json
+    try:
+        rp.MIRRORS = [
+            {
+                "name": f"slow-{index}",
+                "server": "https://mirror.invalid",
+                "portal": "https://mirror.invalid",
+                "app_slug": "room",
+                "thread_id": "thread",
+            }
+            for index in range(3)
+        ]
+        rp.MIRROR_FANOUT_BUDGET_SECONDS = 0.05
+        rp._mirror_session = lambda _mirror, timeout: {
+            "accessToken": "token",
+            "appId": "app",
+            "userId": "user",
+        }
+
+        def slow_http(*_args, timeout, **_kwargs):
+            time.sleep(timeout)
+            raise TimeoutError
+
+        rp.http_json = slow_http
+        output = io.StringIO()
+        started = time.monotonic()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            rp.mirror_fanout("message", {"post_type": "done"})
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.15, elapsed
+        assert output.getvalue() == "", output.getvalue()
+    finally:
+        rp.MIRRORS = real_mirrors
+        rp.MIRROR_FANOUT_BUDGET_SECONDS = real_budget
+        rp._mirror_session = real_session
+        rp.http_json = real_http
+    return "ok"
+
+
+def test_expired_mirror_session_refreshes_inside_shared_budget():
+    original_dir = rp.MIRRORS_DIR
+    original_refresh = rp.refresh_session
+    directory = tempfile.mkdtemp()
+    mirror = {
+        "name": "staging",
+        "server": "https://mirror.invalid",
+        "portal": "https://mirror.invalid",
+        "app_slug": "room",
+    }
+    os.makedirs(directory, exist_ok=True)
+    with open(os.path.join(directory, "staging.json"), "w") as handle:
+        json.dump({
+            "orgSessions": {
+                "team": {
+                    "accessToken": "expired",
+                    "refreshToken": "refresh",
+                    "expiresAt": 0,
+                }
+            }
+        }, handle)
+    observed = []
+
+    def refresh(creds, key, path, **kwargs):
+        observed.append(kwargs["timeout"])
+        return {
+            **creds["orgSessions"][key],
+            "accessToken": "fresh",
+            "appId": "app",
+            "userId": "user",
+            "expiresAt": int(time.time() * 1000) + 60_000,
+        }
+
+    try:
+        rp.MIRRORS_DIR = directory
+        rp.refresh_session = refresh
+        session = rp._mirror_session(mirror, 0.2)
+        assert session and session["accessToken"] == "fresh", session
+        assert observed == [0.2], observed
+    finally:
+        rp.MIRRORS_DIR = original_dir
+        rp.refresh_session = original_refresh
+    return "ok"
+
+
+def test_expired_mirror_without_refresh_token_emits_no_remediation():
+    original_dir = rp.MIRRORS_DIR
+    directory = tempfile.mkdtemp()
+    mirror = {
+        "name": "staging",
+        "server": "https://mirror.invalid",
+        "portal": "https://mirror.invalid",
+        "app_slug": "room",
+    }
+    with open(os.path.join(directory, "staging.json"), "w") as handle:
+        json.dump({
+            "orgSessions": {
+                "team": {"accessToken": "expired", "expiresAt": 0}
+            }
+        }, handle)
+    output = io.StringIO()
+    try:
+        rp.MIRRORS_DIR = directory
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            try:
+                rp._mirror_session(mirror, 0.05)
+            except SystemExit:
+                pass
+        assert output.getvalue() == "", output.getvalue()
+    finally:
+        rp.MIRRORS_DIR = original_dir
+    return "ok"
 
 
 def _fresh_state():
