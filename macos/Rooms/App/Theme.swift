@@ -1,30 +1,32 @@
 import SwiftUI
 
-/// Design tokens from docs/mocks/team-room-menubar.html — the warm-paper
-/// visual language for the Team Room tray.
+/// ArchAgents brand tokens pulled from the live marketing surface, adapted to
+/// the warm-paper Team Room tray.
 enum Theme {
     // Ink
-    static let ink = Color(hex: 0x171716)
-    static let ink2 = Color(hex: 0x3F3E3A)
-    static let muted = Color(hex: 0x77736D)
-    static let muted2 = Color(hex: 0x6F6B65)
+    static let ink = Color(hex: 0x121212)
+    static let ink2 = Color(hex: 0x1C1917)
+    static let muted = Color(hex: 0x6B6862)
+    static let muted2 = Color(hex: 0x77736D)
 
     // Surfaces
-    static let paper = Color(hex: 0xFAF9F6)
-    static let surface = Color(hex: 0xF1EFEA)
-    static let line = Color(hex: 0x312E29).opacity(0.12)
-    static let lineStrong = Color(hex: 0x312E29).opacity(0.18)
+    static let paper = Color(hex: 0xFBFAF7)
+    static let surface = Color(hex: 0xF2EFE7)
+    static let line = Color(hex: 0x121212).opacity(0.10)
+    static let lineStrong = Color(hex: 0x121212).opacity(0.18)
 
     // Accents
-    static let purple = Color(hex: 0x6257D9)
-    static let purpleSoft = Color(hex: 0xEFEDFF)
-    static let green = Color(hex: 0x148266)
-    static let greenSoft = Color(hex: 0xE7F5F0)
-    static let amber = Color(hex: 0xA96414)
-    static let amberSoft = Color(hex: 0xFBF0DC)
+    // Kept under the existing names to avoid a broad view churn: this is the
+    // ArchAgents primary accent, not a purple.
+    static let purple = Color(hex: 0x0D8B6A)
+    static let purpleSoft = Color(hex: 0xE8F2EC)
+    static let green = Color(hex: 0x0B7F61)
+    static let greenSoft = Color(hex: 0xE8F2EC)
+    static let amber = Color(hex: 0xC8811A)
+    static let amberSoft = Color(hex: 0xFDF5EC)
     static let red = Color(hex: 0xB54848)
     static let redSoft = Color(hex: 0xF9E8E7)
-    static let blue = Color(hex: 0x376E9C)
+    static let blue = Color(hex: 0x3D6F9C)
     static let badgeRed = Color(hex: 0xCA514E)
 
     // Tray metrics
