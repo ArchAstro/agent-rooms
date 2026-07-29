@@ -2112,23 +2112,25 @@ def http_get(url: str, token: str, timeout: float = 8) -> dict:
 
 def _bootstrap_token() -> str | None:
     """A usable access token for discovery, without needing a room.json:
-    a static TEAM_ROOM_TOKEN, else the login session (refreshed against the
-    default server if expired)."""
-    tok = static_token()
-    if tok:
-        return tok
+    the human's login session first, else a static TEAM_ROOM_TOKEN. Discovery
+    chooses a company room for a person, so a courier credential must never
+    override the person's identity merely because both exist on the machine."""
     try:
         creds = json.load(open(ROOM_CREDS_PATH))
-        key = next(iter(creds["orgSessions"]))
-        s = creds["orgSessions"][key]
-        if (s.get("expiresAt") or 0) / 1000 < time.time() + EXPIRY_SKEW_SECONDS:
-            s = refresh_session(creds, key, ROOM_CREDS_PATH, server=DEFAULT_SERVER)
-        return s["accessToken"]
-    except Exception:
-        return None
+    except FileNotFoundError:
+        return static_token()
+    key = next(iter(creds["orgSessions"]))
+    s = creds["orgSessions"][key]
+    if (s.get("expiresAt") or 0) / 1000 < time.time() + EXPIRY_SKEW_SECONDS:
+        s = refresh_session(creds, key, ROOM_CREDS_PATH, server=DEFAULT_SERVER)
+    return s["accessToken"]
 
 
 ROOM_LABEL = "archastro_team_room"
+
+
+class RoomJoinIncomplete(RuntimeError):
+    """Membership was created, but room setup could not be completed."""
 
 
 def _room_api(server: str, token: str, pub_key: str):
@@ -2144,19 +2146,17 @@ def _room_api(server: str, token: str, pub_key: str):
                      "Content-Type": "application/json",
                      "x-archastro-api-key": pub_key})
         with urllib.request.urlopen(req, timeout=15) as r:
-            return json.load(r)
+            payload = r.read()
+            return json.loads(payload) if payload else {}
     return call
 
 def _my_org(call) -> str | None:
     """The company this person belongs to. Their room is their company's."""
-    override = os.environ.get("TEAM_ROOM_ORG_ID", "").strip()
-    if override:
-        return override
-    try:
-        me = call("/api/v1/users/me")
-    except Exception:
-        return None
-    return me.get("org") or me.get("org_id")
+    me = call("/api/v1/users/me")
+    org = me.get("org") or me.get("org_id")
+    if not org:
+        raise RuntimeError("the signed-in account has no company")
+    return org
 
 
 def _room_thread(call, team_id: str) -> tuple | None:
@@ -2174,53 +2174,111 @@ def discover_rooms(server: str, token: str, pub_key: str) -> list:
     """The caller's rooms: [(team_name, team_id, thread_id)].
 
     Joins them to their company's room if they are not in it yet. One
-    labelled-team query answers both "which rooms am I in" and "which room
-    does my company have", so this costs a request or two rather than one
-    per team the caller belongs to.
+    labelled-team query answers "which room am I in"; when that is empty, a
+    joined-team legacy scan and a joinable-team query answer whether their
+    company already has one. The labelled path stays constant-size rather
+    than making one request per unrelated team the caller belongs to.
     """
+    if (
+        not os.environ.get("TEAM_ROOM_TRUST_SERVER")
+        and server not in _trusted_servers()
+    ):
+        raise RuntimeError(
+            f"REFUSING untrusted room server {server!r}; "
+            "authenticate to that server before discovery"
+        )
     call = _room_api(server, token, pub_key)
-    flt = urllib.parse.quote(json.dumps(
-        {"operator": "eq", "path": ["system_role"], "value": ROOM_LABEL}))
+    org = _my_org(call)
 
-    labelled = []
-    for page in range(1, 21):
-        d = call(f"/api/v1/teams?page_size=100&page={page}&metadata={flt}")
-        labelled.extend(d.get("data") or [])
-        if d.get("has_next") is not True:
-            break
-    else:
-        raise RuntimeError("could not read every page of rooms")
+    def list_teams(membership: str, metadata=None) -> list:
+        rows = []
+        encoded = (
+            "&metadata=" + urllib.parse.quote(json.dumps(metadata))
+            if metadata is not None else ""
+        )
+        for page in range(1, 21):
+            d = call(
+                f"/api/v1/teams?membership={membership}"
+                f"&page_size=100&page={page}{encoded}"
+            )
+            rows.extend(d.get("data") or [])
+            if d.get("has_next") is not True:
+                return rows
+        raise RuntimeError(f"could not read every page of {membership} teams")
 
-    # Already in one: nothing to do, and nothing written to the server.
-    mine = [t for t in labelled if t.get("membership_status")]
-    if mine:
+    room_filter = {
+        "operator": "and",
+        "clauses": [
+            {"operator": "eq", "path": ["system_role"], "value": ROOM_LABEL},
+            {"operator": "eq", "path": ["room_org_id"], "value": org},
+        ],
+    }
+
+    # Already in a labelled room: nothing to do, and nothing written to the
+    # server. Membership is selected by the API rather than inferred from a
+    # response field whose value is a role ("owner", "member"), not a boolean.
+    labelled = [
+        t for t in list_teams("joined", room_filter)
+        if t.get("org") == org
+    ]
+    if labelled:
         out = []
-        for t in mine:
+        for t in labelled:
+            if not t.get("id"):
+                continue
             got = _room_thread(call, t["id"])
-            if got:
-                out.append((got[0], t["id"], got[1]))
-        return out
+            if not got:
+                raise RuntimeError(
+                    f"joined room team {t['id']} has no team-room thread"
+                )
+            out.append((got[0], t["id"], got[1]))
+        if out:
+            return out
+
+    # Rooms created before the metadata label shipped still need to work on
+    # a fresh machine. Only scan teams the caller has already joined; this
+    # fallback never grants membership and therefore cannot pull them into a
+    # team merely because it happens to contain a "team room" thread.
+    legacy = []
+    for t in list_teams("joined"):
+        if not t.get("id"):
+            continue
+        if t.get("org") != org:
+            continue
+        if (t.get("metadata") or {}).get("system_role") == ROOM_LABEL:
+            # A labelled row that did not pass the exact company-room filter
+            # above is not a legacy room. Letting it re-enter here would make
+            # forgeable or stale metadata bypass the new selector.
+            continue
+        got = _room_thread(call, t["id"])
+        if got:
+            legacy.append((got[0], t["id"], got[1]))
+    if legacy:
+        return legacy
 
     # Not in one yet. The label says which company a team CLAIMS to belong
     # to and anyone may write it, so a stranger can stamp a team with this
     # company's id. `org` is set by the platform from whoever created the
     # team and cannot be written by a caller, so the claim is checked
     # against it before joining anything.
-    org = _my_org(call)
-    if not org:
-        return []
-    owned = [t for t in labelled if t.get("org") == org and t.get("id")]
+    candidates = list_teams("joinable", room_filter)
+    owned = [t for t in candidates if t.get("org") == org and t.get("id")]
     if not owned:
         return []
+    if len(owned) > 1:
+        raise RuntimeError(
+            "more than one room claims to belong to your company; "
+            "nothing was joined"
+        )
 
-    # Oldest wins, so everyone converges on the same room rather than the
-    # company splitting by who happened to look last. A planted team cannot
-    # jump the queue by being older, because it was filtered out above.
-    owned.sort(key=lambda t: t.get("created_at") or t.get("inserted_at") or "")
     team_id = owned[0]["id"]
     call(f"/api/v1/teams/{team_id}/join", method="POST", body={})
     got = _room_thread(call, team_id)
-    return [(got[0], team_id, got[1])] if got else []
+    if not got:
+        raise RoomJoinIncomplete(
+            "the company room was joined but its team-room thread is missing"
+        )
+    return [(got[0], team_id, got[1])]
 
 
 def _write_room_json(team_id: str, thread_id: str, server: str, pub_key: str):
@@ -2233,8 +2291,10 @@ def _write_room_json(team_id: str, thread_id: str, server: str, pub_key: str):
         "publishable_key": pub_key,
     }
     os.makedirs(os.path.dirname(ROOM_CONFIG_PATH), exist_ok=True)
-    with open(ROOM_CONFIG_PATH, "w", encoding="utf-8") as f:
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(ROOM_CONFIG_PATH))
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
+    os.replace(tmp, ROOM_CONFIG_PATH)
     os.chmod(ROOM_CONFIG_PATH, 0o600)
 
 
@@ -2242,11 +2302,8 @@ def discover_and_configure(token: str, chosen_team: str | None = None):
     """Find and persist the caller's team room. Zero-config for the common
     single-room case; prints choices when there are several. A room.json
     beside the script or ROOM_JSON env still wins and is left alone."""
-    if os.environ.get("ROOM_JSON", "").strip():
-        return
     beside = os.path.join(os.path.dirname(os.path.abspath(__file__)), "room.json")
-    if os.path.exists(beside):
-        return  # a repo pinned its own room; don't override it
+    pinned = bool(os.environ.get("ROOM_JSON", "").strip()) or os.path.exists(beside)
     # ROOM_SERVER / ROOM_PUBLISHABLE_KEY override the product defaults for a
     # non-prod tier or a self-host (and for tests). Normal users set nothing.
     server = os.environ.get("ROOM_SERVER") or PRODUCTION_SERVER or DEFAULT_SERVER
@@ -2254,27 +2311,46 @@ def discover_and_configure(token: str, chosen_team: str | None = None):
                or _ROOM_CFG.get("publishable_key") or DEFAULT_PUBLISHABLE_KEY)
     try:
         rooms = discover_rooms(server, token, pub_key)
+    except RoomJoinIncomplete as e:
+        print(
+            f"you were joined to the company room, but setup could not finish "
+            f"({e}). No local room was saved; retry in a moment."
+        )
+        return False
     except Exception as e:
         # Could not check is not the same as there is nothing there. Saying
         # "no room" here sends someone off to create a second one for a
         # company that already has one.
         print(f"couldn't check for your team's room ({e}). "
               "Nothing was changed — try again in a moment.")
-        return
+        return False
     if chosen_team:
         rooms = [r for r in rooms if r[1] == chosen_team]
     if not rooms:
         print("your company doesn't have a team room yet. "
               f"Create one at {DEFAULT_PORTAL} and re-run this.")
-        return
+        return False
     if len(rooms) == 1:
         name, tid, thid = rooms[0]
+        if pinned:
+            if (
+                _ROOM_CFG.get("team_id") != tid
+                or _ROOM_CFG.get("thread_id") != thid
+            ):
+                print(
+                    "the pinned room config does not match your company's "
+                    "authenticated room. Nothing was overwritten."
+                )
+                return False
+            print(f"you're in the team room: {name}")
+            return True
         _write_room_json(tid, thid, server, pub_key)
         print(f"you're in the team room: {name}")
-        return
+        return True
     print("you're in several team rooms — pick one and re-run:")
     for name, tid, _ in rooms:
         print(f"  room-post discover --team {tid}   # {name}")
+    return False
 
 
 def fetch_records(session, status=None, kind=None):
@@ -2565,8 +2641,8 @@ def login_page_html(ok: bool) -> str:
     """Close-out page styled to match the archagents.com logged-out look."""
     title = "You're signed in" if ok else "Sign-in didn't complete"
     body = (
-        "The Team Room can post from this machine now. You can close this "
-        "tab and head back to your terminal."
+        "Authentication is complete. Head back to your terminal while the "
+        "kit securely connects your company room."
         if ok
         else "The login response was missing its tokens. Close this tab and "
         "run the login again from your terminal."
@@ -2601,7 +2677,6 @@ def login_page_html(ok: bool) -> str:
     alt="" onerror="this.style.display='none'">ArchAgents · Team Room</span>
   <h1>{title}</h1>
   <p>{body}</p>
-  {f'<a class="cta" href="https://archagents.com/threads/{THREAD_ID}">Open the Team Room</a>' if ok else ""}
 </div></body></html>"""
 
 
@@ -2712,18 +2787,20 @@ def login(mirror: dict | None = None, best_effort: bool = False,
     os.chmod(creds_path, 0o600)
     where = f"mirror '{mirror['name']}'" if mirror else "Team Room"
     print(
-        f"{where} session stored for {result.get('email', result['user'])} "
-        f"at {creds_path}. Posting now works regardless of archagent's "
-        "environment."
+        f"{where} sign-in stored for {result.get('email', result['user'])} "
+        f"at {creds_path}."
     )
     # First login with no room configured: find your team room from your
     # identity and save it, so there's nothing else to set up.
-    if not mirror and _room_config_path() is None:
-        try:
-            discover_and_configure(result["access_token"])
-        except Exception as e:
-            print(f"(couldn't auto-detect your room: {e}. If you have a "
-                  "room.json, run: room-post init --config <path>)")
+    if not mirror:
+        if not discover_and_configure(result["access_token"]):
+            die(
+                "sign-in succeeded, but no room was connected. "
+                "Nothing can post yet; fix the room issue above and run "
+                "`room-post discover`."
+            )
+    if not mirror:
+        print("Team Room connected. Posting now works from this machine.")
 
     # One `login` connects every tier. After the room (prod) is in, walk the
     # mirror tiers from room.json and connect each one that isn't already,
@@ -3230,7 +3307,8 @@ def main():
         if not tok:
             die("sign in first: room-post login", 3)
         try:
-            discover_and_configure(tok, chosen_team=team)
+            if not discover_and_configure(tok, chosen_team=team):
+                die("room discovery unavailable", 3)
         except Exception:
             die("room discovery unavailable", 3)
         return
