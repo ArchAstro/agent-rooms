@@ -128,18 +128,248 @@ def main():
         assert "editable routine" not in help_result.stdout, help_result.stdout
         print("PASS  help documents bounded PR evidence publication")
 
+        # Local argument handling must never touch the Room or masquerade as a
+        # knowledge outage. Nested help is especially important for agents:
+        # `done --help` must not publish a post whose headline is "--help".
+        for nested in (
+            ["read", "--help"],
+            ["search", "--help"],
+            ["brief", "--help"],
+            ["records", "--help"],
+            ["records", "show", "--help"],
+            ["inbox", "--help"],
+            ["doctor", "--help"],
+            ["login", "--help"],
+            ["pr", "publish", "--help"],
+            ["done", "--help"],
+        ):
+            before = list(CALLS)
+            result = run_kit(nested, home, server)
+            assert result.returncode == 0, (nested, result.stdout, result.stderr)
+            assert "usage:" in result.stdout.lower(), (nested, result.stdout, result.stderr)
+            assert "unavailable" not in (result.stdout + result.stderr).lower(), (
+                nested,
+                result.stdout,
+                result.stderr,
+            )
+            assert CALLS == before, (nested, CALLS[len(before):])
+        print("PASS  nested help is local, offline, and side-effect free")
+
+        for invalid in (
+            ["read", "many"],
+            ["read", "1", "extra"],
+            ["search"],
+            ["search", "query", "extra"],
+            ["brief", "extra"],
+            ["records", "--status"],
+            ["inbox", "extra"],
+            ["doctor", "extra"],
+            ["discover", "--team"],
+            ["init", "--config"],
+            ["login", "staging", "extra"],
+            ["pr", "review"],
+            ["pr", "publish", "--bogus"],
+            ["pr", "publish", "7"],
+            ["pr", "publish", "7", "--base-sha", "a", "--head-sha"],
+            ["pr", "publish", "7", "--base-sha", "a", "--head-sha", "b",
+             "--from-artifact-version", "many"],
+            ["pr", "publish", "7", "--base-sha", "a", "--head-sha", "b",
+             "--mode", "surprise"],
+            ["pr", "publish", "7", "--base-sha", "a", "--head-sha", "b",
+             "--harness", "surprise"],
+            ["pr", "publish", "7", "--base-sha", "a", "--head-sha", "b",
+             "--pr-url", "https://example.invalid/pull/7"],
+            ["pr", "publish", "7", "--base-sha", "a", "--head-sha", "b",
+             "--agent-type", "coding-agent"],
+            ["pr", "publish", "7", "--base-sha", "a", "--head-sha", "b",
+             "--model", "some-model"],
+            ["done"],
+            ["done", ""],
+            ["done", "--dry-run"],
+            ["done", "A useful headline", "-b"],
+            ["done", "A useful headline", "--bogus"],
+            ["notify", "A useful headline"],
+            ["done", "x" * 301],
+            ["frobnicate"],
+        ):
+            before = list(CALLS)
+            result = run_kit(invalid, home, server)
+            assert result.returncode == 2, (invalid, result.stdout, result.stderr)
+            output = result.stdout + result.stderr
+            assert "usage:" in output.lower(), (invalid, output)
+            assert "unavailable" not in output.lower(), (invalid, output)
+            assert CALLS == before, (invalid, CALLS[len(before):])
+        print("PASS  local usage errors are precise and never reported as outages")
+
+        offline = tempfile.mkdtemp()
+        offline_env = {
+            **os.environ,
+            "HOME": offline,
+            "ROOM_JSON": "",
+            "TEAM_ROOM_HEALTH_LOG": os.path.join(offline, "health.jsonl"),
+        }
+        for argv, expected_code in (
+            ([], 0),
+            (["read", "--help"], 0),
+            (["done", "--help"], 0),
+            (["read", "many"], 2),
+            (["frobnicate"], 2),
+        ):
+            result = subprocess.run(
+                [sys.executable, KIT, *argv],
+                env=offline_env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            assert result.returncode == expected_code, (argv, result.stderr)
+            output = result.stdout + result.stderr
+            if argv:
+                assert "usage:" in output.lower(), (argv, output)
+            else:
+                assert "room-post" in output.lower(), (argv, output)
+            assert "unavailable" not in output.lower(), (argv, output)
+        assert not os.path.exists(offline_env["TEAM_ROOM_HEALTH_LOG"])
+        print("PASS  local help and usage validation work before Room configuration")
+
+        discover = subprocess.run(
+            [sys.executable, KIT, "discover"],
+            env=offline_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert discover.returncode == 3, discover.stdout + discover.stderr
+        assert "sign in first" in discover.stderr.lower(), discover.stderr
+        assert "unavailable" not in (discover.stdout + discover.stderr).lower()
+        print("PASS  explicit discovery gives an actionable authentication result")
+
+        refused_env = {
+            **offline_env,
+            "TEAM_ROOM_TOKEN": "token",
+            "ROOM_SERVER": "http://127.0.0.1:1",
+        }
+        discover = subprocess.run(
+            [sys.executable, KIT, "discover"],
+            env=refused_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert discover.returncode == 3, discover.stdout + discover.stderr
+        output = discover.stdout + discover.stderr
+        assert "room discovery unavailable" in output.lower(), output
+        assert "no team room found" not in output.lower(), output
+        print("PASS  failed discovery is never mislabeled as no room membership")
+
+        broken_config = os.path.join(offline, "broken-room.json")
+        with open(broken_config, "w") as handle:
+            handle.write("{not-json")
+        broken_env = {**offline_env, "ROOM_JSON": broken_config}
+        result = subprocess.run(
+            [sys.executable, KIT, "--help"],
+            env=broken_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "room-post" in result.stdout and result.stderr == "", (
+            result.stdout,
+            result.stderr,
+        )
+        print("PASS  top-level help ignores broken Room configuration")
+
+        replacement_config = os.path.join(offline, "replacement-room.json")
+        with open(replacement_config, "w") as handle:
+            json.dump({
+                "thread_id": "thread",
+                "team_id": "team",
+                "server": "https://example.invalid",
+                "portal": "https://example.invalid",
+                "app_slug": "room",
+                "publishable_key": "pk",
+            }, handle)
+        result = subprocess.run(
+            [sys.executable, KIT, "init", "--config", replacement_config],
+            env=broken_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "room identity saved" in result.stdout, result.stdout + result.stderr
+        print("PASS  init can repair a broken existing Room configuration")
+
+        result = subprocess.run(
+            [sys.executable, KIT, "done", "Local preview", "--dry-run"],
+            env=offline_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "Local preview" in result.stdout, result.stdout + result.stderr
+        assert "unavailable" not in (result.stdout + result.stderr).lower()
+        assert not os.path.exists(offline_env["TEAM_ROOM_HEALTH_LOG"])
+        print("PASS  dry-run is a fully local preview")
+
+        before = list(CALLS)
+        result = run_kit(
+            ["done", "Real post headline", "-b", "--dry-run"],
+            home,
+            server,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "posted" in result.stdout, result.stdout + result.stderr
+        assert any(
+            method == "POST" and path.endswith("/messages")
+            for method, path in CALLS[len(before):]
+        ), CALLS[len(before):]
+        print("PASS  dry-run text used as data cannot suppress a real post")
+
+        missing_attachment = os.path.join(offline, "does-not-exist.png")
+        result = subprocess.run(
+            [sys.executable, KIT, "done", "A useful headline", "-a", missing_attachment],
+            env=offline_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 2, result.stdout + result.stderr
+        output = result.stdout + result.stderr
+        assert "can't read attachment" in output.lower(), output
+        assert "unavailable" not in output.lower(), output
+        assert not os.path.exists(offline_env["TEAM_ROOM_HEALTH_LOG"])
+        print("PASS  local attachment errors do not become Room failures")
+
         calls_before_review = list(CALLS)
         review_result = run_kit(
             ["pr", "review", "artifact", "--version", "1", "--head-sha", "a" * 40],
             home,
             server,
         )
-        # Room commands are deliberately non-blocking even when invalid. The
-        # observable removal contract is rejection before any API request.
-        assert review_result.returncode == 0
-        assert "unknown type 'pr'" in review_result.stderr, review_result.stderr
+        # Removed subcommands are local usage errors, not Room failures. They
+        # are rejected before configuration or any API request.
+        assert review_result.returncode == 2
+        assert "usage: room-post pr publish" in review_result.stderr, review_result.stderr
+        assert "unavailable" not in review_result.stderr.lower()
         assert CALLS == calls_before_review, CALLS
         print("PASS  deferred PR review command is unavailable")
+
+        before = list(CALLS)
+        missing_record = run_kit(["records", "show", "missing-record"], home, server)
+        assert missing_record.returncode == 0, (
+            missing_record.stdout,
+            missing_record.stderr,
+        )
+        output = missing_record.stdout + missing_record.stderr
+        assert "no record 'missing-record'" in output, output
+        assert "unavailable" not in output.lower(), output
+        assert not any(
+            method == "POST" for method, _path in CALLS[len(before):]
+        ), CALLS[len(before):]
+        print("PASS  a missing record is not mislabeled as a Room outage")
 
         r = run_kit(["done", "contract post", "-r", "#1"], home, server)
         assert "posted" in r.stdout and "done" in r.stdout, r.stdout + r.stderr
@@ -158,6 +388,18 @@ def main():
         r = run_kit(["search", "anything"], home, server)
         assert "lesson" in r.stdout, r.stdout + r.stderr
         print("PASS  search renders hits")
+
+        r = run_kit(["search", "help"], home, server)
+        assert "lesson" in r.stdout and "usage:" not in r.stdout.lower(), r.stdout
+        r = run_kit(["done", "help", "-r", "#2"], home, server)
+        assert "posted" in r.stdout, r.stdout + r.stderr
+        r = run_kit(
+            ["done", "Help text is valid post data", "-b", "--help", "-r", "#3"],
+            home,
+            server,
+        )
+        assert "posted" in r.stdout, r.stdout + r.stderr
+        print("PASS  bare help remains valid command data")
 
         r = run_kit(["read", "1"], home, server)
         assert "--- m0" in r.stdout, r.stdout + r.stderr
