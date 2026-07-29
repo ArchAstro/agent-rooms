@@ -20,6 +20,36 @@ This yields two simultaneous requirements:
 
 Silencing useful capture is not an acceptable way to make the kit quiet.
 
+## Visible Magic
+
+Non-disruptive does not mean invisible. The machinery should disappear; the
+value should be unmistakable.
+
+An engineer should experience the Room as a team superpower:
+
+- the exact lesson, decision, or failed approach they needed appears before
+  they repeat the team's mistake;
+- overlapping work or ownership becomes visible while coordination is still
+  cheap;
+- a PR arrives with its prompt, trajectory, change evidence, provenance, and
+  useful review context already assembled;
+- asking the Room produces a concise, attributable synthesis of what the
+  organization knows and what it can do next;
+- validated review and routine results appear inside the existing coding flow,
+  with the evidence available for a human to inspect;
+- corrections and feedback improve what the Room remembers and how future
+  agents act;
+- teammates receive credit when their earlier work saves someone time.
+
+These moments should be concise, timely, attributable, and actionable. They
+earn attention because they remove work, prevent a mistake, unlock a decision,
+or make the team feel smarter together. The kit must not hide them in the name
+of quietness.
+
+The product boundary is therefore **visible magic, invisible machinery**:
+organizational intelligence should appear in the coding flow, while collection,
+transport, retries, diagnostics, and maintenance stay out of it.
+
 ## Governing Attention Contract
 
 Normal coding-session behavior has two audiences:
@@ -193,4 +223,3 @@ This change modifies the local kit, its installer/instructions, behavioral
 evals, and Firstlanding’s vendored integration. It does not change room server
 APIs, authorization policy, artifact storage, evidence payload content,
 sanitization, transcript validation strictness, or resident review routines.
-
