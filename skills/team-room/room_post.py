@@ -9,6 +9,8 @@ by `room-post login`); nothing is ever committed to a repo.
 Post:
   room-post <type> "<headline>" [-b "<bullet>"]... [-r "<ref>"]... [-a <file>]...
     type   start | done | lesson | handoff | question | abandoned
+           notify | approve | accept
+           notify and approve require @name on the first line
     -b     one fact per bullet (repeatable); 3+ facts belong in bullets
     -r     PR/issue number (#123 -> link), a URL, or a repo path
     -a     attach a file (repeatable); an image renders inline. Max 10, 5MB each
@@ -156,12 +158,39 @@ def health_event(component: str, reason: str):
         pass
 
 
+_PR_VALUE_FLAGS = {
+    "--session", "--harness", "--mode", "--base-ref", "--base-sha",
+    "--head-sha", "--replace-head-from", "--from-artifact-version",
+    "--handoff",
+}
+
+
+def _automatic_pr_inputs(argv: list[str]) -> tuple[bool, list[str]]:
+    """Classify PR input flags by position, not by raw token membership."""
+    pending = list(argv)
+    if pending and not pending[0].startswith("-"):
+        pending.pop(0)
+    automatic = False
+    handoffs = []
+    while pending:
+        flag = pending.pop(0)
+        if flag == "--envelope-stdin":
+            automatic = True
+            continue
+        if flag in _PR_VALUE_FLAGS:
+            value = pending.pop(0) if pending else None
+            if flag == "--handoff":
+                automatic = True
+                if value is not None:
+                    handoffs.append(value)
+            continue
+    return automatic, handoffs
+
+
 def _consume_early_evidence_files():
     """Remove owned private PR inputs when initialization stops before the
     evidence module can consume them. Best-effort and intentionally narrow."""
-    try:
-        idx = sys.argv.index("--handoff")
-        handoff_path = sys.argv[idx + 1]
+    def consume(handoff_path):
         before = os.lstat(handoff_path)
         if (
             not stat.S_ISREG(before.st_mode)
@@ -189,8 +218,15 @@ def _consume_early_evidence_files():
                 and stat.S_IMODE(capture.st_mode) == 0o600
             ):
                 os.unlink(capture_path)
-    except Exception:
-        pass
+
+    # Invalid automatic invocations can contain duplicate or conflicting
+    # inputs. Walk every handoff occurrence so no private capture is stranded.
+    _automatic, handoff_paths = _automatic_pr_inputs(sys.argv[3:])
+    for handoff_path in handoff_paths:
+        try:
+            consume(handoff_path)
+        except Exception:
+            pass
 
 
 def _room_config_path() -> str | None:
@@ -283,6 +319,259 @@ DEFAULT_PORTAL = "https://archagents.com"
 DEFAULT_APP_SLUG = "agentnetwork"
 DEFAULT_PUBLISHABLE_KEY = "pk_dap_032Tk6YGrHp2cnyxwABnMS_Q6M9BsvOr8HKuIkLZNRWVTCTnApNHiRY"
 
+_COMMAND_USAGE = {
+    "top": (
+        "usage: room-post <read|search|brief|records|inbox|doctor|pr|"
+        "start|done|lesson|handoff|question|abandoned|notify|approve|accept> ..."
+    ),
+    "init": "usage: room-post init --config <room.json>",
+    "discover": "usage: room-post discover [--team <team-id>]",
+    "login": "usage: room-post login [mirror]",
+    "read": "usage: room-post read [1-100]",
+    "search": 'usage: room-post search "<question>"',
+    "brief": "usage: room-post brief",
+    "records": (
+        "usage: room-post records [--status S] [--kind K] | "
+        "records show <id> | records approve|reject|retire|redraft <id>... | "
+        "records supersede <old-id> <new-id>"
+    ),
+    "inbox": "usage: room-post inbox",
+    "doctor": "usage: room-post doctor",
+    "pr publish": (
+        "usage: room-post pr publish <PR> --base-sha <sha> --head-sha <sha> "
+        "[--base-ref main] [--session ID] [--harness NAME] | "
+        "room-post pr publish --handoff <mode-0600-json>"
+    ),
+    "post": (
+        'usage: room-post <start|done|lesson|handoff|question|abandoned|'
+        'notify|approve|accept> '
+        '"<headline>" [-b "<fact>"]... [-r "<ref>"]...'
+    ),
+}
+_POST_COMMANDS = {
+    "start", "done", "lesson", "handoff", "question", "abandoned",
+    "notify", "approve", "accept",
+}
+_HELP_FLAGS = {"--help", "-h", "help"}
+_NESTED_HELP_FLAGS = {"--help", "-h"}
+_CLI_MAX_HEADLINE = 300
+_CLI_MAX_UPLOADS = 10
+_CLI_MAX_UPLOAD_BYTES = 5_000_000
+
+
+def _local_has_addressee(headline: str) -> bool:
+    """Cheap first-line check used before the configured runtime loads."""
+    import re
+
+    return re.search(r"@([A-Za-z][\w.-]{0,30})", headline.split("\n")[0]) is not None
+
+
+def _post_uses_dry_run(argv: list[str]) -> bool:
+    """True only when --dry-run occupies a switch position, not data."""
+    pending = list(argv[2:])
+    value_flags = {"-b", "-r", "-a", "--attach", "--answers"}
+    while pending:
+        value = pending.pop(0)
+        if value == "--dry-run":
+            return True
+        if value in value_flags and pending:
+            pending.pop(0)
+    return False
+
+
+def _local_cli_preflight(argv: list[str]):
+    """Handle local help and shape errors before config, auth, or network.
+
+    A malformed local invocation is not a Room outage. Keeping this boundary
+    ahead of eager configuration also makes every help path offline.
+    """
+    if not argv:
+        print((__doc__ or "").strip())
+        raise SystemExit(0)
+    if argv[0] in _HELP_FLAGS:
+        print((__doc__ or "").strip())
+        raise SystemExit(0)
+    cmd, rest = argv[0], argv[1:]
+    help_key = None
+    if (
+        cmd == "pr"
+        and len(rest) == 2
+        and rest[0] == "publish"
+        and rest[1] in _NESTED_HELP_FLAGS
+    ):
+        help_key = "pr publish"
+    elif (
+        cmd == "records"
+        and len(rest) == 2
+        and rest[0] in {"show", "approve", "reject", "retire", "redraft", "supersede"}
+        and rest[1] in _NESTED_HELP_FLAGS
+    ):
+        help_key = "records"
+    elif len(rest) == 1 and rest[0] in _NESTED_HELP_FLAGS:
+        help_key = "post" if cmd in _POST_COMMANDS else cmd
+    if help_key in _COMMAND_USAGE:
+        print(_COMMAND_USAGE[help_key])
+        raise SystemExit(0)
+
+    invalid = False
+    usage_key = cmd
+    local_error = None
+    if cmd == "init":
+        invalid = len(rest) != 2 or rest[0] != "--config" or not rest[1]
+    elif cmd == "discover":
+        invalid = bool(rest) and (
+            len(rest) != 2 or rest[0] != "--team" or not rest[1]
+        )
+    elif cmd == "login":
+        invalid = len(rest) > 1 or bool(rest and rest[0].startswith("-"))
+    elif cmd == "read":
+        if len(rest) > 1:
+            invalid = True
+        elif rest:
+            try:
+                invalid = not 1 <= int(rest[0]) <= 100
+            except ValueError:
+                invalid = True
+    elif cmd == "search":
+        invalid = len(rest) != 1 or not rest[0].strip()
+    elif cmd in {"brief", "inbox", "doctor"}:
+        invalid = bool(rest)
+    elif cmd == "records":
+        if rest and rest[0] == "show":
+            invalid = len(rest) != 2
+        elif rest and rest[0] == "supersede":
+            invalid = len(rest) != 3
+        elif rest and rest[0] in {"approve", "reject", "retire", "redraft"}:
+            invalid = len(rest) < 2
+        else:
+            pending = list(rest)
+            while pending and not invalid:
+                flag = pending.pop(0)
+                if flag not in {"--status", "--kind"} or not pending:
+                    invalid = True
+                else:
+                    pending.pop(0)
+    elif cmd == "pr":
+        usage_key = "pr publish"
+        invalid = not rest or rest[0] != "publish"
+        if not invalid:
+            pending = list(rest[1:])
+            positional = bool(pending and not pending[0].startswith("-"))
+            if positional:
+                pending.pop(0)
+            value_flags = _PR_VALUE_FLAGS
+            provided = set()
+            values = {}
+            while pending and not invalid:
+                value = pending.pop(0)
+                if value == "--envelope-stdin":
+                    if value in provided:
+                        invalid = True
+                        continue
+                    provided.add(value)
+                    continue
+                if value in value_flags:
+                    if value in provided or not pending:
+                        invalid = True
+                    else:
+                        provided.add(value)
+                        values[value] = pending.pop(0)
+                    continue
+                invalid = True
+            automatic = "--handoff" in provided or "--envelope-stdin" in provided
+            if not invalid and automatic:
+                invalid = (
+                    {"--handoff", "--envelope-stdin"} <= provided
+                    or positional
+                )
+            if not invalid and not automatic:
+                invalid = not positional or not {
+                    "--base-sha", "--head-sha"
+                } <= provided
+            if not invalid and "--from-artifact-version" in values:
+                try:
+                    invalid = int(values["--from-artifact-version"]) < 1
+                except ValueError:
+                    invalid = True
+            if not invalid and values.get("--mode") not in {
+                None, "review-capsule", "metadata-only", "local-review",
+            }:
+                invalid = True
+            if not invalid and values.get("--harness") not in {
+                None, "astrodev", "issue-fixer", "codex", "claude", "generic",
+            }:
+                invalid = True
+    elif cmd in _POST_COMMANDS:
+        usage_key = "post"
+        invalid = (
+            not rest
+            or not rest[0].strip()
+            or rest[0].startswith("-")
+        )
+        if (
+            not invalid
+            and cmd in {"notify", "approve"}
+            and not _local_has_addressee(rest[0])
+        ):
+            invalid = True
+        if not invalid and len(rest[0]) > _CLI_MAX_HEADLINE:
+            invalid = "-b" not in rest
+        pending = list(rest[1:]) if rest else []
+        value_flags = {"-b", "-r", "-a", "--attach", "--answers"}
+        switch_flags = {"--no-meta", "--dry-run"}
+        attachments = []
+        while pending and not invalid:
+            value = pending.pop(0)
+            if value in switch_flags:
+                continue
+            if value in value_flags:
+                if not pending:
+                    invalid = True
+                else:
+                    supplied = pending.pop(0)
+                    if value in {"-a", "--attach"}:
+                        attachments.append(supplied)
+            else:
+                invalid = True
+        if not invalid and len(attachments) > _CLI_MAX_UPLOADS:
+            local_error = (
+                f"too many attachments ({len(attachments)}); "
+                f"max is {_CLI_MAX_UPLOADS} per post"
+            )
+        for path in attachments if local_error is None else ():
+            try:
+                size = os.path.getsize(path)
+                with open(path, "rb") as handle:
+                    handle.read(1)
+                if size > _CLI_MAX_UPLOAD_BYTES:
+                    local_error = (
+                        f"attachment '{path}' is {size // 1000}kB; max is "
+                        f"{_CLI_MAX_UPLOAD_BYTES // 1_000_000}MB per file"
+                    )
+                    break
+            except OSError as exc:
+                local_error = f"can't read attachment '{path}': {exc}"
+                break
+    else:
+        usage_key = "top"
+        invalid = True
+
+    if local_error is not None:
+        print(f"room_post: {local_error}", file=sys.stderr)
+        raise SystemExit(2)
+    if invalid and usage_key in _COMMAND_USAGE:
+        if cmd == "pr" and (
+            _automatic_pr_inputs(rest[1:] if rest[:1] == ["publish"] else rest)[0]
+        ):
+            _consume_early_evidence_files()
+            raise SystemExit(0)
+        print(_COMMAND_USAGE[usage_key], file=sys.stderr)
+        raise SystemExit(2)
+
+
+if __name__ == "__main__":
+    _local_cli_preflight(sys.argv[1:])
+
 # These commands must run WITHOUT a room configured: init writes config,
 # login/discover create it from your identity, help needs nothing. They
 # load config if it happens to exist (e.g. `login <mirror>` needs the
@@ -291,12 +580,22 @@ DEFAULT_PUBLISHABLE_KEY = "pk_dap_032Tk6YGrHp2cnyxwABnMS_Q6M9BsvOr8HKuIkLZNRWVTC
 _SOFT_CONFIG_CMDS = {"init", "login", "discover", "--help", "-h", "help"}
 _soft = len(sys.argv) > 1 and sys.argv[1] in _SOFT_CONFIG_CMDS
 _AMBIENT_PR_PUBLISH = sys.argv[1:3] == ["pr", "publish"]
+_AUTOMATIC_PR_PUBLISH = (
+    _AMBIENT_PR_PUBLISH
+    and _automatic_pr_inputs(sys.argv[3:])[0]
+)
+_LOCAL_INIT = sys.argv[1:2] == ["init"]
+_LOCAL_DRY_RUN = (
+    len(sys.argv) > 2
+    and sys.argv[1] in _POST_COMMANDS
+    and _post_uses_dry_run(sys.argv[1:])
+)
 
 # Commands that must NEVER interrupt a developer's session, referenced both
 # here (missing config would otherwise exit non-zero during module load,
 # long before the exit-code wrapper at the bottom can catch it) and by that
 # wrapper.
-_NEVER_BLOCK = {"search", "brief", "read", "records", "inbox", "discover",
+_NEVER_BLOCK = {"search", "brief", "read", "records", "inbox",
                 "start", "done", "lesson", "handoff", "question", "abandoned",
                 "notify", "approve", "accept", "pr"}
 _AMBIENT_CONFIG = (
@@ -306,18 +605,24 @@ _AMBIENT_CONFIG = (
 )
 
 try:
-    if _AMBIENT_CONFIG:
+    if _LOCAL_INIT or _LOCAL_DRY_RUN:
+        _ROOM_CFG = {}
+    elif _AMBIENT_CONFIG:
         with contextlib.redirect_stderr(io.StringIO()):
             _ROOM_CFG = _room_config()
     else:
         _ROOM_CFG = {} if (_soft and _room_config_path() is None) else _room_config()
 except SystemExit:
-    if _AMBIENT_PR_PUBLISH:
+    if _AUTOMATIC_PR_PUBLISH:
         # The handoff contains ephemeral PR identity and must disappear even
         # when publication cannot start. This small local cleanup happens
         # before any Room configuration or network dependency is required.
         _consume_early_evidence_files()
         health_event("pr-evidence", "room configuration unavailable")
+        sys.exit(0)
+    if _AMBIENT_PR_PUBLISH:
+        health_event("pr-evidence", "room configuration unavailable")
+        print("pr evidence withheld", file=sys.stderr)
         sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] in _NEVER_BLOCK:
         _is_write = sys.argv[1] not in {"search", "brief", "read", "records",
@@ -385,7 +690,7 @@ ROOM_APP_NAME = "ArchAgents"
 UPSTREAM_SOURCE_URL = (
     "https://raw.githubusercontent.com/ArchAstro/agent-rooms/main"
     "/skills/team-room/room_post.py")
-MAX_HEADLINE = 300
+MAX_HEADLINE = _CLI_MAX_HEADLINE
 EXPIRY_SKEW_SECONDS = 60
 
 PREFIXES = {
@@ -527,8 +832,8 @@ def parse_args(argv):
 
 
 # The developer message endpoint accepts up to 10 uploads, 5 MB each.
-MAX_UPLOADS = 10
-MAX_UPLOAD_BYTES = 5_000_000
+MAX_UPLOADS = _CLI_MAX_UPLOADS
+MAX_UPLOAD_BYTES = _CLI_MAX_UPLOAD_BYTES
 
 
 def build_uploads(paths: list) -> list:
@@ -1834,19 +2139,19 @@ def discover_rooms(server: str, token: str, pub_key: str) -> list:
         with urllib.request.urlopen(req, timeout=8) as r:
             return json.load(r)
 
-    rooms = []
     try:
         teams = get("/api/v1/teams?page_size=50").get("data") or []
-    except Exception:
-        return rooms
+    except Exception as exc:
+        raise RuntimeError("room discovery unavailable") from exc
+    rooms = []
     for t in teams:
         tid = t.get("id")
         if not tid:
             continue
         try:
             threads = get(f"/api/v1/teams/{tid}/threads").get("data") or []
-        except Exception:
-            continue
+        except Exception as exc:
+            raise RuntimeError("room discovery unavailable") from exc
         for th in threads:
             if (th.get("title") or "").lower() == "team room" and th.get("id"):
                 rooms.append((t.get("name") or tid, tid, th["id"]))
@@ -1956,7 +2261,8 @@ def records_show(record_id: str):
         raise RuntimeError("records unavailable")
     rows = [f for f in fetched if f.get("record_id") == record_id]
     if not rows:
-        die(f"no record '{record_id}'")
+        print(f"no record '{record_id}'")
+        return
     f = rows[0]
     for k in ("record_id", "shape", "kind", "status", "title", "body",
               "evidence", "ring", "impact_tier", "impact", "lifespan",
@@ -1971,7 +2277,8 @@ def _record_by_key(session, record_id):
     q = f"?schema_key={RECORD_SCHEMA}&row_key={urllib.parse.quote(record_id, safe='')}"
     existing = http_get(objects_url(session, q), token).get("data") or []
     if not existing:
-        die(f"no record '{record_id}'")
+        print(f"no record '{record_id}'")
+        return None
     return existing[0]
 
 
@@ -1999,6 +2306,8 @@ def records_set_status(record_id: str, new_status: str):
         die("status must be approved|draft|retired|rejected")
     _, _, _, session = authed_session()
     row = _record_by_key(session, record_id)
+    if row is None:
+        return
     patch = {"status": new_status}
     if new_status in ("approved", "rejected"):
         patch["approver"] = human_name()  # retire/redraft keep the original approver
@@ -2011,7 +2320,11 @@ def records_supersede(old_id: str, new_id: str):
     preserved), lineage recorded on both rows."""
     _, _, _, session = authed_session()
     old = _record_by_key(session, old_id)
+    if old is None:
+        return
     new = _record_by_key(session, new_id)
+    if new is None:
+        return
     _patch_record(session, old["id"], {"status": "superseded", "superseded_by": new_id})
     _patch_record(session, new["id"], {"supersedes": old_id})
     print(f"{old_id} -> superseded by {new_id}")
@@ -2689,7 +3002,7 @@ def _pr_publish_args(argv):
 
 def publish_pr(argv):
     """Publish local-only evidence; any room failure is deliberately non-blocking."""
-    automatic = "--handoff" in argv or "--envelope-stdin" in argv
+    automatic = _automatic_pr_inputs(argv)[0]
     try:
         os.environ["GIT_NO_LAZY_FETCH"] = "1"
         from dataclasses import replace
@@ -2844,7 +3157,10 @@ def main():
         tok = _bootstrap_token()
         if not tok:
             die("sign in first: room-post login", 3)
-        discover_and_configure(tok, chosen_team=team)
+        try:
+            discover_and_configure(tok, chosen_team=team)
+        except Exception:
+            die("room discovery unavailable", 3)
         return
     if cmd in ("--help", "-h", "help", ""):
         print((__doc__ or "").strip())
@@ -2942,6 +3258,14 @@ def main():
             metadata = build_metadata(post_type, refs, addressee, answers)
         except Exception:
             metadata = None  # exhaust enrichment must never block a post
+    if dry:
+        print(message)
+        if uploads:
+            print("attachments: " + ", ".join(
+                f"{u['name']} ({u['mime_type']})" for u in uploads))
+        if metadata:
+            print("metadata: " + json.dumps(metadata, indent=2))
+        return
     # Exhaust quality: lint every post, stamp the verdict, say it once.
     # Never blocks — but the room can now TALLY its own signal quality, and
     # a harness that keeps posting junk becomes visible instead of vague.
@@ -2953,14 +3277,6 @@ def main():
             health_event("post-quality", _warns[0])
     except Exception:
         pass
-    if dry:
-        print(message)
-        if uploads:
-            print("attachments: " + ", ".join(
-                f"{u['name']} ({u['mime_type']})" for u in uploads))
-        if metadata:
-            print("metadata: " + json.dumps(metadata, indent=2))
-        return
     session = post(message, metadata, uploads)
     _advance_room_marker()  # next exhaust window starts where this one ended
     mention_peek()
