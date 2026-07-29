@@ -1,0 +1,11 @@
+{"type":"session_meta","payload":{"id":"0198c0de-1234-7abc-8def-0123456789ab","cli_version":"0.81.0"}}
+{"type":"turn_context","payload":{"model":"gpt-5.6-codex","effort":"high"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Capture real-shape evidence."}]}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Visible assistant answer."}]}}
+{"type":"response_item","payload":{"type":"function_call","call_id":"call-1","name":"exec_command","arguments":"python3 tests/test_pr_evidence_bundle.py"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"PASS bundle\nexit code: 0"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-2","name":"apply_patch","input":"*** Begin Patch"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-2","output":"Done!"}}
+{"type":"response_item","payload":{"type":"tool_search_call","call_id":"call-3","arguments":"find adapter"}}
+{"type":"response_item","payload":{"type":"tool_search_output","call_id":"call-3","output":"adapter skill"}}
+{"type":"response_item","payload":{"type":"web_search_call","call_id":"call-4","query":"stdlib docs"}}

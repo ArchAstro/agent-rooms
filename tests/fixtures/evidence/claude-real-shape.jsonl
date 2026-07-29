@@ -1,0 +1,4 @@
+{"type":"user","sessionId":"8f1d8c7e-1234-4abc-8def-0123456789ab","isMeta":true,"message":{"content":"meta prompt must not be published"}}
+{"type":"user","sessionId":"8f1d8c7e-1234-4abc-8def-0123456789ab","message":{"content":[{"type":"text","text":"Inspect the real Claude blocks."}]}}
+{"type":"assistant","sessionId":"8f1d8c7e-1234-4abc-8def-0123456789ab","message":{"content":[{"type":"thinking","thinking":"hidden reasoning must not be published"},{"type":"text","text":"Visible Claude answer."},{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"python3 tests/test_pr_evidence_adapters.py"}}]}}
+{"type":"user","sessionId":"8f1d8c7e-1234-4abc-8def-0123456789ab","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"exit code: 1\nfailed assertion"}]}}

@@ -128,6 +128,52 @@ cleanly and says so. **Never retry it, never debug it, never pause your
 work for it.** Tell your human once and carry on — the room is additive, and
 a broken room must cost your session nothing.
 
+## PR evidence publication
+
+Immediately after a harness successfully creates or updates a PR, it must hand
+the already-known PR identity and local session context to the publisher. Write
+a temporary JSON file with exact mode `0600`, invoke the command through a
+bounded best-effort subprocess, and remove the file even when the command is
+missing, times out, or exits nonzero:
+
+```bash
+room-post pr publish --handoff <private-json-path>
+```
+
+The handoff contains `pr_url` or `pr`, `base_ref`, locally resolved full
+`base_sha`, local full `head_sha`, `session_id`, and `harness`. Add
+`agent_type` and `model` only when the creating harness actually knows them;
+omit unknown values rather than guessing. Codex and Claude use their native
+harness names and stable session identities. AstroDev and the issue fixer use
+their `astrodev` and `issue-fixer` native adapters. Automatic AstroDev
+publication sends only a length-prefixed, maximum-16-KiB metadata header through
+the child process's private stdin pipe; no prompt or trajectory appears in argv
+or environment, and no temporary evidence file is created. The child validates
+the persistent session as an owned, non-symlink regular file with matching
+session/cwd and stable identity, then reads a fixed-size head/tail snapshot. The
+existing exact-mode-`0600` file handoff remains available for manual/customer
+harnesses.
+
+These normalized captures declare `partial` fidelity. AstroDev's snapshot
+includes the first user prompt and recent visible trajectory. The issue fixer
+always keeps both explicit prompts and drains each child stream while retaining
+at most 256 events or 256 KiB of JSON trajectory per round. Its operational
+last-message read is capped at 64 KiB and receives an explicit truncation
+marker. Both adapters add omission markers when bounds drop content. AstroDev
+omits the active model because a switched-model session cannot honestly
+attribute one final model to the whole capture. Neither first-party path uses
+`ROOM_EVIDENCE_PRODUCER`. Gemini and other producers use `generic` only with
+their configured producer protocol.
+The base and head must be explicit commits present in the local checkout; all
+evidence Git reads disable promisor lazy fetching. A PR number supplies identity
+only and never triggers GitHub lookup. Publication failure is exhaust for an
+already-successful PR and must never change the creator's result.
+The built-in default uploads the complete review capsule. Explicit local
+`--mode metadata-only` and `--mode local-review` capture modes only remove
+material from that upload; `local-review` never uploads prompts, trajectory,
+or patch. These are publisher-local capture choices, not room configuration or
+approval policy.
+
 Not connected yet? Run `room-post login` once — one browser click,
 it finds your team's room by itself. You drive that; never ask a teammate to
 go run something.

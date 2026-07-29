@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agent-room-pr-evidence/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "subject", "current", "chapters", "patch", "tests", "provenance", "redactions", "omissions", "rendered_markdown"],
+  "properties": {
+    "schema": {"const": "agent-room-pr-evidence/v1"},
+    "subject": {"$ref": "#/$defs/subject"},
+    "current": {"$ref": "#/$defs/current"},
+    "chapters": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/chapter"}},
+    "patch": {"$ref": "#/$defs/patch"},
+    "tests": {"type": "array", "items": {"$ref": "#/$defs/test"}},
+    "provenance": {"type": "object", "additionalProperties": {"$ref": "#/$defs/provenance"}},
+    "redactions": {"type": "array", "items": {"$ref": "#/$defs/redaction"}},
+    "omissions": {"type": "array", "items": {"$ref": "#/$defs/omission"}},
+    "rendered_markdown": {"type": "string"}
+  },
+  "$defs": {
+    "subject": {"type": "object", "additionalProperties": false, "required": ["key", "repository", "pr_number", "base_ref", "base_sha", "merge_base_sha", "head_sha"], "properties": {"key": {"type": "string", "minLength": 3}, "repository": {"type": "string", "minLength": 1}, "pr_number": {"type": "integer", "minimum": 1}, "pr_url": {"type": ["string", "null"]}, "base_ref": {"type": "string"}, "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"}, "merge_base_sha": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"}, "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"}}},
+    "current": {"type": "object", "additionalProperties": false, "required": ["complete", "capture_mode", "capture_fidelity", "generated_at"], "properties": {"complete": {"type": "boolean"}, "capture_mode": {"enum": ["review_capsule", "metadata_only", "local_review"]}, "capture_fidelity": {"enum": ["exact", "partial", "self_reported"]}, "generated_at": {"type": "string"}}},
+    "chapter": {"type": "object", "required": ["session_id", "capture_fidelity", "prompts", "events", "execution_spans"], "properties": {"session_id": {"type": "string", "minLength": 8}, "capture_fidelity": {"enum": ["exact", "partial", "self_reported"]}, "prompts": {"type": "array", "items": {"type": "string"}}, "events": {"type": "array", "items": {"$ref": "#/$defs/event"}}, "execution_spans": {"type": "array", "items": {"$ref": "#/$defs/span"}}}},
+    "event": {"type": "object", "required": ["event_id", "sequence", "type", "summary", "data"], "properties": {"event_id": {"type": "string"}, "sequence": {"type": "integer", "minimum": 1}, "type": {"enum": ["human_prompt", "agent_message", "tool_action", "tool_result", "decision", "git", "test"]}, "summary": {"type": "string"}, "data": {"type": "object"}}},
+    "span": {"type": "object", "required": ["id", "harness", "model"], "properties": {"id": {"type": "string"}, "parent_id": {"type": ["string", "null"]}, "harness": {"$ref": "#/$defs/provenance"}, "model": {"$ref": "#/$defs/provenance"}}},
+    "patch": {"type": "object", "required": ["text", "stats"], "properties": {"text": {"type": "string"}, "stats": {"type": "object", "required": ["files", "added", "deleted"], "properties": {"files": {"type": "integer", "minimum": 0}, "added": {"type": "integer", "minimum": 0}, "deleted": {"type": "integer", "minimum": 0}}}}},
+    "test": {"type": "object", "required": ["command", "outcome"], "properties": {"command": {"type": "string"}, "outcome": {"enum": ["passed", "failed", "unknown", "attempted"]}}},
+    "provenance": {"type": "object", "required": ["value", "source"], "properties": {"value": {"type": ["string", "null"]}, "source": {"enum": ["observed", "harness_reported", "agent_reported", "unknown"]}}},
+    "redaction": {"type": "object", "additionalProperties": false, "required": ["category", "count"], "properties": {"category": {"type": "string", "minLength": 1}, "count": {"type": "integer", "minimum": 1}}},
+    "omission": {"type": "object", "additionalProperties": false, "required": ["category", "reason"], "properties": {"category": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}}}
+  }
+}

@@ -165,6 +165,39 @@ Four posts, four different verbs, none of them a commit notification, all
 posted mid-flight. Git events are one small verb in this stream; the rich
 chatter is diagnoses, dead ends, calls made, and things ruled out.
 
+### First-party PR evidence captures
+
+AstroDev publishes with `harness: "astrodev"` through a one-shot OS stdin pipe.
+The pipe carries a four-byte header length and at most 16 KiB of metadata,
+including the persistent session path and declared session/cwd; it carries no
+prompt or trajectory. The child opens that source without following symlinks,
+requires an owned regular file, verifies stable identity and matching
+session/cwd, and reads only a 256 KiB head plus 256 KiB tail. A successful
+snapshot includes the session record and first user prompt, then bounded recent
+visible trajectory. The parent can hard-kill the whole child at the shared
+900 ms deadline and creates no temporary evidence files or background
+filesystem work. AstroDev omits an ambiguous final active model rather than
+applying it to a switched-model session.
+
+The automated issue fixer publishes with `harness: "issue-fixer"` and a private
+normalized JSONL capture containing both explicit prompts. Its real Codex child
+stdout and stderr are concurrently drained; each round retains at most 256
+events or 256 KiB of JSON trajectory, diagnostics retain a 64 KiB tail, and
+the `--output-last-message` file is read through a 64 KiB cap with a visible
+truncation marker. `capture_omission` records count dropped bytes/events,
+including every byte in an oversized discarded line. This keeps capture
+failure from turning the primary Codex workflow into an OOM or pipe deadlock.
+
+Both adapters declare `partial` fidelity. Manual/customer capture files and
+handoffs remain owned regular files with exact mode `0600`, consumed before
+parsing. Automatic AstroDev uses the pipe path above. These first-party adapters
+never consult `ROOM_EVIDENCE_PRODUCER`, which remains the explicit protocol for
+`generic` integrations.
+
+Every Git command used to resolve or bundle PR evidence sets
+`GIT_NO_LAZY_FETCH=1`, so a promisor checkout cannot turn local publication
+into unplanned network access.
+
 Post a lesson the moment you learn it, while it's vivid; by session end it
 will be buried under a hundred tool calls. The tell: would it still be true
 and useful in a teammate's session, on a different branch, next month? If
@@ -331,6 +364,26 @@ and nothing on them flows back.
 
 ## Gotchas
 
+- `room-post pr publish` is local-Git evidence only: pass full local base and
+  head SHAs (or a mode-0600 handoff) and expect no GitHub request. The command
+  publishes one deterministic current artifact, retries one version conflict,
+  and prints `published`, `updated`, `unchanged`, `queued`, or `withheld`.
+- A PR-creating harness calls
+  `room-post pr publish --handoff <private-json-path>` immediately after a
+  successful create or update, through a bounded best-effort subprocess. The
+  exact-mode-0600 JSON carries the already-known `pr_url` or `pr`, `base_ref`,
+  locally resolved full `base_sha`, local full `head_sha`, stable `session_id`,
+  and producer `harness`; optional `agent_type` and `model` are included only
+  when known. The CLI consumes the file. The harness also removes it on every
+  exit path. Missing configuration, timeout, or nonzero exit never changes the
+  successful PR result and never triggers PR discovery.
+- Codex and Claude hand off their native harness and stable session identity.
+  Gemini and any other producer use `generic` only when its local producer
+  protocol is configured. Unknown agent/model metadata stays absent.
+- The built-in capture default is the complete review capsule.
+  `--mode metadata-only` omits patch text and `--mode local-review` omits
+  prompts, trajectory, and patch. These are explicit local capture choices,
+  not room configuration or approval policy.
 - The tool is one self-contained stdlib Python file. If `room-post` isn't
   on your PATH, run `python3 "<this skill dir>/room_post.py" ...` with the
   same arguments.
