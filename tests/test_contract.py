@@ -122,6 +122,25 @@ def main():
         home = tempfile.mkdtemp()
 
         # 1. a post lands and confirms with the verb echo
+        help_result = run_kit(["--help"], home, server)
+        assert "bounded evidence package" in help_result.stdout and "room-post pr publish" in help_result.stdout, help_result.stdout
+        assert "room-post pr review" not in help_result.stdout, help_result.stdout
+        assert "editable routine" not in help_result.stdout, help_result.stdout
+        print("PASS  help documents bounded PR evidence publication")
+
+        calls_before_review = list(CALLS)
+        review_result = run_kit(
+            ["pr", "review", "artifact", "--version", "1", "--head-sha", "a" * 40],
+            home,
+            server,
+        )
+        # Room commands are deliberately non-blocking even when invalid. The
+        # observable removal contract is rejection before any API request.
+        assert review_result.returncode == 0
+        assert "unknown type 'pr'" in review_result.stderr, review_result.stderr
+        assert CALLS == calls_before_review, CALLS
+        print("PASS  deferred PR review command is unavailable")
+
         r = run_kit(["done", "contract post", "-r", "#1"], home, server)
         assert "posted" in r.stdout and "done" in r.stdout, r.stdout + r.stderr
         assert r.returncode == 0

@@ -14,7 +14,7 @@ jobs:
         with: { node-version: "20" }
       - name: compile
         run: |
-          python3 -m py_compile skills/team-room/room_post.py
+          python3 -m py_compile $(find skills/team-room -name '*.py' -print)
           node --check bin/install.mjs
       - name: unit suites
         run: |

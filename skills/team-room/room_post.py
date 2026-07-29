@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """room-post — publish to and read your team's shared Agent Room.
 
-One self-contained, stdlib-only file. It talks directly to your team's
+One stdlib-only command plus bounded evidence package. It talks directly to your team's
 public API over HTTPS: no dependencies, no daemon, nothing to run in the
 background. Room identity and login live in ~/.config/team-room/ (written
 by `room-post login`); nothing is ever committed to a repo.
@@ -13,6 +13,14 @@ Post:
     -r     PR/issue number (#123 -> link), a URL, or a repo path
     -a     attach a file (repeatable); an image renders inline. Max 10, 5MB each
     --dry-run   print the assembled post instead of sending it
+
+PR evidence:
+  room-post pr publish <PR URL or number> --base-sha <full-local-sha>
+    --head-sha <full-local-sha> [--base-ref main] [--session ID]
+    [--harness codex|claude|generic] [--mode review-capsule|metadata-only|local-review]
+  Uses only explicit local Git commits (or a 0600 handoff), never GitHub.
+  Prints published, updated, unchanged, queued, or withheld; failure never
+  blocks the PR workflow.
 
 Read:
   room-post search "<question>"   THE read: semantic recall over all room
@@ -47,6 +55,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import shlex
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -246,7 +255,7 @@ _soft = len(sys.argv) > 1 and sys.argv[1] in _SOFT_CONFIG_CMDS
 # wrapper.
 _NEVER_BLOCK = {"search", "brief", "read", "records", "inbox", "discover",
                 "start", "done", "lesson", "handoff", "question", "abandoned",
-                "notify", "approve", "accept"}
+                "notify", "approve", "accept", "pr"}
 
 try:
     _ROOM_CFG = {} if (_soft and _room_config_path() is None) else _room_config()
@@ -257,6 +266,8 @@ except SystemExit:
         # exit invites the agent to treat the room as a task to fix.
         _is_write = sys.argv[1] not in {"search", "brief", "read", "records",
                                         "inbox", "discover"}
+        if sys.argv[1:3] == ["pr", "publish"]:
+            print("pr evidence withheld: room configuration unavailable", file=sys.stderr)
         print(("\nroom: your post did NOT land (not connected). "
                if _is_write else "\nroom: not connected. ")
               + "Continuing without the room — this is NOT a problem for you "
@@ -2596,6 +2607,150 @@ def doctor():
     sys.exit(0 if ok else 4)
 
 
+def _pr_publish_args(argv):
+    """Parse the small explicit handoff surface without accepting unknowns."""
+    if not argv:
+        raise ValueError("usage: room-post pr publish <url-or-number> --base-sha SHA --head-sha SHA")
+    result = {"pr": None, "session": None, "harness": None, "mode": None,
+              "agent_type": None, "model": None,
+              "base_ref": None, "base_sha": None, "head_sha": None,
+              "replace_head_from": None, "from_artifact_version": None,
+              "handoff": None, "envelope_stdin": False}
+    flags = {"--session": "session", "--harness": "harness", "--mode": "mode", "--base-ref": "base_ref",
+             "--base-sha": "base_sha", "--head-sha": "head_sha", "--replace-head-from": "replace_head_from",
+             "--from-artifact-version": "from_artifact_version", "--handoff": "handoff"}
+    rest = list(argv)
+    if rest and not rest[0].startswith("-"):
+        result["pr"] = rest.pop(0)
+    while rest:
+        flag = rest.pop(0)
+        if flag == "--envelope-stdin":
+            if result["envelope_stdin"]:
+                raise ValueError("--envelope-stdin may only be passed once")
+            result["envelope_stdin"] = True
+            continue
+        if flag not in flags or not rest: raise ValueError(f"invalid pr publish argument {flag!r}")
+        result[flags[flag]] = rest.pop(0)
+    if result["from_artifact_version"] is not None:
+        try: result["from_artifact_version"] = int(result["from_artifact_version"])
+        except ValueError: raise ValueError("--from-artifact-version must be an integer")
+    return result
+
+
+def publish_pr(argv):
+    """Publish local-only evidence; any room failure is deliberately non-blocking."""
+    try:
+        os.environ["GIT_NO_LAZY_FETCH"] = "1"
+        from dataclasses import replace
+        from pathlib import Path
+        from evidence.adapters.claude import ClaudeAdapter
+        from evidence.adapters.codex import CodexAdapter
+        from evidence.adapters.first_party import FirstPartyAdapter
+        from evidence.adapters.generic import GenericAdapter
+        from evidence.artifacts import deterministic_name
+        from evidence.bundle import build_bundle, git_evidence_from_repo
+        from evidence.git_pr import automatic_envelope, consume_private_file, handoff, is_ancestor, local_commits, parse_pr, repository_identity
+        from evidence.model import ExecutionSpan, ProvenanceValue, Subject
+        from evidence.policy import policy_for_mode
+        from evidence.publisher import ArtifactClient, Publisher, PublishRequest
+
+        args = _pr_publish_args(argv)
+        supplied = {}
+        automatic_capture = None
+        if args["envelope_stdin"]:
+            if args["handoff"] or args["pr"]:
+                raise ValueError("automatic envelope cannot be combined with other input")
+            supplied, automatic_capture = automatic_envelope(
+                sys.stdin.buffer, Path.cwd()
+            )
+        if args["handoff"]:
+            supplied = handoff(args["handoff"])
+        for source, target in (
+            ("pr", "pr"),
+            ("pr_url", "pr"),
+            ("base_ref", "base_ref"),
+            ("base_sha", "base_sha"),
+            ("head_sha", "head_sha"),
+            ("session_id", "session"),
+            ("harness", "harness"),
+            ("agent_type", "agent_type"),
+            ("model", "model"),
+        ):
+            if args.get(target) is None and isinstance(supplied.get(source), str):
+                args[target] = supplied[source]
+        args["base_ref"] = args["base_ref"] or "main"
+        if not all(isinstance(args[key], str) and args[key] for key in ("pr", "base_ref", "base_sha", "head_sha")):
+            raise ValueError("PR publication requires explicit PR identity, base ref, base SHA, and head SHA (or 0600 handoff)")
+        cwd = Path.cwd()
+        repository = repository_identity(cwd)
+        number, url = parse_pr(args["pr"], repository)
+        base, head, merge_base = local_commits(cwd, args["base_sha"], args["head_sha"])
+        adapter_name = args["harness"] or os.environ.get("ROOM_EVIDENCE_HARNESS", "")
+        session = args["session"]
+        if adapter_name in FirstPartyAdapter.SUPPORTED:
+            if automatic_capture is not None:
+                adapter = FirstPartyAdapter(adapter_name, automatic_capture)
+            else:
+                capture_path = supplied.get("capture_path")
+                if not isinstance(capture_path, str) or not capture_path:
+                    raise ValueError("first-party evidence needs a private capture path")
+                adapter = FirstPartyAdapter(
+                    adapter_name, consume_private_file(capture_path)
+                )
+        elif adapter_name == "generic":
+            command = os.environ.get("ROOM_EVIDENCE_PRODUCER", "")
+            if not command: raise ValueError("generic evidence needs ROOM_EVIDENCE_PRODUCER")
+            adapter = GenericAdapter(shlex.split(command))
+        elif adapter_name == "codex": adapter = CodexAdapter()
+        elif adapter_name == "claude": adapter = ClaudeAdapter()
+        else: raise ValueError(
+            "--harness must be astrodev, issue-fixer, codex, claude, or generic"
+        )
+        detection = adapter.detect(os.environ, cwd)
+        if detection is None: raise ValueError("exact evidence session unavailable; pass --session and a configured harness")
+        source = adapter.resolve_session(detection, session)
+        chapter, checkpoint = adapter.chapter(source)
+        if args["agent_type"] or args["model"]:
+            spans = chapter.execution_spans or (ExecutionSpan(source.session_id),)
+            chapter = replace(
+                chapter,
+                execution_spans=tuple(
+                    replace(
+                        span,
+                        agent_type=(
+                            ProvenanceValue(args["agent_type"], "harness_reported")
+                            if args["agent_type"]
+                            else span.agent_type
+                        ),
+                        model=(
+                            ProvenanceValue(args["model"], "harness_reported")
+                            if args["model"]
+                            else span.model
+                        ),
+                    )
+                    for span in spans
+                ),
+            )
+        subject = Subject(repository, number, url, args["base_ref"], base, merge_base, head)
+        with tempfile.TemporaryDirectory(prefix="pr-evidence-") as output:
+            bundle = build_bundle(subject, [chapter], git_evidence_from_repo(cwd, base, head), {"output_dir": output, "capture_mode": "review_capsule"})
+            content = json.loads(Path(bundle.path).read_text(encoding="utf-8"))
+        policy = policy_for_mode(args["mode"])
+        _creds, _key, _creds_path, authenticated = authed_session()
+        client = ArtifactClient(PRODUCTION_SERVER, authenticated["appId"], ROOM_TEAM_ID, THREAD_ID, authenticated["accessToken"], authenticated["userId"])
+        state_path = Path(os.environ.get("TEAM_ROOM_EVIDENCE_STATE", str(Path.home() / ".config/team-room/pr-evidence-state.json")))
+        # Head ordering compares the server's recorded predecessor to this
+        # declared local commit; neither branch name nor GitHub is consulted.
+        request = PublishRequest(subject.key, deterministic_name(repository, number), base, head, source.session_id, content,
+            args["replace_head_from"], args["from_artifact_version"], False)
+        publisher = Publisher(client, state_path, policy, ancestor=lambda old, new: is_ancestor(cwd, old, new))
+        result = publisher.publish(request)
+        print(f"pr evidence {result.status}" + (f" artifact={result.artifact_id} version={result.version}" if result.artifact_id else ""))
+    except Exception as exc:
+        # This command is exhaust for a successful PR creation, never a gate.
+        print(f"pr evidence withheld: {type(exc).__name__}: {str(exc)[:200]}", file=sys.stderr)
+
+
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd == "init":
@@ -2677,6 +2832,9 @@ def main():
         return
     if sys.argv[1:2] == ["doctor"]:
         doctor()
+        return
+    if sys.argv[1:3] == ["pr", "publish"]:
+        publish_pr(sys.argv[3:])
         return
     (
         post_type,

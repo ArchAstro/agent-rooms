@@ -4,8 +4,8 @@
 //   npx @archastro/agent-rooms --repo [path]    vendor the kit into a repo
 //   npx @archastro/agent-rooms --machine        install machine-wide
 //
-// The kit itself is one stdlib-only Python file (room_post.py) — this
-// installer only copies files and wires instruction files. It never phones
+// The kit is a stdlib-only Python command plus bounded evidence modules — this
+// installer only copies allowlisted files and wires instruction files. It never phones
 // home and never touches credentials.
 //
 // Room identity is NEVER committed or written by --repo: each member's
@@ -13,7 +13,7 @@
 // vendor is safe to commit anywhere (even a public repo) and there's no
 // room.json to drift or leak. (--machine writes identity to ~/.config only.)
 
-import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, symlinkSync, renameSync, lstatSync, realpathSync, unlinkSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, symlinkSync, renameSync, lstatSync, realpathSync, rmSync, unlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -28,6 +28,30 @@ const KIT_FILES = [
   "SKILL.md",
   "reference.md", // SKILL.md links to it; omitting it made that a dead link
   "team-record-schema.yaml",
+  // The evidence package is deliberately an explicit allowlist. Do not copy
+  // arbitrary files below skills/team-room into user installations.
+  "evidence/__init__.py",
+  "evidence/model.py",
+  "evidence/sanitize.py",
+  "evidence/checkpoint.py",
+  "evidence/bundle.py",
+  "evidence/git_pr.py",
+  "evidence/policy.py",
+  "evidence/artifacts.py",
+  "evidence/publisher.py",
+  "evidence/retry.py",
+  "evidence/adapters/__init__.py",
+  "evidence/adapters/base.py",
+  "evidence/adapters/codex.py",
+  "evidence/adapters/claude.py",
+  "evidence/adapters/first_party.py",
+  "evidence/adapters/generic.py",
+  "evidence/schema/pr-evidence-v1.json",
+  "evidence/schema/__init__.py",
+];
+const DEPRECATED_KIT_FILES = [
+  "evidence/review.py",
+  "evidence/routines/pr-evidence-review.json",
 ];
 const ROOM_KEYS = ["thread_id", "team_id", "server", "portal", "app_slug", "publishable_key"];
 const MARK_START = "<!-- agent-rooms:start -->";
@@ -252,6 +276,11 @@ function writeManifest(destDir, version) {
   writeFileSync(join(destDir, "manifest.json"), JSON.stringify({ version, files }, null, 2) + "\n");
 }
 
+function removeDeprecatedKitFiles(destDir) {
+  for (const relative of DEPRECATED_KIT_FILES)
+    rmSync(join(destDir, relative), { recursive: true, force: true });
+}
+
 function writeShim(shimPath, kitPath) {
   mkdirSync(dirname(shimPath), { recursive: true });
   // The old generation of this shim baked in an absolute path; when the kit
@@ -362,7 +391,11 @@ function installMachine(args) {
   // first-run path, not an error.
   const cfg = loadRoomConfig({ ...args.flags, allowMissingIdentity: true }, roomConfig);
   mkdirSync(kitDir, { recursive: true });
-  for (const f of KIT_FILES) cpSync(join(KIT_SRC, f), join(kitDir, f));
+  for (const f of KIT_FILES) {
+    mkdirSync(dirname(join(kitDir, f)), { recursive: true });
+    cpSync(join(KIT_SRC, f), join(kitDir, f));
+  }
+  removeDeprecatedKitFiles(kitDir);
   if (cfg) {
     // Room identity goes to the machine config location — the SAME place
     // `room-post init` writes and an npx-skills install reads — so both
@@ -395,9 +428,9 @@ function installMachine(args) {
 
   console.log(`\nkit: ${kitDir}`);
   console.log(`command: ${shim}  (ensure ~/.local/bin is on PATH)`);
-  console.log("\nNo repo is subscribed by this install. A human opts a repo in by");
-  console.log("running `room-post subscribe` inside it. Next: `room-post login`");
-  console.log("(one browser click), then `room-post doctor`.");
+  console.log("\nNo repo is subscribed by this install. To opt a repository in, run:");
+  console.log("  npx github:ArchAstro/agent-rooms --repo /path/to/repo");
+  console.log("Next: `room-post login` (one browser click), then `room-post doctor`.");
 }
 
 function gitTopLevel(p) {
@@ -455,9 +488,11 @@ function installRepo(args) {
         .replace(/\broom-post\b/g, "scripts/room-post");
       writeFileSync(join(kitDir, f), text);
     } else {
+      mkdirSync(dirname(join(kitDir, f)), { recursive: true });
       cpSync(join(KIT_SRC, f), join(kitDir, f));
     }
   }
+  removeDeprecatedKitFiles(kitDir);
   writeManifest(kitDir, PKG_VERSION);
 
   // In-repo shim resolves the vendored kit relative to the repo, so it travels

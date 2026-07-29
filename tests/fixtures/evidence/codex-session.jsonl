@@ -1,0 +1,8 @@
+{"type":"session_meta","payload":{"id":"codex-active","cli_version":"0.81.0"},"started_at":"2026-07-28T12:00:00Z"}
+{"type":"turn_context","payload":{"model":"gpt-5.6-codex","reasoning_effort":"high"}}
+{"type":"response_item","timestamp":"2026-07-28T12:00:01Z","payload":{"type":"message","role":"system","content":[{"type":"input_text","text":"SYSTEM TEXT MUST NEVER APPEAR"}]}}
+{"type":"response_item","timestamp":"2026-07-28T12:00:02Z","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"DEVELOPER TEXT MUST NEVER APPEAR"}]}}
+{"type":"response_item","timestamp":"2026-07-28T12:00:03Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Add a safe evidence bundle for this PR."}]}}
+{"type":"response_item","timestamp":"2026-07-28T12:00:04Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I will capture the exact patch and run the focused test."}]}}
+{"type":"response_item","timestamp":"2026-07-28T12:00:05Z","payload":{"type":"function_call","call_id":"proof-test","name":"exec_command","arguments":"python3 tests/test_pr_evidence_bundle.py"}}
+{"type":"response_item","timestamp":"2026-07-28T12:00:06Z","payload":{"type":"function_call_output","call_id":"proof-test","output":"PASS focused bundle test\nexit code: 0\nAuthorization: Bearer sk_live_1234567890abcdef"}}
