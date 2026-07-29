@@ -1178,6 +1178,82 @@ def test_pr_publish_is_nonblocking_without_room_configuration():
     print("PASS  unavailable automatic PR publication is quiet and self-cleaning")
 
 
+def test_explicit_pr_publish_without_room_configuration_reports_withheld():
+    home = Path(tempfile.mkdtemp())
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(KIT),
+            "pr",
+            "publish",
+            "7",
+            "--base-sha",
+            "a" * 40,
+            "--head-sha",
+            "b" * 40,
+        ],
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "ROOM_JSON": "",
+            "TEAM_ROOM_HEALTH_LOG": str(home / "health.jsonl"),
+        },
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout == ""
+    assert result.stderr.strip() == "pr evidence withheld", result.stderr
+    print("PASS  explicit unavailable PR publication reports its outcome once")
+
+
+def test_option_looking_pr_values_do_not_enable_automatic_mode_or_cleanup():
+    home = Path(tempfile.mkdtemp())
+    private_file = home / "not-a-handoff.json"
+    private_file.write_text("must remain\n")
+    private_file.chmod(0o600)
+    base = [
+        sys.executable,
+        str(KIT),
+        "pr",
+        "publish",
+        "7",
+        "--base-sha",
+        "a" * 40,
+        "--head-sha",
+        "b" * 40,
+    ]
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "ROOM_JSON": "",
+        "TEAM_ROOM_HEALTH_LOG": str(home / "health.jsonl"),
+    }
+
+    result = subprocess.run(
+        [*base, "--session", "--envelope-stdin"],
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == 0
+    assert result.stderr.strip() == "pr evidence withheld", result.stderr
+
+    result = subprocess.run(
+        [*base, "--session", "--handoff", str(private_file)],
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "usage:" in result.stderr.lower(), result.stderr
+    assert private_file.exists(), "option-looking session data must not trigger cleanup"
+    print("PASS  option-looking PR values stay explicit and cannot delete files")
+
+
 def test_configured_pr_handoff_without_session_identity_is_quiet():
     reset_contract_server()
     with tempfile.TemporaryDirectory() as td, http.server.ThreadingHTTPServer(
@@ -1270,6 +1346,93 @@ def test_untrusted_room_refusal_consumes_private_handoff_and_capture():
     print("PASS  untrusted destination refusal consumes private evidence files")
 
 
+def test_invalid_automatic_arguments_are_quiet_and_consume_private_files():
+    home = Path(tempfile.mkdtemp())
+    capture = home / "capture.jsonl"
+    capture.write_text("private prompt and trajectory\n")
+    capture.chmod(0o600)
+    handoff = home / "handoff.json"
+    handoff.write_text(json.dumps({
+        "pr_url": "https://github.com/owner/repository/pull/7",
+        "base_ref": "main",
+        "base_sha": "a" * 40,
+        "head_sha": "b" * 40,
+        "harness": "astrodev",
+        "capture_path": str(capture),
+    }))
+    handoff.chmod(0o600)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(KIT),
+            "pr",
+            "publish",
+            "--handoff",
+            str(handoff),
+            "--mode",
+            "surprise",
+        ],
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "ROOM_JSON": "",
+            "TEAM_ROOM_HEALTH_LOG": str(home / "health.jsonl"),
+        },
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == 0
+    assert result.stdout == "" and result.stderr == "", result.stdout + result.stderr
+    assert not handoff.exists() and not capture.exists()
+    print("PASS  invalid automatic arguments stay quiet and consume private files")
+
+
+def test_conflicting_automatic_inputs_consume_every_private_handoff():
+    home = Path(tempfile.mkdtemp())
+    handoffs = []
+    captures = []
+    for index in range(2):
+        capture = home / f"capture-{index}.jsonl"
+        capture.write_text(f"private prompt and trajectory {index}\n")
+        capture.chmod(0o600)
+        handoff = home / f"handoff-{index}.json"
+        handoff.write_text(json.dumps({
+            "pr_url": "https://github.com/owner/repository/pull/7",
+            "base_ref": "main",
+            "base_sha": "a" * 40,
+            "head_sha": "b" * 40,
+            "harness": "astrodev",
+            "capture_path": str(capture),
+        }))
+        handoff.chmod(0o600)
+        handoffs.append(handoff)
+        captures.append(capture)
+
+    for argv in (
+        ["--handoff", str(handoffs[0]), "--envelope-stdin"],
+        ["--handoff", str(handoffs[1]), "--handoff", str(handoffs[1])],
+    ):
+        result = subprocess.run(
+            [sys.executable, str(KIT), "pr", "publish", *argv],
+            env={
+                **os.environ,
+                "HOME": str(home),
+                "ROOM_JSON": "",
+                "TEAM_ROOM_HEALTH_LOG": str(home / "health.jsonl"),
+            },
+            input="",
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        assert result.returncode == 0
+        assert result.stdout == "" and result.stderr == "", result.stdout + result.stderr
+
+    assert not any(path.exists() for path in handoffs + captures)
+    print("PASS  conflicting automatic inputs consume every private handoff")
+
+
 if __name__ == "__main__":
     test_two_agent_sessions_publish_one_current_artifact_over_tcp_without_github()
     test_concurrent_cold_starts_can_duplicate_artifacts_until_the_server_honors_the_create_key()
@@ -1283,5 +1446,9 @@ if __name__ == "__main__":
     test_automatic_envelope_is_capped_one_shot_and_rejects_symlink_sessions()
     test_every_evidence_git_command_disables_promisor_lazy_fetch()
     test_pr_publish_is_nonblocking_without_room_configuration()
+    test_explicit_pr_publish_without_room_configuration_reports_withheld()
+    test_option_looking_pr_values_do_not_enable_automatic_mode_or_cleanup()
     test_configured_pr_handoff_without_session_identity_is_quiet()
     test_untrusted_room_refusal_consumes_private_handoff_and_capture()
+    test_invalid_automatic_arguments_are_quiet_and_consume_private_files()
+    test_conflicting_automatic_inputs_consume_every_private_handoff()
