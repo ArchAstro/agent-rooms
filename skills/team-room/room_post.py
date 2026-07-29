@@ -2128,34 +2128,99 @@ def _bootstrap_token() -> str | None:
         return None
 
 
-def discover_rooms(server: str, token: str, pub_key: str) -> list:
-    """Team rooms the caller can join: [(team_name, team_id, thread_id)]."""
-    def get(path):
+ROOM_LABEL = "archastro_team_room"
+
+
+def _room_api(server: str, token: str, pub_key: str):
+    """A GET/POST pair against the room API, raising on failure so a request
+    that FAILED is never mistaken for a room that is not there."""
+    def call(path, method="GET", body=None):
         req = urllib.request.Request(
             f"{server}{path}",
+            data=(json.dumps(body).encode() if body is not None else None),
+            method=method,
             headers={"Authorization": f"Bearer {token}",
                      "User-Agent": f"room-post/{KIT_VERSION}",
+                     "Content-Type": "application/json",
                      "x-archastro-api-key": pub_key})
-        with urllib.request.urlopen(req, timeout=8) as r:
+        with urllib.request.urlopen(req, timeout=15) as r:
             return json.load(r)
+    return call
 
+def _my_org(call) -> str | None:
+    """The company this person belongs to. Their room is their company's."""
+    override = os.environ.get("TEAM_ROOM_ORG_ID", "").strip()
+    if override:
+        return override
     try:
-        teams = get("/api/v1/teams?page_size=50").get("data") or []
-    except Exception as exc:
-        raise RuntimeError("room discovery unavailable") from exc
-    rooms = []
-    for t in teams:
-        tid = t.get("id")
-        if not tid:
-            continue
-        try:
-            threads = get(f"/api/v1/teams/{tid}/threads").get("data") or []
-        except Exception as exc:
-            raise RuntimeError("room discovery unavailable") from exc
-        for th in threads:
-            if (th.get("title") or "").lower() == "team room" and th.get("id"):
-                rooms.append((t.get("name") or tid, tid, th["id"]))
-    return rooms
+        me = call("/api/v1/users/me")
+    except Exception:
+        return None
+    return me.get("org") or me.get("org_id")
+
+
+def _room_thread(call, team_id: str) -> tuple | None:
+    """(name, thread_id) for a team's room. Reading a team's threads needs
+    membership, which is why the label — not the thread — is what identifies
+    a room from the outside."""
+    full = call(f"/api/v1/teams/{team_id}")
+    for th in full.get("threads") or []:
+        if (th.get("title") or "").lower() == "team room" and th.get("id"):
+            return (full.get("name") or team_id, th["id"])
+    return None
+
+
+def discover_rooms(server: str, token: str, pub_key: str) -> list:
+    """The caller's rooms: [(team_name, team_id, thread_id)].
+
+    Joins them to their company's room if they are not in it yet. One
+    labelled-team query answers both "which rooms am I in" and "which room
+    does my company have", so this costs a request or two rather than one
+    per team the caller belongs to.
+    """
+    call = _room_api(server, token, pub_key)
+    flt = urllib.parse.quote(json.dumps(
+        {"operator": "eq", "path": ["system_role"], "value": ROOM_LABEL}))
+
+    labelled = []
+    for page in range(1, 21):
+        d = call(f"/api/v1/teams?page_size=100&page={page}&metadata={flt}")
+        labelled.extend(d.get("data") or [])
+        if d.get("has_next") is not True:
+            break
+    else:
+        raise RuntimeError("could not read every page of rooms")
+
+    # Already in one: nothing to do, and nothing written to the server.
+    mine = [t for t in labelled if t.get("membership_status")]
+    if mine:
+        out = []
+        for t in mine:
+            got = _room_thread(call, t["id"])
+            if got:
+                out.append((got[0], t["id"], got[1]))
+        return out
+
+    # Not in one yet. The label says which company a team CLAIMS to belong
+    # to and anyone may write it, so a stranger can stamp a team with this
+    # company's id. `org` is set by the platform from whoever created the
+    # team and cannot be written by a caller, so the claim is checked
+    # against it before joining anything.
+    org = _my_org(call)
+    if not org:
+        return []
+    owned = [t for t in labelled if t.get("org") == org and t.get("id")]
+    if not owned:
+        return []
+
+    # Oldest wins, so everyone converges on the same room rather than the
+    # company splitting by who happened to look last. A planted team cannot
+    # jump the queue by being older, because it was filtered out above.
+    owned.sort(key=lambda t: t.get("created_at") or t.get("inserted_at") or "")
+    team_id = owned[0]["id"]
+    call(f"/api/v1/teams/{team_id}/join", method="POST", body={})
+    got = _room_thread(call, team_id)
+    return [(got[0], team_id, got[1])] if got else []
 
 
 def _write_room_json(team_id: str, thread_id: str, server: str, pub_key: str):
@@ -2187,18 +2252,25 @@ def discover_and_configure(token: str, chosen_team: str | None = None):
     server = os.environ.get("ROOM_SERVER") or PRODUCTION_SERVER or DEFAULT_SERVER
     pub_key = (os.environ.get("ROOM_PUBLISHABLE_KEY")
                or _ROOM_CFG.get("publishable_key") or DEFAULT_PUBLISHABLE_KEY)
-    rooms = discover_rooms(server, token, pub_key)
+    try:
+        rooms = discover_rooms(server, token, pub_key)
+    except Exception as e:
+        # Could not check is not the same as there is nothing there. Saying
+        # "no room" here sends someone off to create a second one for a
+        # company that already has one.
+        print(f"couldn't check for your team's room ({e}). "
+              "Nothing was changed — try again in a moment.")
+        return
     if chosen_team:
         rooms = [r for r in rooms if r[1] == chosen_team]
     if not rooms:
-        print("no team room found for your account yet. Ask whoever runs "
-              "your team's room to add you, or create one at "
-              f"{DEFAULT_PORTAL}.")
+        print("your company doesn't have a team room yet. "
+              f"Create one at {DEFAULT_PORTAL} and re-run this.")
         return
     if len(rooms) == 1:
         name, tid, thid = rooms[0]
         _write_room_json(tid, thid, server, pub_key)
-        print(f"joined team room: {name}")
+        print(f"you're in the team room: {name}")
         return
     print("you're in several team rooms — pick one and re-run:")
     for name, tid, _ in rooms:
