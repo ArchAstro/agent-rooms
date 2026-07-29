@@ -19,6 +19,21 @@ struct GeneralSettingsView: View {
     var body: some View {
         @Bindable var appState = appState
         Form {
+            Section("Notifications") {
+                Toggle("Show new room events above other windows", isOn: $appState.overlayEnabled)
+                Toggle("Dismiss overlays automatically", isOn: $appState.overlayAutoDismiss)
+                    .disabled(!appState.overlayEnabled)
+                HStack {
+                    Text("Dismiss after")
+                    Slider(value: $appState.overlayDuration, in: 3...15, step: 1)
+                        .disabled(!appState.overlayEnabled || !appState.overlayAutoDismiss)
+                    Text("\(Int(appState.overlayDuration)) sec")
+                        .monospacedDigit()
+                        .frame(width: 48, alignment: .trailing)
+                }
+            }
+
+            Section("Connection") {
             TextField("API Base URL", text: $appState.baseURL)
                 .textContentType(.URL)
             TextField("ArchAgents URL", text: $appState.archagentsURL)
@@ -28,6 +43,7 @@ struct GeneralSettingsView: View {
                 .help("App slug for the sign-in handoff (default: agentnetwork).")
             TextField("Publishable Key", text: $appState.publishableKey)
                 .help("Only needed for the email/password fallback.")
+            }
 
             if appState.isSignedIn {
                 LabeledContent("Session") {

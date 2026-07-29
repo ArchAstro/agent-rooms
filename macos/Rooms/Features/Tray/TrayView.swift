@@ -5,8 +5,7 @@ import SwiftUI
 /// segments, and the ask composer, per docs/mocks/team-room-menubar.html.
 struct TrayView: View {
     @Environment(AppState.self) private var appState
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.openWindow) private var openWindow
+    @Environment(\.trayChrome) private var trayChrome
 
     /// True when hosted in the pinned floating window instead of the
     /// menu-bar popover.
@@ -32,10 +31,6 @@ struct TrayView: View {
         .frame(width: Theme.trayWidth, height: Theme.trayHeight)
         .background(Theme.paper)
         .overlay(alignment: .bottom) { toastOverlay }
-        .task {
-            await appState.restoreSession()
-            appState.startLiveFeed()
-        }
     }
 
     @ViewBuilder
@@ -64,9 +59,9 @@ struct TrayView: View {
                 roomButton
                 HStack(spacing: 5) {
                     Circle()
-                        .fill(Color(hex: 0x20A37F))
+                        .fill(Theme.green)
                         .frame(width: 5, height: 5)
-                        .shadow(color: Color(hex: 0x20A37F).opacity(0.35), radius: 3)
+                        .shadow(color: Theme.green.opacity(0.35), radius: 3)
                     Text("live")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(Theme.green)
@@ -78,15 +73,14 @@ struct TrayView: View {
                     active: isPinned
                 ) {
                     if isPinned {
-                        dismiss()
+                        trayChrome.close()
                     } else {
-                        openWindow(id: "rooms-panel")
-                        dismiss()
+                        trayChrome.openPinned()
                     }
                 }
                 if !isPinned {
                     iconButton(systemImage: "xmark", title: "Close tray") {
-                        dismiss()
+                        trayChrome.close()
                     }
                 }
             }
@@ -115,7 +109,7 @@ struct TrayView: View {
                     .frame(width: 26, height: 26)
                     .background(
                         LinearGradient(
-                            colors: [Color(hex: 0x282622), Color(hex: 0x5C5851)],
+                            colors: [Color(hex: 0x0D8B6A), Color(hex: 0x075B47)],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         ),

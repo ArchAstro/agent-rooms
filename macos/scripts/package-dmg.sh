@@ -1,0 +1,419 @@
+#!/usr/bin/env bash
+# Build a Release Rooms.app, wrap it in a DMG, and (by default) Developer-ID
+# sign + notarize so Gatekeeper accepts a normal double-click install.
+#
+# Usage (from macos/):
+#   ./scripts/package-dmg.sh
+#   ./scripts/package-dmg.sh --out /tmp/Rooms.dmg
+#   ./scripts/package-dmg.sh --adhoc          # local-only, Gatekeeper will warn
+#   ./scripts/package-dmg.sh --skip-notarize  # sign only
+#
+# Developer ID + notarize (CI or local) — set:
+#   CODE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+#   DEVELOPMENT_TEAM=TEAMID
+# And one of:
+#   # App Store Connect API key (preferred for CI)
+#   APPLE_API_KEY_PATH=/path/to/AuthKey_XXX.p8   # or APPLE_API_KEY_BASE64
+#   APPLE_API_KEY_ID=XXXXXXXXXX
+#   APPLE_API_ISSUER_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+#   # or Apple ID + app-specific password
+#   APPLE_ID=you@example.com
+#   APPLE_APP_SPECIFIC_PASSWORD=xxxx-xxxx-xxxx-xxxx
+#   APPLE_TEAM_ID=TEAMID   # defaults to DEVELOPMENT_TEAM
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+OUT_DMG=""
+CONFIGURATION="${CONFIGURATION:-Release}"
+IDENTITY="${CODE_SIGN_IDENTITY:-}"
+TEAM="${DEVELOPMENT_TEAM:-}"
+ADHOC=0
+SKIP_NOTARIZE=0
+SKIP_SIGN=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --out) OUT_DMG="${2:-}"; shift 2 ;;
+    --configuration) CONFIGURATION="${2:-}"; shift 2 ;;
+    --adhoc) ADHOC=1; shift ;;
+    --skip-notarize) SKIP_NOTARIZE=1; shift ;;
+    --skip-sign) SKIP_SIGN=1; shift ;;
+    -h|--help)
+      sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *)
+      echo "error: unknown argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "error: required command not found: $1" >&2
+    exit 1
+  }
+}
+
+require_cmd xcodegen
+require_cmd xcodebuild
+require_cmd hdiutil
+require_cmd codesign
+require_cmd ditto
+require_cmd osascript
+
+if [[ "$SKIP_SIGN" == "1" ]]; then
+  IDENTITY="unsigned"
+  TEAM=""
+  SKIP_NOTARIZE=1
+elif [[ "$ADHOC" == "1" ]]; then
+  IDENTITY="-"
+  TEAM=""
+  SKIP_NOTARIZE=1
+elif [[ -z "$IDENTITY" || -z "$TEAM" ]]; then
+  cat >&2 <<'EOF'
+error: Developer ID signing requires:
+
+  export CODE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+  export DEVELOPMENT_TEAM=TEAMID
+
+Or pass --adhoc for a local-only build (Gatekeeper will warn).
+
+See docs/SIGNING.md for certificate + notarization setup.
+EOF
+  exit 1
+fi
+
+echo "==> Generating Xcode project"
+xcodegen generate
+
+DERIVED="$ROOT/build/DerivedData"
+STAGE="$ROOT/build/dmg-root"
+mkdir -p "$DERIVED"
+rm -rf "$STAGE"
+mkdir -p "$STAGE"
+
+SIGN_ARGS=()
+if [[ "$SKIP_SIGN" == "1" ]]; then
+  SIGN_ARGS+=(
+    CODE_SIGNING_ALLOWED=NO
+    CODE_SIGNING_REQUIRED=NO
+  )
+elif [[ "$ADHOC" == "1" ]]; then
+  SIGN_ARGS+=(
+    CODE_SIGN_IDENTITY="$IDENTITY"
+    CODE_SIGNING_ALLOWED=YES
+    CODE_SIGNING_REQUIRED=NO
+    CODE_SIGN_STYLE=Automatic
+    DEVELOPMENT_TEAM=
+    ENABLE_HARDENED_RUNTIME=YES
+    OTHER_CODE_SIGN_FLAGS=--timestamp
+  )
+else
+  SIGN_ARGS+=(
+    CODE_SIGN_IDENTITY="$IDENTITY"
+    CODE_SIGNING_ALLOWED=YES
+    CODE_SIGNING_REQUIRED=YES
+    CODE_SIGN_STYLE=Manual
+    DEVELOPMENT_TEAM="$TEAM"
+    ENABLE_HARDENED_RUNTIME=YES
+    OTHER_CODE_SIGN_FLAGS=--timestamp
+  )
+fi
+
+echo "==> Building $CONFIGURATION (identity=$IDENTITY team=${TEAM:-none})"
+xcodebuild \
+  -project Rooms.xcodeproj \
+  -scheme Rooms \
+  -configuration "$CONFIGURATION" \
+  -destination 'generic/platform=macOS' \
+  -derivedDataPath "$DERIVED" \
+  "${SIGN_ARGS[@]}" \
+  ONLY_ACTIVE_ARCH=NO \
+  build
+
+APP_SRC="$DERIVED/Build/Products/$CONFIGURATION/Rooms.app"
+if [[ ! -d "$APP_SRC" ]]; then
+  echo "error: expected app missing: $APP_SRC" >&2
+  exit 1
+fi
+
+# Copy with resource forks / xattrs preserved for codesign.
+APP="$STAGE/Rooms.app"
+echo "==> Staging app"
+ditto "$APP_SRC" "$APP"
+ln -s /Applications "$STAGE/Applications"
+
+DMG_BACKGROUND="$ROOT/Design/Generated/rooms-dmg-background.png"
+if [[ ! -f "$DMG_BACKGROUND" ]]; then
+  echo "error: DMG background missing: $DMG_BACKGROUND" >&2
+  exit 1
+fi
+mkdir -p "$STAGE/.background"
+ditto "$DMG_BACKGROUND" "$STAGE/.background/Rooms.png"
+
+sign_app() {
+  local app="$1"
+  echo "==> Codesigning app ($IDENTITY)"
+  # Entitlements from the built app bundle when present.
+  local entitlements="$ROOT/Rooms/Rooms.entitlements"
+  local ent_args=()
+  if [[ -f "$entitlements" ]]; then
+    ent_args=(--entitlements "$entitlements")
+  fi
+
+  # Sign nested code first if any, then the bundle. --deep is discouraged for
+  # modern notarization; ditto'd Release apps are usually flat enough.
+  codesign \
+    --force \
+    --options runtime \
+    --timestamp \
+    --sign "$IDENTITY" \
+    "${ent_args[@]}" \
+    "$app"
+
+  codesign --verify --verbose=2 "$app"
+  spctl --assess --type execute --verbose=4 "$app" 2>&1 || {
+    # Pre-notarization assess often fails; verify signature only.
+    echo "note: spctl assess before notarization may fail; signature verify passed"
+  }
+}
+
+if [[ "$SKIP_SIGN" == "1" ]]; then
+  echo "==> Leaving app unsigned (--skip-sign)"
+elif [[ "$ADHOC" == "1" ]]; then
+  echo "==> Ad-hoc signing (not Gatekeeper-clean)"
+  codesign --force --sign - --options runtime "$APP"
+else
+  sign_app "$APP"
+fi
+
+cat >"$STAGE/.background/README.txt" <<EOF
+Rooms
+==========
+
+Drag Rooms.app into Applications, then launch from the menu bar
+(overlapping room-bubbles icon). There is no Dock icon (LSUIElement).
+
+Left-click opens the room tray. Right-click opens Settings or quits.
+New room events can appear as clickable desktop overlays.
+
+Signed with: $IDENTITY
+EOF
+
+VERSION="$(
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+    "$APP/Contents/Info.plist" 2>/dev/null || echo "0.1.0"
+)"
+BUILD="$(
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' \
+    "$APP/Contents/Info.plist" 2>/dev/null || echo "1"
+)"
+
+if [[ -z "$OUT_DMG" ]]; then
+  OUT_DMG="$ROOT/build/Rooms-${VERSION}-${BUILD}.dmg"
+fi
+mkdir -p "$(dirname "$OUT_DMG")"
+rm -f "$OUT_DMG"
+
+VOLNAME="Rooms ${VERSION}"
+echo "==> Creating DMG: $OUT_DMG"
+RW_DMG="$ROOT/build/Rooms-layout-rw.dmg"
+rm -f "$RW_DMG"
+
+hdiutil create \
+  -volname "$VOLNAME" \
+  -srcfolder "$STAGE" \
+  -ov \
+  -format UDRW \
+  "$RW_DMG"
+
+DEVICE=""
+MOUNT_POINT=""
+ATTACH_PLIST=""
+cleanup_layout_volume() {
+  if [[ -n "$DEVICE" ]]; then
+    hdiutil detach "$DEVICE" -force >/dev/null 2>&1 || true
+  elif [[ -n "$MOUNT_POINT" ]]; then
+    hdiutil detach "$MOUNT_POINT" -force >/dev/null 2>&1 || true
+  fi
+  [[ -z "$ATTACH_PLIST" ]] || rm -f "$ATTACH_PLIST"
+  rm -f "$RW_DMG"
+}
+trap cleanup_layout_volume EXIT
+
+ATTACH_PLIST="$(mktemp "${TMPDIR:-/tmp}/rooms-dmg-attach.XXXXXX.plist")"
+hdiutil attach \
+  "$RW_DMG" \
+  -readwrite \
+  -noverify \
+  -noautoopen \
+  -plist >"$ATTACH_PLIST"
+
+# hdiutil's human-readable output is not a stable API. Read every entity from
+# its plist result so cleanup can still detach by mount point if the root device
+# entry ever changes shape.
+for index in {0..15}; do
+  entity_device="$(
+    /usr/libexec/PlistBuddy \
+      -c "Print :system-entities:$index:dev-entry" \
+      "$ATTACH_PLIST" 2>/dev/null || true
+  )"
+  entity_mount="$(
+    /usr/libexec/PlistBuddy \
+      -c "Print :system-entities:$index:mount-point" \
+      "$ATTACH_PLIST" 2>/dev/null || true
+  )"
+  if [[ -z "$DEVICE" && -n "$entity_device" ]]; then
+    DEVICE="$entity_device"
+  fi
+  if [[ -n "$entity_mount" ]]; then
+    MOUNT_POINT="$entity_mount"
+  fi
+done
+if [[ -z "$DEVICE" ]]; then
+  echo "error: could not determine mounted DMG device" >&2
+  exit 1
+fi
+if [[ -z "$MOUNT_POINT" ]]; then
+  echo "error: could not determine mounted DMG path" >&2
+  exit 1
+fi
+
+echo "==> Applying branded Finder layout"
+osascript <<EOF
+tell application "Finder"
+  tell disk "$VOLNAME"
+    open
+    delay 1
+    set zoomed of container window to false
+    set current view of container window to icon view
+    set toolbar visible of container window to false
+    set statusbar visible of container window to false
+    set pathbar visible of container window to false
+    set sidebar width of container window to 0
+    set the bounds of container window to {100, 100, 820, 550}
+
+    set viewOptions to the icon view options of container window
+    set arrangement of viewOptions to not arranged
+    set icon size of viewOptions to 112
+    set text size of viewOptions to 13
+    set background picture of viewOptions to file ".background:Rooms.png"
+
+    set position of item "Rooms.app" of container window to {180, 230}
+    set position of item "Applications" of container window to {500, 230}
+    update without registering applications
+    close container window
+    delay 1
+    open
+    delay 1
+    set zoomed of container window to false
+    set the bounds of container window to {100, 100, 820, 550}
+    update without registering applications
+    delay 3
+  end tell
+end tell
+EOF
+
+sync
+hdiutil detach "$DEVICE"
+DEVICE=""
+MOUNT_POINT=""
+rm -f "$ATTACH_PLIST"
+ATTACH_PLIST=""
+
+hdiutil convert \
+  "$RW_DMG" \
+  -ov \
+  -format UDZO \
+  -imagekey zlib-level=9 \
+  -o "$OUT_DMG"
+
+rm -f "$RW_DMG"
+trap - EXIT
+
+if [[ "$ADHOC" != "1" && "$SKIP_SIGN" != "1" ]]; then
+  echo "==> Codesigning DMG"
+  codesign --force --sign "$IDENTITY" --timestamp "$OUT_DMG"
+  codesign --verify --verbose=2 "$OUT_DMG"
+fi
+
+TEMP_NOTARY_KEY=""
+cleanup_notary_key() {
+  [[ -z "$TEMP_NOTARY_KEY" ]] || rm -f "$TEMP_NOTARY_KEY"
+}
+trap cleanup_notary_key EXIT
+
+notarize_dmg() {
+  local dmg="$1"
+  local team_id="${APPLE_TEAM_ID:-$TEAM}"
+  local key_path="${APPLE_API_KEY_PATH:-}"
+
+  if [[ -z "$key_path" && -n "${APPLE_API_KEY_BASE64:-}" ]]; then
+    key_path="$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/rooms-notary-key.XXXXXX")"
+    TEMP_NOTARY_KEY="$key_path"
+    echo "$APPLE_API_KEY_BASE64" | base64 --decode >"$key_path"
+    chmod 600 "$key_path"
+  fi
+
+  if [[ -n "$key_path" && -n "${APPLE_API_KEY_ID:-}" && -n "${APPLE_API_ISSUER_ID:-}" ]]; then
+    echo "==> Notarizing with App Store Connect API key"
+    xcrun notarytool submit "$dmg" \
+      --key "$key_path" \
+      --key-id "$APPLE_API_KEY_ID" \
+      --issuer "$APPLE_API_ISSUER_ID" \
+      --wait
+  elif [[ -n "${APPLE_ID:-}" && -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" && -n "$team_id" ]]; then
+    echo "==> Notarizing with Apple ID"
+    xcrun notarytool submit "$dmg" \
+      --apple-id "$APPLE_ID" \
+      --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+      --team-id "$team_id" \
+      --wait
+  else
+    cat >&2 <<'EOF'
+error: notarization credentials missing.
+
+Set either:
+  APPLE_API_KEY_ID + APPLE_API_ISSUER_ID + APPLE_API_KEY_PATH (or APPLE_API_KEY_BASE64)
+or:
+  APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID
+
+Or pass --skip-notarize (signed but not Gatekeeper-clean until you notarize).
+EOF
+    return 1
+  fi
+
+  echo "==> Stapling notarization ticket"
+  xcrun stapler staple "$dmg"
+  xcrun stapler validate "$dmg"
+
+  echo "==> Gatekeeper assessment"
+  spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
+}
+
+if [[ "$SKIP_NOTARIZE" == "1" ]]; then
+  if [[ "$SKIP_SIGN" == "1" ]]; then
+    echo "==> Skipping notarization (unsigned build)"
+  elif [[ "$ADHOC" == "1" ]]; then
+    echo "==> Skipping notarization (ad-hoc build)"
+  else
+    echo "==> Skipping notarization (--skip-notarize); DMG is signed only"
+  fi
+else
+  notarize_dmg "$OUT_DMG"
+fi
+
+cleanup_notary_key
+trap - EXIT
+
+STABLE="$ROOT/build/Rooms.dmg"
+cp "$OUT_DMG" "$STABLE"
+
+echo "==> Done"
+echo "    $OUT_DMG"
+echo "    $STABLE"
+ls -lh "$OUT_DMG"
