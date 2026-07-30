@@ -1,318 +1,199 @@
 import SwiftUI
 
-/// Placeholder content mirroring the menu-bar mock. These shapes are what
-/// the room stream, inbox, and picture will hydrate from the platform
-/// (threads + ApiChatChannel) in the next milestone.
-
+/// Mirrors the four sections in the ArchAgents network detail page.
 enum TrayTab: String, CaseIterable, Identifiable {
-    case picture = "Picture"
-    case inbox = "Inbox"
-    case stream = "Stream"
+    case connection = "Connection"
+    case members = "Members"
+    case chat = "Chat"
+    case activity = "Activity"
 
     var id: String { rawValue }
 }
 
-struct RoomSnapshot: Identifiable, Hashable {
+struct NetworkSnapshot: Identifiable, Hashable {
     let id: String
     var name: String
-    var meta: String
+    var relationship: String
     var unreadCount: Int
-    var greeting: String
-    var stats: String
-    var digestTitle: String
-    var digestText: String
-    var digestCaution: String
+    var hostOrganization: String
+    var collaboratorOrganization: String
+    var slackChannel: String?
 }
 
-struct SummaryPerson: Identifiable, Hashable {
+struct NetworkMember: Identifiable, Hashable {
+    enum Kind: String { case agent = "Agent", user = "User" }
+    enum Presence { case active, idle }
+
     let id: String
-    var initials: String
+    var networkID: String
     var name: String
-    var work: String
-    var status: String
-    var statusKind: StatusKind
-    var avatarColor: Color
-
-    enum StatusKind {
-        case go, done, wait
-
-        var color: Color {
-            switch self {
-            case .go: Theme.purple
-            case .done: Theme.green
-            case .wait: Theme.amber
-            }
-        }
-
-        var background: Color {
-            switch self {
-            case .go: Theme.purpleSoft
-            case .done: Theme.greenSoft
-            case .wait: Theme.amberSoft
-            }
-        }
-    }
-}
-
-struct DecisionCard: Identifiable, Hashable {
-    let id: String
-    var title: String
-    var body: String
-    var provenance: String
-    var time: String
-}
-
-struct InboxRequest: Identifiable, Hashable {
-    enum Kind {
-        case approval, handoff, notice
-
-        var label: String {
-            switch self {
-            case .approval: "Approval"
-            case .handoff: "Handoff"
-            case .notice: "For you"
-            }
-        }
-
-        var color: Color {
-            switch self {
-            case .approval: Theme.amber
-            case .handoff: Theme.purple
-            case .notice: Theme.blue
-            }
-        }
-    }
-
-    let id: String
+    var initials: String
     var kind: Kind
-    var source: String
-    var time: String
-    var title: String
-    var body: String
-    var primaryAction: String
-    var secondaryAction: String
+    var role: String
+    var organization: String
+    var joined: String
+    var presence: Presence
 }
 
+struct NetworkThread: Identifiable, Hashable {
+    let id: String
+    var networkID: String
+    var title: String
+    var isDefault: Bool
+    var unreadCount: Int
+}
+
+struct ChatMessage: Identifiable, Hashable {
+    let id: String
+    var threadID: String
+    var author: String
+    var initials: String
+    var organization: String
+    var body: String
+    var time: String
+    var isCurrentUser: Bool
+    var attachmentName: String?
+}
+
+struct ThreadTask: Identifiable, Hashable {
+    enum State: String { case running = "Running", completed = "Completed", blocked = "Blocked" }
+    let id: String
+    var threadID: String
+    var title: String
+    var assignee: String
+    var state: State
+}
+
+struct WorkstreamItem: Identifiable, Hashable {
+    enum Kind: String { case routine = "Routine", thread = "Thread" }
+    let id: String
+    var networkID: String
+    var kind: Kind
+    var title: String
+    var detail: String
+    var time: String
+}
+
+/// Network-scoped activity, using the same levels as the web activity feed.
+/// It also drives the optional native overlay.
 struct StreamEvent: Identifiable, Hashable {
-    enum Kind {
-        case done, start, lesson
-
-        var glyph: String {
-            switch self {
-            case .done: "✓"
-            case .start: "▶"
-            case .lesson: "!"
-            }
-        }
-
-        var color: Color {
-            switch self {
-            case .done: Theme.green
-            case .start: Theme.purple
-            case .lesson: Theme.amber
-            }
-        }
-
-        var background: Color {
-            switch self {
-            case .done: Theme.greenSoft
-            case .start: Theme.purpleSoft
-            case .lesson: Theme.amberSoft
-            }
-        }
-    }
-
-    enum Filter: String, CaseIterable, Identifiable {
+    enum Level: String, CaseIterable, Identifiable {
         case all = "All"
-        case you = "You"
-        case lessons = "Lessons"
+        case debug = "Debug"
+        case info = "Info"
+        case warning = "Warn"
+        case error = "Error"
+        case audit = "Audit"
 
         var id: String { rawValue }
+        var systemImage: String {
+            switch self {
+            case .all, .info: "info.circle.fill"
+            case .debug: "ladybug.fill"
+            case .warning: "exclamationmark.triangle.fill"
+            case .error: "xmark.octagon.fill"
+            case .audit: "checkmark.shield.fill"
+            }
+        }
+        var color: Color {
+            switch self {
+            case .all, .info: Theme.blue
+            case .debug: Theme.muted2
+            case .warning: Theme.amber
+            case .error: Theme.red
+            case .audit: Theme.green
+            }
+        }
+        var background: Color {
+            switch self {
+            case .all, .info: Theme.blue.opacity(0.10)
+            case .debug: Theme.surface
+            case .warning: Theme.amberSoft
+            case .error: Theme.redSoft
+            case .audit: Theme.greenSoft
+            }
+        }
     }
 
     let id: String
-    var kind: Kind
+    var networkID: String
+    var level: Level
     var author: String
     var body: String
     var time: String
-    var isYou: Bool
+    var sessionID: String
 
-    func matches(_ filter: Filter) -> Bool {
-        switch filter {
-        case .all: true
-        case .you: isYou
-        case .lessons: kind == .lesson
-        }
-    }
+    func matches(_ filter: Level) -> Bool { filter == .all || level == filter }
 }
 
-// MARK: - Placeholder content (mock parity)
-
 enum TrayPlaceholders {
-    static let rooms: [RoomSnapshot] = [
-        RoomSnapshot(
-            id: "team",
-            name: "ArchAstro Team Room",
-            meta: "6 people · 18 sessions",
+    static let networks = [
+        NetworkSnapshot(
+            id: "net_archastro",
+            name: "ArchAstro Team",
+            relationship: "ArchAstro ↔ Launch Partners",
             unreadCount: 3,
-            greeting: "Good afternoon, Calvin.",
-            stats: "18 active sessions · 7 things landed",
-            digestTitle: "Seven landed. Two still moving. One deserves a look.",
-            digestText: "Zoom OAuth is up for review with live authorization verified. Code Search is moving through the full production deployment. Task dependencies and multi-org networks landed today.",
-            digestCaution: "The only caution: generic webhook identity still doesn't close the delivery-suppression root cause."
+            hostOrganization: "ArchAstro",
+            collaboratorOrganization: "Launch Partners",
+            slackChannel: "#customer-archastro"
         ),
-        RoomSnapshot(
-            id: "deployments",
-            name: "Deployments",
-            meta: "CI and release watches",
+        NetworkSnapshot(
+            id: "net_design",
+            name: "Design Partners",
+            relationship: "ArchAstro ↔ Design Partners",
             unreadCount: 0,
-            greeting: "Two releases are moving.",
-            stats: "4 active watches · latest check 2m ago",
-            digestTitle: "Code Search is converging on a busy main.",
-            digestText: "PR 8141 is through review and moving across main CI, image publication, release validation, and guarded infrastructure apply.",
-            digestCaution: "The release stays pinned to frozen tested source and an immutable reviewed digest."
-        ),
-        RoomSnapshot(
-            id: "customer-watch",
-            name: "Customer watch",
-            meta: "shared support signal",
-            unreadCount: 1,
-            greeting: "Customer watch is quiet.",
-            stats: "2 standing watches · 0 urgent",
-            digestTitle: "No new customer-critical signal.",
-            digestText: "The Slack friction audit reclassified several reported issues, and the live-session attach bug is already fixed and verified.",
-            digestCaution: "One webhook identity concern remains a correctness issue, not a customer outage."
+            hostOrganization: "ArchAstro",
+            collaboratorOrganization: "Design Partners",
+            slackChannel: nil
         ),
     ]
 
-    static let people: [SummaryPerson] = [
-        SummaryPerson(
-            id: "vivek", initials: "VK", name: "Vivek",
-            work: "magic-link callback stack · CI running",
-            status: "watching", statusKind: .wait, avatarColor: Color(hex: 0x0D8B6A)
-        ),
-        SummaryPerson(
-            id: "calvin", initials: "CG", name: "Calvin",
-            work: "Code Search production deployment",
-            status: "in flight", statusKind: .go, avatarColor: Color(hex: 0x58544E)
-        ),
-        SummaryPerson(
-            id: "bruno", initials: "B", name: "Bruno",
-            work: "N-org networks and task dependencies",
-            status: "landed", statusKind: .done, avatarColor: Color(hex: 0xA26537)
-        ),
-        SummaryPerson(
-            id: "rob", initials: "RM", name: "Rob",
-            work: "failed-provision cleanup ledger",
-            status: "local", statusKind: .go, avatarColor: Color(hex: 0x397A6C)
-        ),
+    static let members = [
+        NetworkMember(id: "calvin", networkID: "net_archastro", name: "Calvin", initials: "CG", kind: .user, role: "Owner", organization: "ArchAstro", joined: "Jul 12", presence: .active),
+        NetworkMember(id: "bruno", networkID: "net_archastro", name: "Bruno", initials: "B", kind: .agent, role: "Member", organization: "ArchAstro", joined: "Jul 14", presence: .active),
+        NetworkMember(id: "launch", networkID: "net_archastro", name: "Launch Operator", initials: "LO", kind: .user, role: "Member", organization: "Launch Partners", joined: "Jul 19", presence: .idle),
+        NetworkMember(id: "fleet", networkID: "net_archastro", name: "Fleet", initials: "F", kind: .agent, role: "Member", organization: "Launch Partners", joined: "Jul 19", presence: .active),
+        NetworkMember(id: "design", networkID: "net_design", name: "Design Partner", initials: "DP", kind: .user, role: "Member", organization: "Design Partners", joined: "Jul 25", presence: .active),
+        NetworkMember(id: "muse", networkID: "net_design", name: "Muse", initials: "M", kind: .agent, role: "Member", organization: "ArchAstro", joined: "Jul 25", presence: .active),
     ]
 
-    static let decision = DecisionCard(
-        id: "webhook-identity",
-        title: "Webhook identity change should not merge as written",
-        body: "Correlation headers are still treated as trusted idempotency contracts, and receipt retention can disagree with permanent downstream uniqueness.",
-        provenance: "Arne · review of PR 8032",
-        time: "1h ago"
-    )
-
-    static let requests: [InboxRequest] = [
-        InboxRequest(
-            id: "code-search-release",
-            kind: .approval,
-            source: "Calvin · Code Search",
-            time: "2m",
-            title: "Release PR is green and main moved. Continue with the rebased, revalidated release?",
-            body: "Production still deploys the frozen tested source plus the reviewed immutable digest.",
-            primaryAction: "Approve",
-            secondaryAction: "Hold"
-        ),
-        InboxRequest(
-            id: "tray-handoff",
-            kind: .handoff,
-            source: "Rob · Team Room roadmap",
-            time: "18m",
-            title: "Take the tray prototype into the next Team Room product review?",
-            body: "The roadmap now makes the room the center and Slack channels a recorder-to-summary input.",
-            primaryAction: "Accept",
-            secondaryAction: "Not now"
-        ),
-        InboxRequest(
-            id: "webhook-notice",
-            kind: .notice,
-            source: "Arne · Webhooks",
-            time: "1h",
-            title: "PR 8032 still misses the root cause; retention and permanent uniqueness can disagree.",
-            body: "Read-only review is complete. No customer action is required.",
-            primaryAction: "Mark seen",
-            secondaryAction: "Open PR"
-        ),
+    static let threads = [
+        NetworkThread(id: "thread_general", networkID: "net_archastro", title: "General", isDefault: true, unreadCount: 2),
+        NetworkThread(id: "thread_launch", networkID: "net_archastro", title: "Launch readiness", isDefault: false, unreadCount: 1),
+        NetworkThread(id: "thread_feedback", networkID: "net_archastro", title: "Product feedback", isDefault: false, unreadCount: 0),
+        NetworkThread(id: "thread_design", networkID: "net_design", title: "Design review", isDefault: true, unreadCount: 0),
     ]
 
-    /// Rotating queue for the simulated live feed.
-    static let liveFeed: [StreamEvent] = [
-        StreamEvent(
-            id: "live1", kind: .start, author: "Fleet · librarian",
-            body: "Distilling the last hour of session exhaust into the digest.",
-            time: "now", isYou: false
-        ),
-        StreamEvent(
-            id: "live2", kind: .done, author: "CI · code-search",
-            body: "Release validation finished green across the full matrix.",
-            time: "now", isYou: false
-        ),
-        StreamEvent(
-            id: "live3", kind: .lesson, author: "Team record",
-            body: "Prism dynamic mocks hide missing-field bugs; contract tests decode strictly on purpose.",
-            time: "now", isYou: false
-        ),
-        StreamEvent(
-            id: "live4", kind: .start, author: "You · rooms",
-            body: "Aligning the native tray to the menu-bar mock.",
-            time: "now", isYou: true
-        ),
+    static let messages = [
+        ChatMessage(id: "m1", threadID: "thread_general", author: "Launch Operator", initials: "LO", organization: "Launch Partners", body: "The release candidate is ready for the final customer-path check.", time: "10:24", isCurrentUser: false, attachmentName: "release-checklist.pdf"),
+        ChatMessage(id: "m2", threadID: "thread_general", author: "Bruno", initials: "B", organization: "ArchAstro", body: "I ran the workflow against the production-shaped fixture. All tasks completed and the audit entries look right.", time: "10:27", isCurrentUser: false, attachmentName: nil),
+        ChatMessage(id: "m3", threadID: "thread_general", author: "You", initials: "CG", organization: "ArchAstro", body: "Great. I’ll keep the thread open while we verify the Slack handoff.", time: "10:31", isCurrentUser: true, attachmentName: nil),
+        ChatMessage(id: "m4", threadID: "thread_design", author: "Design Partner", initials: "DP", organization: "Design Partners", body: "The updated navigation hierarchy is ready for review.", time: "11:06", isCurrentUser: false, attachmentName: nil),
     ]
 
-    static let events: [StreamEvent] = [
-        StreamEvent(
-            id: "e1", kind: .done, author: "Calvin · wt3",
-            body: "Zoom OAuth is pushed as PR 8143; provider remains hidden from public surfaces.",
-            time: "2m", isYou: false
-        ),
-        StreamEvent(
-            id: "e2", kind: .start, author: "You · wt7",
-            body: "Designing a macOS-native Team Room tray mock.",
-            time: "4m", isYou: true
-        ),
-        StreamEvent(
-            id: "e3", kind: .start, author: "Calvin · wte",
-            body: "Watching Code Search through a complete production deployment.",
-            time: "5m", isYou: false
-        ),
-        StreamEvent(
-            id: "e4", kind: .done, author: "Bruno · multi-org-networks",
-            body: "Networks now accept three or more collaborating orgs.",
-            time: "21m", isYou: false
-        ),
-        StreamEvent(
-            id: "e5", kind: .done, author: "Rob · wt7",
-            body: "Failed-provision cleanup ledger is implemented locally and focused tests pass.",
-            time: "24m", isYou: false
-        ),
-        StreamEvent(
-            id: "e6", kind: .lesson, author: "Arne · webhook review",
-            body: "Generic correlation headers are still trusted by default; the current patch should not merge.",
-            time: "1h", isYou: false
-        ),
-        StreamEvent(
-            id: "e7", kind: .done, author: "Vivek · wt6",
-            body: "The corrected seven-PR magic-link callback stack is published and CI is running.",
-            time: "20h", isYou: false
-        ),
-        StreamEvent(
-            id: "e8", kind: .lesson, author: "Team record",
-            body: "Talk to vks in plain English. The room keeps this as a craft rule.",
-            time: "2d", isYou: false
-        ),
+    static let tasks = [
+        ThreadTask(id: "task1", threadID: "thread_general", title: "Verify customer path", assignee: "Bruno", state: .completed),
+        ThreadTask(id: "task2", threadID: "thread_general", title: "Confirm Slack handoff", assignee: "Calvin", state: .running),
+        ThreadTask(id: "task3", threadID: "thread_design", title: "Review navigation hierarchy", assignee: "Muse", state: .running),
+    ]
+
+    static let workstream = [
+        WorkstreamItem(id: "w1", networkID: "net_archastro", kind: .thread, title: "Launch readiness", detail: "3 new messages", time: "now"),
+        WorkstreamItem(id: "w2", networkID: "net_archastro", kind: .routine, title: "Customer health check", detail: "Completed successfully", time: "18m"),
+        WorkstreamItem(id: "w3", networkID: "net_archastro", kind: .thread, title: "Product feedback", detail: "Fleet added a response", time: "42m"),
+        WorkstreamItem(id: "w4", networkID: "net_design", kind: .thread, title: "Design review", detail: "1 new message", time: "now"),
+    ]
+
+    static let events = [
+        StreamEvent(id: "a1", networkID: "net_archastro", level: .audit, author: "Bruno", body: "Completed task “Verify customer path”.", time: "now", sessionID: "ses_8a21"),
+        StreamEvent(id: "a2", networkID: "net_archastro", level: .info, author: "Fleet", body: "Posted a response in Launch readiness.", time: "8m", sessionID: "ses_7f02"),
+        StreamEvent(id: "a3", networkID: "net_archastro", level: .warning, author: "Slack", body: "Channel delivery retried after a transient timeout.", time: "26m", sessionID: "ses_70cd"),
+        StreamEvent(id: "a4", networkID: "net_archastro", level: .audit, author: "Calvin", body: "Updated the collaborator connection.", time: "1h", sessionID: "ses_622f"),
+        StreamEvent(id: "a5", networkID: "net_design", level: .info, author: "Muse", body: "Opened the Design review thread.", time: "4m", sessionID: "ses_design"),
+    ]
+
+    static let liveFeed = [
+        StreamEvent(id: "live1", networkID: "net_archastro", level: .info, author: "Fleet", body: "Posted a new message in Launch readiness.", time: "now", sessionID: "ses_live1"),
+        StreamEvent(id: "live2", networkID: "net_archastro", level: .audit, author: "Bruno", body: "Completed a thread task.", time: "now", sessionID: "ses_live2"),
     ]
 }

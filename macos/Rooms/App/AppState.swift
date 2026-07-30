@@ -29,34 +29,65 @@ final class AppState {
     /// Signed-in org name, when known.
     var orgName: String?
 
-    // MARK: Tray state (placeholder-backed until wired to threads)
+    // MARK: Network tray state
 
-    var selectedTab: TrayTab = .picture {
+    var selectedTab: TrayTab = .chat {
         didSet {
-            if oldValue == .stream && selectedTab != .stream {
-                newEventIDs.removeAll()
+            if oldValue == .activity && selectedTab != .activity {
+                newEventIDs.subtract(visibleCurrentEventIDs)
             }
         }
     }
-    var availableRooms: [RoomSnapshot] = TrayPlaceholders.rooms
-    var selectedRoom: RoomSnapshot = TrayPlaceholders.rooms[0]
-    var requests: [InboxRequest] = TrayPlaceholders.requests
-    var events: [StreamEvent] = TrayPlaceholders.events
-    var streamFilter: StreamEvent.Filter = .all
-    /// Latest ask answer, rendered as a Picture card.
-    var askAnswer: (question: String, answer: String)?
-    /// The Who's-working-on-what live view pinned to the Picture.
-    var liveViewPinned = false
-    /// Events that arrived since the stream was last in view.
+    var availableNetworks = TrayPlaceholders.networks
+    var selectedNetwork = TrayPlaceholders.networks[0]
+    var members = TrayPlaceholders.members
+    var threads = TrayPlaceholders.threads
+    var selectedThread = TrayPlaceholders.threads[0]
+    var messages = TrayPlaceholders.messages
+    var tasks = TrayPlaceholders.tasks
+    var workstream = TrayPlaceholders.workstream
+    var events = TrayPlaceholders.events
+    var activityFilter: StreamEvent.Level = .all {
+        willSet {
+            if selectedTab == .activity && !suppressActivityReadTracking {
+                newEventIDs.subtract(visibleCurrentEventIDs)
+            }
+        }
+    }
+    var activityPaused = false
+    var typingByThread = ["thread_general": "Fleet"]
     var newEventIDs: Set<String> = []
 
-    /// Transient feedback toast (mirrors the mock's toast layer).
+    var currentMembers: [NetworkMember] {
+        members.filter { $0.networkID == selectedNetwork.id }
+    }
+    var currentThreads: [NetworkThread] {
+        threads.filter { $0.networkID == selectedNetwork.id }
+    }
+    var currentMessages: [ChatMessage] {
+        messages.filter { $0.threadID == selectedThread.id }
+    }
+    var currentTasks: [ThreadTask] {
+        tasks.filter { $0.threadID == selectedThread.id }
+    }
+    var currentWorkstream: [WorkstreamItem] {
+        workstream.filter { $0.networkID == selectedNetwork.id }
+    }
+    var currentEvents: [StreamEvent] {
+        events.filter { $0.networkID == selectedNetwork.id }
+    }
+    var visibleCurrentEventIDs: [String] {
+        currentEvents.filter { $0.matches(activityFilter) }.map(\.id)
+    }
+    var totalUnreadCount: Int {
+        threads.reduce(0) { $0 + $1.unreadCount }
+    }
+
     var toast: String?
     private var toastTask: Task<Void, Never>?
     private var liveFeedTask: Task<Void, Never>?
     private var pendingLiveEvents = TrayPlaceholders.liveFeed
-
-    var inboxCount: Int { requests.count }
+    private var suppressActivityReadTracking = false
 
     func showToast(_ message: String) {
         toastTask?.cancel()
@@ -68,74 +99,113 @@ final class AppState {
         }
     }
 
-    func selectRoom(_ room: RoomSnapshot) {
-        selectedRoom = room
-        askAnswer = nil
-        showToast("Switched to \(room.name)")
-    }
-
-    func resolveRequest(_ request: InboxRequest, feedback: String) {
-        requests.removeAll { $0.id == request.id }
-        showToast(feedback)
-    }
-
-    func deferRequest(_ request: InboxRequest) {
-        showToast("\(request.kind.label) stays in your inbox")
-    }
-
-    /// Anything the tray can't do yet opens in the full app.
-    func openInFullApp(_ what: String) {
-        showToast("\(what) opened in the full app")
-    }
-
-    func toggleLiveViewPinned() {
-        liveViewPinned.toggle()
-        showToast(liveViewPinned ? "Live view pinned to The Picture" : "Live view unpinned")
-    }
-
-    /// Staggered clear, mirroring the mock's cascade.
-    func clearInbox() {
-        let pending = requests
-        Task {
-            for request in pending {
-                withAnimation(.easeOut(duration: 0.25)) {
-                    requests.removeAll { $0.id == request.id }
-                }
-                try? await Task.sleep(nanoseconds: 55_000_000)
-            }
-            showToast("Inbox cleared")
+    func selectNetwork(_ network: NetworkSnapshot, markVisibleContentRead: Bool = true) {
+        if markVisibleContentRead && selectedTab == .activity {
+            newEventIDs.subtract(visibleCurrentEventIDs)
         }
-    }
-
-    /// Placeholder ask — the live app routes this through the room's
-    /// resident agent and grounds the answer in the stream.
-    func ask(_ question: String) {
-        let lower = question.lowercased()
-        let answer: String
-        if lower.contains("who") || lower.contains("working") || lower.contains("doing") {
-            answer = "Calvin is watching Code Search deploy, Rob has the cleanup ledger local, Bruno just landed N-org networks, and Vivek is watching the corrected magic-link stack in CI."
-        } else if lower.contains("need") || lower.contains("attention") || lower.contains("inbox") {
-            answer = "Three requests need you: one deployment decision, one handoff, and one review note. Nothing is customer-critical."
-        } else if lower.contains("summary") || lower.contains("today") || lower.contains("happen") {
-            answer = "Seven meaningful changes landed today. Code Search and Zoom OAuth are moving; the webhook identity patch is the only item with a substantive correctness warning."
-        } else {
-            answer = "The room found 42 relevant posts across 18 active sessions. In the live app, the resident synthesizes a sourced answer here and preserves the question as a reusable view."
+        let networkChanged = selectedNetwork.id != network.id
+        selectedNetwork = network
+        if networkChanged,
+           let defaultThread = currentThreads.first(where: \.isDefault) ?? currentThreads.first {
+            selectedThread = defaultThread
+        } else if networkChanged {
+            selectedThread = NetworkThread(
+                id: "",
+                networkID: network.id,
+                title: "No threads",
+                isDefault: false,
+                unreadCount: 0
+            )
         }
-        askAnswer = (question, answer)
-        showToast("Answer grounded in 42 room posts")
+        if markVisibleContentRead && selectedTab == .chat { markSelectedThreadRead() }
+        showToast("Switched to \(network.name)")
     }
 
-    // MARK: Live feed simulation
+    func selectThread(_ thread: NetworkThread) {
+        selectedThread = thread
+        markSelectedThreadRead()
+        showToast("Opened \(thread.title)")
+    }
 
-    /// Simulate the always-running stream: a new event lands every so
-    /// often, marked NEW until the stream is next in view. Replaced by
-    /// the real ApiChatChannel subscription in the next milestone.
+    func unreadCount(for networkID: String) -> Int {
+        threads.filter { $0.networkID == networkID }.reduce(0) { $0 + $1.unreadCount }
+    }
+
+    func markSelectedThreadRead() {
+        guard let index = threads.firstIndex(where: { $0.id == selectedThread.id }) else { return }
+        threads[index].unreadCount = 0
+    }
+
+    func prepareActivityOverlay(_ event: StreamEvent) {
+        if let network = availableNetworks.first(where: { $0.id == event.networkID }) {
+            selectNetwork(network, markVisibleContentRead: false)
+        }
+        suppressActivityReadTracking = true
+        activityFilter = .all
+        suppressActivityReadTracking = false
+        selectedTab = .activity
+    }
+
+    func openInFullApp(_ what: String, extraQueryItems: [URLQueryItem] = []) {
+        guard let url = webAppURL(extraQueryItems: extraQueryItems),
+              NSWorkspace.shared.open(url)
+        else {
+            showToast("Could not open the web app")
+            return
+        }
+        showToast("\(what) opened in the web app")
+    }
+
+    func webAppURL(extraQueryItems: [URLQueryItem] = []) -> URL? {
+        guard var components = URLComponents(string: archagentsURL) else { return nil }
+        let basePath = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        components.path = (basePath.isEmpty ? "" : "/\(basePath)") + "/networks/\(selectedNetwork.id)"
+        components.queryItems = [
+            URLQueryItem(name: "tab", value: selectedTab.rawValue.lowercased()),
+            URLQueryItem(name: "thread", value: selectedThread.id),
+        ] + extraQueryItems
+        return components.url
+    }
+
+    @discardableResult
+    func sendMessage(_ body: String, attachmentName: String? = nil) -> Bool {
+        guard !selectedThread.id.isEmpty else {
+            showToast("Create a thread in the web app first")
+            return false
+        }
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty || attachmentName != nil else { return false }
+        messages.append(
+            ChatMessage(
+                id: UUID().uuidString,
+                threadID: selectedThread.id,
+                author: "You",
+                initials: "CG",
+                organization: orgName ?? "ArchAstro",
+                body: trimmed,
+                time: "now",
+                isCurrentUser: true,
+                attachmentName: attachmentName
+            )
+        )
+        showToast("Message sent")
+        return true
+    }
+
+    func deleteMessage(_ message: ChatMessage) {
+        guard message.isCurrentUser else { return }
+        messages.removeAll { $0.id == message.id }
+        showToast("Message deleted")
+    }
+
+    // MARK: Activity subscription simulation
+
     func startLiveFeed() {
         guard liveFeedTask == nil else { return }
         liveFeedTask = Task {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: UInt64.random(in: 14_000_000_000...24_000_000_000))
-                guard !Task.isCancelled, isSignedIn else { continue }
+                guard !Task.isCancelled, isSignedIn, !activityPaused else { continue }
                 deliverNextLiveEvent()
             }
         }
@@ -152,16 +222,20 @@ final class AppState {
         var event = pendingLiveEvents.removeFirst()
         event = StreamEvent(
             id: "\(event.id)-\(UUID().uuidString.prefix(4))",
-            kind: event.kind,
+            networkID: event.networkID,
+            level: event.level,
             author: event.author,
             body: event.body,
             time: "now",
-            isYou: event.isYou
+            sessionID: event.sessionID
         )
         pendingLiveEvents.append(event)
         withAnimation(.easeOut(duration: 0.3)) {
             events.insert(event, at: 0)
-            if selectedTab != .stream {
+            if selectedTab != .activity
+                || event.networkID != selectedNetwork.id
+                || !event.matches(activityFilter)
+            {
                 newEventIDs.insert(event.id)
             }
         }
