@@ -216,9 +216,7 @@ final class MentionNotifier {
                 options: []
             )
         ])
-        Task {
-            _ = try? await center.requestAuthorization(options: [.alert, .sound])
-        }
+        center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
     func deliver(_ mention: MessageMention) {
@@ -227,8 +225,6 @@ final class MentionNotifier {
             content: mention.content(),
             trigger: nil
         )
-        Task {
-            try? await center.add(request)
-        }
+        center.add(request) { _ in }
     }
 }
