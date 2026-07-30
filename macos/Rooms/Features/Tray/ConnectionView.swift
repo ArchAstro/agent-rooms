@@ -7,17 +7,17 @@ struct ConnectionView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Organization connection")
+                    Text("Team Room")
                         .font(.system(size: 17, weight: .bold)).foregroundStyle(Theme.ink)
-                    Text("The same host–collaborator relationship shown on the web.")
+                    Text("Live room membership and recent shared work from ArchAgents.")
                         .font(.system(size: 10)).foregroundStyle(Theme.muted)
                 }
 
                 HStack(spacing: 8) {
-                    organization(appState.selectedNetwork.hostOrganization, label: "HOST")
-                    Image(systemName: "arrow.left.arrow.right")
+                    organization(appState.selectedNetwork.hostOrganization, label: "ORGANIZATION")
+                    Image(systemName: "person.3.fill")
                         .foregroundStyle(Theme.green)
-                    organization(appState.selectedNetwork.collaboratorOrganization, label: "COLLABORATOR")
+                    organization(appState.selectedNetwork.collaboratorOrganization, label: "ROOM")
                 }
 
                 if let channel = appState.selectedNetwork.slackChannel {
@@ -49,7 +49,7 @@ struct ConnectionView: View {
                     }
                     .padding(.vertical, 3)
                 }
-                Button("Open connection in web app") { appState.openInFullApp("Connection") }
+                Button("Open Team Room in web app") { appState.openInFullApp("Team Room") }
                     .buttonStyle(.plain).font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.green)
             }
             .padding(15)
@@ -62,7 +62,7 @@ struct ConnectionView: View {
             Text(name).font(.system(size: 12, weight: .bold)).foregroundStyle(Theme.ink).lineLimit(1)
             HStack(spacing: 4) {
                 Circle().fill(Theme.green).frame(width: 5, height: 5)
-                Text("Connected").font(.system(size: 9)).foregroundStyle(Theme.green)
+                Text("Live").font(.system(size: 9)).foregroundStyle(Theme.green)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading).card()

@@ -15,9 +15,17 @@ struct TrayView: View {
             case .signedOut, .signingIn:
                 WelcomeTrayView()
             case .signedIn:
-                header
-                activeView
-                    .animation(.easeOut(duration: 0.2), value: appState.selectedTab)
+                if appState.isLoadingRooms && !appState.hasLoadedRooms {
+                    RoomLoadingView()
+                } else if let error = appState.roomLoadError {
+                    RoomLoadFailureView(message: error)
+                } else if appState.availableNetworks.isEmpty {
+                    EmptyRoomsView()
+                } else {
+                    header
+                    activeView
+                        .animation(.easeOut(duration: 0.2), value: appState.selectedTab)
+                }
             }
         }
         .frame(width: Theme.trayWidth, height: Theme.trayHeight)
@@ -39,7 +47,7 @@ struct TrayView: View {
                             Text(appState.selectedNetwork.name)
                                 .font(.system(size: 12, weight: .bold))
                                 .foregroundStyle(Theme.ink)
-                            Text("Active network")
+                            Text("Active Team Room")
                                 .font(.system(size: 9))
                                 .foregroundStyle(Theme.green)
                         }
@@ -135,7 +143,7 @@ struct NetworkSwitcherView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("NETWORKS")
+            Text("TEAM ROOMS")
                 .font(.system(size: 9, weight: .heavy))
                 .kerning(0.8)
                 .foregroundStyle(Theme.muted2)
@@ -171,5 +179,62 @@ struct NetworkSwitcherView: View {
             }
         }
         .padding(5).frame(width: 285)
+    }
+}
+
+private struct RoomLoadingView: View {
+    var body: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+            Text("Loading your Team Rooms…")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.muted)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct RoomLoadFailureView: View {
+    @Environment(AppState.self) private var appState
+    let message: String
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 24))
+                .foregroundStyle(Theme.amber)
+            Text("Couldn’t load Team Rooms")
+                .font(.system(size: 14, weight: .bold))
+            Text(message)
+                .font(.system(size: 10))
+                .foregroundStyle(Theme.muted)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 280)
+            Button("Try Again") { Task { await appState.refreshRooms() } }
+                .buttonStyle(.borderedProminent)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct EmptyRoomsView: View {
+    @Environment(AppState.self) private var appState
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "person.3")
+                .font(.system(size: 25))
+                .foregroundStyle(Theme.green)
+            Text("No Team Rooms yet")
+                .font(.system(size: 14, weight: .bold))
+            Text("Join or create a company Team Room in ArchAgents, then refresh.")
+                .font(.system(size: 10))
+                .foregroundStyle(Theme.muted)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 270)
+            Button("Refresh") { Task { await appState.refreshRooms() } }
+                .buttonStyle(.borderedProminent)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
