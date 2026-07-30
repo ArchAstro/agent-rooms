@@ -66,6 +66,11 @@ live Team Room thread, and **Activity** classifies those same posts using the
 Team Room grammar. The app refreshes every 20 seconds; file uploads and
 permissioned management hand off to the full web app.
 
+Chat renders the same rich message grammar as the web room: GitHub-Flavored
+Markdown, protocol event bylines, images, files/media, link previews, tasks,
+artifacts, and native charts. The audited compatibility matrix lives in
+[`../docs/macos-message-rendering-parity.md`](../docs/macos-message-rendering-parity.md).
+
 ## Sign-in
 
 Sign-in goes through **ArchAgents in the browser** — the same OAuth-like

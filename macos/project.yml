@@ -11,6 +11,9 @@ packages:
   ArchAstroPlatform:
     url: https://github.com/ArchAstro/archastro-swift
     revision: 984cec2ddc74f554c8a57748d52868a70c019414
+  MarkdownUI:
+    url: https://github.com/gonzalezreal/swift-markdown-ui
+    revision: 5f613358148239d0292c0cef674a3c2314737f9e
 
 settings:
   base:
@@ -33,6 +36,8 @@ targets:
     dependencies:
       - package: ArchAstroPlatform
         product: ArchAstroPlatform
+      - package: MarkdownUI
+        product: MarkdownUI
     entitlements:
       path: Rooms/Rooms.entitlements
       properties:

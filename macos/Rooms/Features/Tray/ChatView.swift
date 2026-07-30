@@ -120,29 +120,42 @@ struct ChatView: View {
 
     private func messageRow(_ message: ChatMessage) -> some View {
         HStack(alignment: .top, spacing: 9) {
-            Text(message.initials).font(.system(size: 8, weight: .bold)).foregroundStyle(.white)
+            Text(message.displayInitials).font(.system(size: 8, weight: .bold)).foregroundStyle(.white)
                 .frame(width: 27, height: 27).background(message.isCurrentUser ? Theme.ink : Theme.green, in: RoundedRectangle(cornerRadius: 8))
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 5) {
-                    Text(message.author).font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.ink)
-                    Text(message.organization).font(.system(size: 8)).foregroundStyle(Theme.muted2)
+                    Text(message.displayAuthor).font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.ink)
+                    if let post = message.roomPost {
+                        Text(post.tag)
+                            .font(.system(size: 7, design: .monospaced))
+                            .foregroundStyle(Theme.muted2)
+                        Text(post.kind.label.uppercased())
+                            .font(.system(size: 7, weight: .heavy))
+                            .foregroundStyle(post.kind.color)
+                    } else if !message.organization.isEmpty {
+                        Text(message.organization).font(.system(size: 8)).foregroundStyle(Theme.muted2)
+                    }
+                    if let agentMode = message.agentMode {
+                        Label(
+                            agentMode == "embedded" ? "EMBEDDED" : "CLI",
+                            systemImage: "terminal.fill"
+                        )
+                        .font(.system(size: 6, weight: .heavy))
+                        .foregroundStyle(Theme.muted2)
+                    }
                     Spacer()
                     Text(message.time).font(.system(size: 8)).foregroundStyle(Theme.muted2)
                 }
-                if !message.body.isEmpty {
-                    Text(message.body).font(.system(size: 11)).lineSpacing(2.5).foregroundStyle(Theme.ink2)
-                }
-                if let attachment = message.attachmentName {
-                    Label(attachment, systemImage: "doc.fill")
-                        .font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.green)
-                        .padding(7).background(Theme.greenSoft, in: RoundedRectangle(cornerRadius: 7))
-                }
+                MessageContentView(message: message)
             }
         }
         .contextMenu {
             Button("Copy message") {
                 NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(message.body, forType: .string)
+                NSPasteboard.general.setString(
+                    MessageText.plainText(message.displayBody),
+                    forType: .string
+                )
             }
             if message.isCurrentUser {
                 Button("Delete message", role: .destructive) {
@@ -173,7 +186,10 @@ struct ChatView: View {
         return appState.currentMessages.filter {
             $0.body.localizedCaseInsensitiveContains(query)
                 || $0.author.localizedCaseInsensitiveContains(query)
-                || ($0.attachmentName?.localizedCaseInsensitiveContains(query) ?? false)
+                || $0.attachments.contains {
+                    $0.displayName.localizedCaseInsensitiveContains(query)
+                        || ($0.description?.localizedCaseInsensitiveContains(query) ?? false)
+                }
         }
     }
 }
