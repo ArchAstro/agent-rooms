@@ -151,7 +151,8 @@ final class StatusItemController: NSObject {
     private func popoverChrome() -> TrayChrome {
         TrayChrome(
             close: { [weak self] in self?.closePopover() },
-            openPinned: { [weak self] in self?.showPinnedWindow() }
+            openPinned: { [weak self] in self?.showPinnedWindow() },
+            openSettings: { [weak self] in self?.showSettingsWindow() }
         )
     }
 
@@ -191,7 +192,8 @@ final class StatusItemController: NSObject {
     private func pinnedChrome() -> TrayChrome {
         TrayChrome(
             close: { [weak self] in self?.pinnedWindow?.orderOut(nil) },
-            openPinned: { [weak self] in self?.showPinnedWindow() }
+            openPinned: { [weak self] in self?.showPinnedWindow() },
+            openSettings: { [weak self] in self?.showSettingsWindow() }
         )
     }
 
@@ -263,6 +265,7 @@ extension StatusItemController: NSPopoverDelegate {
 struct TrayChrome: Sendable {
     var close: @MainActor @Sendable () -> Void = {}
     var openPinned: @MainActor @Sendable () -> Void = {}
+    var openSettings: @MainActor @Sendable () -> Void = {}
 }
 
 private enum TrayChromeKey: EnvironmentKey {

@@ -164,6 +164,33 @@ import ArchAstroPlatform
         #expect(state.baseURL.hasPrefix("https://"))
     }
 
+    @Test @MainActor func account_menu_identity_uses_current_session_values() async {
+        let state = AppState()
+        #expect(state.accountDisplayName == "Signed-in account")
+        #expect(state.accountOrganization == nil)
+
+        state.userEmail = " calvin@example.com "
+        state.userName = " Calvin "
+        state.orgName = " ArchAstro "
+        #expect(state.accountDisplayName == "Calvin")
+        #expect(state.accountEmail == "calvin@example.com")
+        #expect(state.accountOrganization == "ArchAstro")
+
+        await state.signOut()
+        #expect(state.accountDisplayName == "Signed-in account")
+        #expect(state.accountEmail == nil)
+        #expect(state.accountOrganization == nil)
+    }
+
+    @Test @MainActor func sign_out_stops_background_room_refresh() async {
+        let state = AppState()
+        state.startLiveFeed()
+        #expect(state.isBackgroundRefreshRunning)
+
+        await state.signOut()
+        #expect(!state.isBackgroundRefreshRunning)
+    }
+
     @Test @MainActor func web_handoffs_preserve_network_thread_and_drill_in() {
         let state = AppState()
         state.selectedTab = .activity

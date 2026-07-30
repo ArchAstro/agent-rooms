@@ -26,12 +26,33 @@ final class AppState {
     var browserSignInPending = false
     /// Signed-in user's email, when known.
     var userEmail: String?
+    /// Signed-in user's display name, loaded from `/users/me`.
+    var userName: String?
     /// Signed-in org name, when known.
     var orgName: String?
     var roomLoadError: String?
     var isLoadingRooms = false
     var hasLoadedRooms = false
     var isSendingMessage = false
+
+    var accountDisplayName: String {
+        let name = userName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let name, !name.isEmpty { return name }
+        let email = userEmail?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let email, !email.isEmpty else { return "Signed-in account" }
+        return email
+    }
+
+    var accountEmail: String? {
+        let email = userEmail?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let email, !email.isEmpty, email != accountDisplayName else { return nil }
+        return email
+    }
+
+    var accountOrganization: String? {
+        let organization = orgName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return organization?.isEmpty == false ? organization : nil
+    }
 
     // MARK: Network tray state
 
@@ -241,6 +262,10 @@ final class AppState {
         liveFeedTask = nil
     }
 
+    var isBackgroundRefreshRunning: Bool {
+        liveFeedTask != nil
+    }
+
     /// Internal for tests — the timer loop calls this on cadence.
     func deliverNextLiveEvent() {
         guard !pendingLiveEvents.isEmpty else { return }
@@ -402,6 +427,7 @@ final class AppState {
             currentUserID = result.userId
             phase = .signedIn(makeClient(for: session))
             await refreshRooms()
+            startLiveFeed()
         } catch ArchAgentsAuth.AuthError.cancelled {
             phase = .signedOut
         } catch LoopbackCallbackServer.ServerError.cancelled {
@@ -452,6 +478,7 @@ final class AppState {
             userEmail = email
             phase = .signedIn(client)
             await refreshRooms()
+            startLiveFeed()
         } catch let error as ApiError {
             signInError = error.message
             phase = .signedOut
@@ -462,12 +489,14 @@ final class AppState {
     }
 
     func signOut() async {
+        stopLiveFeed()
         if let client {
             await client.close()
         }
         sessionStore.clear()
         phase = .signedOut
         userEmail = nil
+        userName = nil
         orgName = nil
         activeAppID = nil
         currentUserID = nil
@@ -494,6 +523,10 @@ final class AppState {
             let me = try await client.users.me()
             currentUserID = me.id
             activeAppID = activeAppID ?? me.app
+            userName = me.name
+            if userEmail == nil || userEmail?.isEmpty == true {
+                userEmail = me.email
+            }
             if orgName == nil || orgName?.isEmpty == true {
                 orgName = me.orgName
             }
