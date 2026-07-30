@@ -34,6 +34,10 @@ final class AppState {
     var isLoadingRooms = false
     var hasLoadedRooms = false
     var isSendingMessage = false
+    var messageHistoryByThread: [String: ThreadMessageHistory] = [:]
+    private(set) var loadingOlderThreadIDs: Set<String> = []
+    private var threadsWithLoadedOlderHistory: Set<String> = []
+    private var hasLoadedCurrentUserProfile = false
 
     var accountDisplayName: String {
         let name = userName?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -92,6 +96,13 @@ final class AppState {
     var currentMessages: [ChatMessage] {
         messages.filter { $0.threadID == selectedThread.id }
     }
+    var canLoadOlderMessages: Bool {
+        guard !selectedThread.id.isEmpty else { return false }
+        return messageHistoryByThread[selectedThread.id]?.beforeCursor != nil
+    }
+    var isLoadingOlderMessages: Bool {
+        loadingOlderThreadIDs.contains(selectedThread.id)
+    }
     var currentTasks: [ThreadTask] {
         tasks.filter { $0.threadID == selectedThread.id }
     }
@@ -111,6 +122,8 @@ final class AppState {
     var toast: String?
     private var toastTask: Task<Void, Never>?
     private var liveFeedTask: Task<Void, Never>?
+    private var channelSession: RoomChannelSession?
+    private var channelConnectTask: Task<RoomChannelSession, any Error>?
     private var pendingLiveEvents = TrayPlaceholders.liveFeed
     private var suppressActivityReadTracking = false
 
@@ -159,6 +172,18 @@ final class AppState {
     func markSelectedThreadRead() {
         guard let index = threads.firstIndex(where: { $0.id == selectedThread.id }) else { return }
         threads[index].unreadCount = 0
+        guard let latestMessageID = currentMessages.first?.id,
+              let client
+        else { return }
+        let threadID = selectedThread.id
+        Task { [weak self] in
+            guard let self else { return }
+            let session = try? await requireRoomChannelSession(client: client)
+            try? await session?.markRead(
+                threadID: threadID,
+                messageID: latestMessageID
+            )
+        }
     }
 
     func prepareActivityOverlay(_ event: StreamEvent) {
@@ -212,14 +237,11 @@ final class AppState {
         isSendingMessage = true
         defer { isSendingMessage = false }
         do {
-            try await TeamRoomAPI.post(
-                client: client,
-                appID: activeAppID,
-                userID: currentUserID,
+            let channel = try await requireRoomChannelSession(client: client)
+            try await channel.postMessage(
                 threadID: selectedThread.id,
                 content: trimmed
             )
-            await refreshRooms()
             showToast("Posted to Team Room")
             return true
         } catch let error as ApiError {
@@ -234,8 +256,13 @@ final class AppState {
     func deleteMessage(_ message: ChatMessage) async {
         guard message.isCurrentUser, let client else { return }
         do {
-            try await client.threadMessages.delete(message: message.id)
-            await refreshRooms()
+            let channel = try await requireRoomChannelSession(client: client)
+            try await channel.deleteMessage(
+                threadID: message.threadID,
+                messageID: message.id
+            )
+            messages.removeAll { $0.id == message.id }
+            events.removeAll { $0.id == "event-\(message.id)" }
             showToast("Message deleted")
         } catch let error as ApiError {
             showToast(error.message)
@@ -244,29 +271,272 @@ final class AppState {
         }
     }
 
-    // MARK: Background refresh
+    // MARK: Live SDK channels
 
     func startLiveFeed() {
         guard liveFeedTask == nil else { return }
-        liveFeedTask = Task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(20))
-                guard !Task.isCancelled, isSignedIn, !activityPaused else { continue }
-                await refreshRooms()
-            }
+        liveFeedTask = Task { [weak self] in
+            await self?.runRoomChannelLoop()
         }
     }
 
     func stopLiveFeed() {
         liveFeedTask?.cancel()
         liveFeedTask = nil
+        channelConnectTask?.cancel()
+        channelConnectTask = nil
+        let session = channelSession
+        channelSession = nil
+        Task {
+            await session?.disconnect()
+        }
     }
 
     var isBackgroundRefreshRunning: Bool {
         liveFeedTask != nil
     }
 
-    /// Internal for tests — the timer loop calls this on cadence.
+    private func runRoomChannelLoop() async {
+        var reconnectDelay = 1
+        var hadConnection = false
+
+        while !Task.isCancelled {
+            guard isSignedIn, hasLoadedRooms, let client else {
+                try? await Task.sleep(for: .milliseconds(250))
+                continue
+            }
+
+            let desiredThreadIDs = Set(threads.lazy.map(\.id).filter { !$0.isEmpty })
+            if desiredThreadIDs.isEmpty {
+                try? await Task.sleep(for: .seconds(1))
+                continue
+            }
+
+            if let channelSession,
+               channelSession.isConnected,
+               channelSession.threadIDs == desiredThreadIDs
+            {
+                reconnectDelay = 1
+                try? await Task.sleep(for: .seconds(1))
+                continue
+            }
+
+            let staleSession = channelSession
+            channelSession = nil
+            await staleSession?.disconnect()
+            guard !Task.isCancelled else { return }
+
+            // A bounded SDK history catch-up closes any gap while
+            // the socket was unavailable and also triggers token rotation
+            // before a reconnect attempts its WebSocket handshake.
+            if hadConnection {
+                await syncLatestMessagePages(client: client, notify: true)
+            }
+
+            do {
+                channelSession = try await connectRoomChannels(client: client)
+                if let channelSession {
+                    installChannelMembers(channelSession.members)
+                }
+                hadConnection = true
+                reconnectDelay = 1
+
+                // Subscribe first, then catch up. Any message created during
+                // this request is either in the page or buffered by Channel.
+                await syncLatestMessagePages(client: client, notify: false)
+            } catch {
+                if hadConnection {
+                    showToast("Live connection lost — reconnecting")
+                }
+                try? await Task.sleep(for: .seconds(reconnectDelay))
+                reconnectDelay = min(reconnectDelay * 2, 30)
+            }
+        }
+    }
+
+    private func connectRoomChannels(
+        client: PlatformClient
+    ) async throws -> RoomChannelSession {
+        if let channelConnectTask {
+            return try await channelConnectTask.value
+        }
+        let targetThreads = threads
+        let organizationName = orgName
+        let task = Task<RoomChannelSession, any Error> { [weak self] in
+            try await RoomChannelSession.connect(
+                client: client,
+                threads: targetThreads,
+                organizationName: organizationName
+            ) { event in
+                Task { @MainActor in
+                    self?.handleRoomChannelEvent(event)
+                }
+            }
+        }
+        channelConnectTask = task
+        defer { channelConnectTask = nil }
+        return try await task.value
+    }
+
+    private func requireRoomChannelSession(
+        client: PlatformClient
+    ) async throws -> RoomChannelSession {
+        if let channelSession, channelSession.isConnected {
+            return channelSession
+        }
+        let session = try await connectRoomChannels(client: client)
+        channelSession = session
+        installChannelMembers(session.members)
+        return session
+    }
+
+    private func installChannelMembers(_ channelMembers: [NetworkMember]) {
+        members = channelMembers
+        for index in availableNetworks.indices {
+            let count = channelMembers.count {
+                $0.networkID == availableNetworks[index].id
+            }
+            let role = availableNetworks[index].relationship
+                .split(separator: "·", maxSplits: 1)
+                .first?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                ?? "Member"
+            availableNetworks[index].relationship =
+                "\(role) · \(count) \(count == 1 ? "member" : "members")"
+        }
+        if let refreshed = availableNetworks.first(where: {
+            $0.id == selectedNetwork.id
+        }) {
+            selectedNetwork = refreshed
+        }
+    }
+
+    private func syncLatestMessagePages(
+        client: PlatformClient,
+        notify: Bool
+    ) async {
+        let targetThreads = threads.filter { !$0.id.isEmpty }
+        let userID = currentUserID
+
+        let pages = await withTaskGroup(of: LoadedMessagePage?.self) { group in
+            for thread in targetThreads {
+                group.addTask {
+                    try? await TeamRoomAPI.loadMessagePage(
+                        client: client,
+                        threadID: thread.id,
+                        networkID: thread.networkID,
+                        currentUserID: userID
+                    )
+                }
+            }
+            var loaded: [LoadedMessagePage] = []
+            for await page in group {
+                if let page { loaded.append(page) }
+            }
+            return loaded
+        }
+
+        let knownEventIDs = Set(events.map(\.id))
+        for page in pages {
+            messages = mergeNewestFirst(page.messages, with: messages)
+            events = mergeNewestFirst(page.events, with: events)
+            if !threadsWithLoadedOlderHistory.contains(page.threadID) {
+                messageHistoryByThread[page.threadID] = ThreadMessageHistory(
+                    threadID: page.threadID,
+                    beforeCursor: page.beforeCursor
+                )
+            }
+        }
+
+        guard notify else { return }
+        let ownEventIDs = Set(
+            messages.filter(\.isCurrentUser).map { "event-\($0.id)" }
+        )
+        for event in events.reversed()
+        where !knownEventIDs.contains(event.id) && !ownEventIDs.contains(event.id)
+        {
+            announceLiveEvent(event)
+        }
+    }
+
+    private func handleRoomChannelEvent(_ event: RoomChannelEvent) {
+        switch event {
+        case .messageAdded(let networkID, let payload):
+            guard let mapped = TeamRoomAPI.mapRealtimeMessage(
+                payload,
+                networkID: networkID,
+                currentUserID: currentUserID
+            ) else { return }
+
+            let isNew = !messages.contains { $0.id == mapped.message.id }
+            upsertNewestMessage(mapped)
+            if isNew && !mapped.message.isCurrentUser {
+                announceLiveEvent(mapped.event)
+            }
+
+        case .messageUpdated(let networkID, let payload):
+            guard let mapped = TeamRoomAPI.mapRealtimeMessage(
+                payload,
+                networkID: networkID,
+                currentUserID: currentUserID
+            ) else { return }
+            upsertNewestMessage(mapped)
+
+        case .threadEvent(_, let payload):
+            guard let threadID = payload.threadId,
+                  let index = threads.firstIndex(where: { $0.id == threadID })
+            else { return }
+            switch payload.type {
+            case "unread_count_updated":
+                if let count = payload.payload?["unread_count"]?.intValue {
+                    threads[index].unreadCount = count
+                }
+            case "thread_marked_read":
+                threads[index].unreadCount = 0
+            default:
+                break
+            }
+
+        case .typing(let payload):
+            guard let threadID = payload.threadId else { return }
+            if payload.isTyping == true {
+                typingByThread[threadID] = payload.actor?.name
+                    ?? payload.actor?.alias
+                    ?? "Someone"
+            } else {
+                typingByThread.removeValue(forKey: threadID)
+            }
+        }
+    }
+
+    private func upsertNewestMessage(_ mapped: LoadedRealtimeMessage) {
+        if let messageIndex = messages.firstIndex(where: {
+            $0.id == mapped.message.id
+        }) {
+            messages[messageIndex] = mapped.message
+        } else {
+            messages.insert(mapped.message, at: 0)
+        }
+        if let eventIndex = events.firstIndex(where: {
+            $0.id == mapped.event.id
+        }) {
+            events[eventIndex] = mapped.event
+        } else {
+            events.insert(mapped.event, at: 0)
+        }
+    }
+
+    private func announceLiveEvent(_ event: StreamEvent) {
+        if selectedTab != .activity
+            || event.networkID != selectedNetwork.id
+            || !event.matches(activityFilter)
+        {
+            newEventIDs.insert(event.id)
+        }
+        onNewEvent?(event)
+    }
+
+    /// Internal for placeholder/demo tests; production updates use SDK channels.
     func deliverNextLiveEvent() {
         guard !pendingLiveEvents.isEmpty else { return }
         var event = pendingLiveEvents.removeFirst()
@@ -502,6 +772,10 @@ final class AppState {
         currentUserID = nil
         hasLoadedRooms = false
         roomLoadError = nil
+        messageHistoryByThread = [:]
+        loadingOlderThreadIDs = []
+        threadsWithLoadedOlderHistory = []
+        hasLoadedCurrentUserProfile = false
     }
 
     // MARK: Team Rooms
@@ -520,15 +794,18 @@ final class AppState {
         do {
             let knownEventIDs = Set(events.map(\.id))
             let shouldNotify = hasLoadedRooms
-            let me = try await client.users.me()
-            currentUserID = me.id
-            activeAppID = activeAppID ?? me.app
-            userName = me.name
-            if userEmail == nil || userEmail?.isEmpty == true {
-                userEmail = me.email
-            }
-            if orgName == nil || orgName?.isEmpty == true {
-                orgName = me.orgName
+            if !hasLoadedCurrentUserProfile {
+                let me = try await client.users.me()
+                currentUserID = me.id
+                activeAppID = activeAppID ?? me.app
+                userName = me.name
+                if userEmail == nil || userEmail?.isEmpty == true {
+                    userEmail = me.email
+                }
+                if orgName == nil || orgName?.isEmpty == true {
+                    orgName = me.orgName
+                }
+                hasLoadedCurrentUserProfile = true
             }
 
             let loaded = try await TeamRoomAPI.load(
@@ -536,16 +813,33 @@ final class AppState {
                 currentUserID: currentUserID,
                 organizationName: orgName
             )
+            let refreshedMessages = loaded.flatMap(\.messages)
+            let refreshedEvents = loaded.flatMap(\.events)
+            let hadLiveHistory = !messageHistoryByThread.isEmpty
             let currentUserEventIDs = Set(
-                loaded.flatMap(\.messages)
+                refreshedMessages
                     .filter(\.isCurrentUser)
                     .map { "event-\($0.id)" }
             )
             availableNetworks = loaded.map(\.room)
             members = loaded.flatMap(\.members)
             threads = loaded.flatMap(\.threads)
-            messages = loaded.flatMap(\.messages)
-            events = loaded.flatMap(\.events)
+            let validThreadIDs = Set(threads.map(\.id))
+            messages = hadLiveHistory
+                ? mergeNewestFirst(
+                    refreshedMessages,
+                    with: messages.filter {
+                        validThreadIDs.contains($0.threadID)
+                    }
+                )
+                : refreshedMessages
+            events = hadLiveHistory
+                ? mergeNewestFirst(refreshedEvents, with: events)
+                : refreshedEvents
+            updateMessageHistories(
+                loaded.flatMap(\.messageHistories),
+                validThreadIDs: validThreadIDs
+            )
             workstream = loaded.flatMap(\.workstream)
             tasks = []
             typingByThread = [:]
@@ -578,6 +872,9 @@ final class AppState {
                 ?? currentThreads.first(where: \.isDefault)
                 ?? currentThreads.first
                 ?? .empty(networkID: selectedNetwork.id)
+            if let channelSession, channelSession.isConnected {
+                installChannelMembers(channelSession.members)
+            }
         } catch let error as ApiError {
             if hasLoadedRooms && !availableNetworks.isEmpty {
                 showToast("Room refresh failed: \(error.message)")
@@ -591,6 +888,79 @@ final class AppState {
                 roomLoadError = error.localizedDescription
             }
         }
+    }
+
+    /// Fetch the next older page through the generated thread resource. The
+    /// platform returns pages oldest-first; TeamRoomAPI normalizes them to
+    /// newest-first so each page appends at the bottom without re-sorting.
+    func loadOlderMessages() async {
+        guard let client else { return }
+        let thread = selectedThread
+        guard !thread.id.isEmpty,
+              !loadingOlderThreadIDs.contains(thread.id),
+              let cursor = messageHistoryByThread[thread.id]?.beforeCursor
+        else { return }
+
+        loadingOlderThreadIDs.insert(thread.id)
+        defer { loadingOlderThreadIDs.remove(thread.id) }
+
+        do {
+            let page = try await TeamRoomAPI.loadMessagePage(
+                client: client,
+                threadID: thread.id,
+                networkID: thread.networkID,
+                currentUserID: currentUserID,
+                beforeCursor: cursor
+            )
+            guard threads.contains(where: { $0.id == thread.id }) else { return }
+            appendOlderPage(page)
+        } catch let error as ApiError {
+            showToast("Could not load older messages: \(error.message)")
+        } catch {
+            showToast("Could not load older messages")
+        }
+    }
+
+    func appendOlderPage(_ page: LoadedMessagePage) {
+        let messageIDs = Set(messages.map(\.id))
+        messages.append(
+            contentsOf: page.messages.filter { !messageIDs.contains($0.id) }
+        )
+        let eventIDs = Set(events.map(\.id))
+        events.append(
+            contentsOf: page.events.filter { !eventIDs.contains($0.id) }
+        )
+        messageHistoryByThread[page.threadID] = ThreadMessageHistory(
+            threadID: page.threadID,
+            beforeCursor: page.beforeCursor
+        )
+        threadsWithLoadedOlderHistory.insert(page.threadID)
+    }
+
+    private func updateMessageHistories(
+        _ refreshed: [ThreadMessageHistory],
+        validThreadIDs: Set<String>
+    ) {
+        messageHistoryByThread = messageHistoryByThread.filter {
+            validThreadIDs.contains($0.key)
+        }
+        threadsWithLoadedOlderHistory.formIntersection(validThreadIDs)
+        for history in refreshed {
+            if threadsWithLoadedOlderHistory.contains(history.threadID),
+               messageHistoryByThread[history.threadID] != nil
+            {
+                continue
+            }
+            messageHistoryByThread[history.threadID] = history
+        }
+    }
+
+    private func mergeNewestFirst<Element: Identifiable>(
+        _ refreshed: [Element],
+        with existing: [Element]
+    ) -> [Element] where Element.ID: Hashable {
+        var seen: Set<Element.ID> = []
+        return (refreshed + existing).filter { seen.insert($0.id).inserted }
     }
 
     // MARK: Client construction

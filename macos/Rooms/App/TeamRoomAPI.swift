@@ -1,178 +1,50 @@
 import Foundation
 import ArchAstroPlatform
 
-/// A fully hydrated Team Room. The app deliberately maps platform models at
-/// this boundary so the SwiftUI layer never depends on generated API shapes.
+/// An initially hydrated Team Room. The app deliberately maps platform models
+/// at this boundary so SwiftUI receives a bounded first message page and never
+/// depends on generated API shapes.
 struct LoadedTeamRoom: Sendable {
     var room: NetworkSnapshot
     var members: [NetworkMember]
     var threads: [NetworkThread]
     var messages: [ChatMessage]
+    var messageHistories: [ThreadMessageHistory]
     var events: [StreamEvent]
     var workstream: [WorkstreamItem]
 }
 
-struct TeamRoomMessageInput: Codable, Sendable {
-    var content: String
-    var user: String
+struct ThreadMessageHistory: Sendable, Equatable {
+    var threadID: String
+    var beforeCursor: String?
+}
+
+struct LoadedMessagePage: Sendable {
+    var threadID: String
+    var messages: [ChatMessage]
+    var events: [StreamEvent]
+    var beforeCursor: String?
+    var afterCursor: String?
+}
+
+struct LoadedRealtimeMessage: Sendable {
+    var message: ChatMessage
+    var event: StreamEvent
 }
 
 enum TeamRoomAPIError: LocalizedError {
     case tooManyTeamPages
-    case cannotPost
 
     var errorDescription: String? {
         switch self {
         case .tooManyTeamPages:
             "Rooms could not safely load every team membership page."
-        case .cannotPost:
-            "This saved session can read rooms but cannot post. Sign in again to refresh it."
         }
     }
 }
 
 enum TeamRoomAPI {
-    private struct TeamPage: Decodable, Sendable {
-        var data: [TeamDTO]
-        var hasNext: Bool
-
-        enum CodingKeys: String, CodingKey {
-            case data
-            case hasNext = "has_next"
-        }
-    }
-
-    private struct TeamDTO: Decodable, Sendable {
-        var id: String
-        var name: String?
-        var membershipStatus: String?
-
-        enum CodingKeys: String, CodingKey {
-            case id, name
-            case membershipStatus = "membership_status"
-        }
-    }
-
-    private struct ThreadEnvelope: Decodable, Sendable {
-        var data: [ThreadDTO]
-    }
-
-    private struct ThreadDTO: Decodable, Sendable {
-        var id: String
-        var title: String?
-        var isDefault: Bool?
-        var unreadCount: Int?
-
-        enum CodingKeys: String, CodingKey {
-            case id, title
-            case isDefault = "is_default"
-            case unreadCount = "unread_count"
-        }
-    }
-
-    private struct MemberEnvelope: Decodable, Sendable {
-        var data: [MemberDTO]
-    }
-
-    private struct MemberDTO: Decodable, Sendable {
-        var id: String
-        var joinedAt: String?
-        var name: String?
-        var role: String?
-        var type: String?
-        var user: UserDTO?
-        var agent: AgentDTO?
-
-        enum CodingKeys: String, CodingKey {
-            case id, name, role, type, user, agent
-            case joinedAt = "joined_at"
-        }
-    }
-
-    private struct UserDTO: Decodable, Sendable {
-        var id: String
-        var name: String?
-        var email: String?
-        var orgName: String?
-
-        enum CodingKeys: String, CodingKey {
-            case id, name, email
-            case orgName = "org_name"
-        }
-    }
-
-    private struct AgentDTO: Decodable, Sendable {
-        var id: String
-        var name: String?
-    }
-
-    struct MessageEnvelope: Decodable, Sendable {
-        var data: MessagePage
-    }
-
-    struct MessagePage: Decodable, Sendable {
-        var messages: [MessageDTO]
-    }
-
-    struct MessageDTO: Decodable, Sendable {
-        struct ActorDTO: Decodable, Sendable {
-            var id: String?
-            var name: String?
-            var alias: String?
-        }
-
-        struct AttachmentDTO: Decodable, Sendable {
-            struct ImageSourceDTO: Decodable, Sendable {
-                var url: String?
-            }
-
-            var id: String
-            var type: String
-            var filename: String?
-            var contentType: String?
-            var url: String?
-            var title: String?
-            var description: String?
-            var imageURL: String?
-            var imageSource: ImageSourceDTO?
-            var width: Int?
-            var height: Int?
-            var imageWidth: Int?
-            var imageHeight: Int?
-            var version: Int?
-            var name: String?
-            var mediaType: String?
-            var status: String?
-            var object: JSONValue?
-
-            enum CodingKeys: String, CodingKey {
-                case id, type, filename, url, title, description, width, height
-                case version, name, status, object
-                case contentType = "content_type"
-                case imageURL = "image_url"
-                case imageSource = "image_source"
-                case imageWidth = "image_width"
-                case imageHeight = "image_height"
-                case mediaType = "media_type"
-            }
-        }
-
-        var actors: [ActorDTO]?
-        var agent: String?
-        var agentMode: String?
-        var attachments: [AttachmentDTO]?
-        var content: String?
-        var createdAt: String?
-        var id: String
-        var metadata: [String: JSONValue]?
-        var thread: String?
-
-        enum CodingKeys: String, CodingKey {
-            case actors, agent, attachments, content, id, metadata, thread
-            case agentMode = "agent_mode"
-            case createdAt = "created_at"
-        }
-    }
+    static let messagePageSize = 20
 
     static func load(
         client: PlatformClient,
@@ -180,137 +52,225 @@ enum TeamRoomAPI {
         organizationName: String?
     ) async throws -> [LoadedTeamRoom] {
         let teams = try await joinedTeams(client: client)
-        var loaded: [LoadedTeamRoom] = []
+        return try await withThrowingTaskGroup(
+            of: (Int, LoadedTeamRoom?).self
+        ) { group in
+            var nextTeamIndex = 0
+            let concurrentTeamLimit = min(6, teams.count)
 
-        for team in teams {
-            let threadEnvelope: ThreadEnvelope = try await client.http.request(
-                "/api/v1/teams/\(team.id)/threads"
-            )
-            let teamThreads = threadEnvelope.data
-            let roomThreads = teamThreads.filter {
-                ($0.title ?? "").localizedCaseInsensitiveCompare("Team Room") == .orderedSame
-            }
-            guard !roomThreads.isEmpty else { continue }
-
-            let memberResponse: MemberEnvelope = try await client.http.request(
-                "/api/v1/teams/\(team.id)/members"
-            )
-            let roomMembers = memberResponse.data.map { membership in
-                let name = membership.name
-                    ?? membership.user?.name
-                    ?? membership.user?.email
-                    ?? membership.agent?.name
-                    ?? "Team member"
-                let memberID = membership.user?.id
-                    ?? membership.agent?.id
-                    ?? membership.id
-                let kind: NetworkMember.Kind = membership.type == "agent" ? .agent : .user
-                return NetworkMember(
-                    id: "\(team.id)-\(memberID)",
-                    networkID: team.id,
-                    name: name,
-                    initials: initials(for: name),
-                    kind: kind,
-                    role: (membership.role ?? "member").capitalized,
-                    organization: membership.user?.orgName ?? organizationName ?? "Team",
-                    joined: relativeTime(membership.joinedAt),
-                    presence: .active
-                )
-            }
-
-            var mappedThreads: [NetworkThread] = []
-            var mappedMessages: [ChatMessage] = []
-            var mappedEvents: [StreamEvent] = []
-            var mappedWorkstream: [WorkstreamItem] = []
-
-            for thread in roomThreads {
-                mappedThreads.append(
-                    NetworkThread(
-                        id: thread.id,
-                        networkID: team.id,
-                        title: thread.title ?? "Team Room",
-                        isDefault: thread.isDefault ?? true,
-                        unreadCount: thread.unreadCount ?? 0
-                    )
-                )
-
-                let response: MessageEnvelope = try await client.http.request(
-                    "/api/v1/threads/\(thread.id)/messages",
-                    query: [("limit", "100")]
-                )
-                let messages = response.data.messages.map {
-                    mapMessage($0, currentUserID: currentUserID)
-                }
-                mappedMessages.append(contentsOf: messages)
-                mappedEvents.append(contentsOf: response.data.messages.reversed().map {
-                    mapEvent($0, networkID: team.id)
-                })
-
-                if let latest = messages.last {
-                    mappedWorkstream.append(
-                        WorkstreamItem(
-                            id: "work-\(thread.id)",
-                            networkID: team.id,
-                            kind: .thread,
-                            title: thread.title ?? "Team Room",
-                            detail: "\(messages.count) recent updates · latest from \(latest.author)",
-                            time: latest.time
+            func addTeam(at index: Int) {
+                let team = teams[index]
+                group.addTask {
+                    (
+                        index,
+                        try await load(
+                            team: team,
+                            client: client,
+                            currentUserID: currentUserID,
+                            organizationName: organizationName
                         )
                     )
                 }
             }
 
-            let count = roomMembers.count
-            let role = team.membershipStatus?.capitalized ?? "Member"
-            loaded.append(
-                LoadedTeamRoom(
-                    room: NetworkSnapshot(
-                        id: team.id,
-                        name: team.name ?? "Team Room",
-                        relationship: "\(role) · \(count) \(count == 1 ? "member" : "members")",
-                        unreadCount: mappedThreads.reduce(0) { $0 + $1.unreadCount },
-                        hostOrganization: organizationName ?? "Your organization",
-                        collaboratorOrganization: "Shared Team Room",
-                        slackChannel: nil
-                    ),
-                    members: roomMembers,
-                    threads: mappedThreads,
-                    messages: mappedMessages,
-                    events: mappedEvents,
-                    workstream: mappedWorkstream
-                )
-            )
+            for _ in 0..<concurrentTeamLimit {
+                addTeam(at: nextTeamIndex)
+                nextTeamIndex += 1
+            }
+
+            var loaded: [(Int, LoadedTeamRoom)] = []
+            while let (index, room) = try await group.next() {
+                if let room {
+                    loaded.append((index, room))
+                }
+                if nextTeamIndex < teams.count {
+                    addTeam(at: nextTeamIndex)
+                    nextTeamIndex += 1
+                }
+            }
+            return loaded.sorted { $0.0 < $1.0 }.map(\.1)
         }
-        return loaded
     }
 
-    static func post(
+    static func loadMessagePage(
         client: PlatformClient,
-        appID: String?,
-        userID: String?,
         threadID: String,
-        content: String
-    ) async throws {
-        guard let appID, let userID else { throw TeamRoomAPIError.cannotPost }
-        let _: JSONValue = try await client.http.request(
-            "/protected/api/v1/developer/apps/\(appID)/threads/\(threadID)/messages",
-            method: "POST",
-            body: TeamRoomMessageInput(content: content, user: userID)
+        networkID: String,
+        currentUserID: String?,
+        beforeCursor: String? = nil,
+        limit: Int = messagePageSize
+    ) async throws -> LoadedMessagePage {
+        let response = try await client.threads.messages(
+            thread: threadID,
+            beforeCursor: beforeCursor,
+            limit: min(max(limit, 1), 100)
+        )
+        return mapMessagePage(
+            response.data,
+            threadID: threadID,
+            networkID: networkID,
+            currentUserID: currentUserID
         )
     }
 
+    static func mapMessagePage(
+        _ page: ThreadMessagesResponseData,
+        threadID: String,
+        networkID: String,
+        currentUserID: String?
+    ) -> LoadedMessagePage {
+        // The server returns each page oldest-first. The Mac room is a
+        // newest-first feed, so reverse once at the API boundary and append
+        // older pages at the bottom.
+        let newestFirst = page.messages.reversed()
+        return LoadedMessagePage(
+            threadID: threadID,
+            messages: newestFirst.map {
+                mapMessage($0, currentUserID: currentUserID)
+            },
+            events: newestFirst.map {
+                mapEvent($0, networkID: networkID)
+            },
+            beforeCursor: page.beforeCursor,
+            afterCursor: page.afterCursor
+        )
+    }
+
+    private static func load(
+        team: TeamListResponseDataItem,
+        client: PlatformClient,
+        currentUserID: String?,
+        organizationName: String?
+    ) async throws -> LoadedTeamRoom? {
+        let threadEnvelope = try await client.teams.threads.list(team: team.id)
+        let roomThreads = threadEnvelope.data.filter {
+            ($0.title ?? "").localizedCaseInsensitiveCompare("Team Room") == .orderedSame
+        }
+        guard !roomThreads.isEmpty else { return nil }
+
+        var mappedThreads: [NetworkThread] = []
+        var mappedMessages: [ChatMessage] = []
+        var mappedHistories: [ThreadMessageHistory] = []
+        var mappedEvents: [StreamEvent] = []
+        var mappedWorkstream: [WorkstreamItem] = []
+
+        for thread in roomThreads {
+            mappedThreads.append(
+                NetworkThread(
+                    id: thread.id,
+                    networkID: team.id,
+                    title: thread.title ?? "Team Room",
+                    isDefault: thread.isDefault ?? true,
+                    unreadCount: thread.unreadCount ?? 0
+                )
+            )
+
+            let page = try await loadMessagePage(
+                client: client,
+                threadID: thread.id,
+                networkID: team.id,
+                currentUserID: currentUserID
+            )
+            mappedMessages.append(contentsOf: page.messages)
+            mappedEvents.append(contentsOf: page.events)
+            mappedHistories.append(
+                ThreadMessageHistory(
+                    threadID: thread.id,
+                    beforeCursor: page.beforeCursor
+                )
+            )
+
+            if let latest = page.messages.first {
+                let countLabel = page.beforeCursor == nil
+                    ? "\(page.messages.count)"
+                    : "\(page.messages.count)+"
+                mappedWorkstream.append(
+                    WorkstreamItem(
+                        id: "work-\(thread.id)",
+                        networkID: team.id,
+                        kind: .thread,
+                        title: thread.title ?? "Team Room",
+                        detail: "\(countLabel) updates · latest from \(latest.author)",
+                        time: latest.time
+                    )
+                )
+            }
+        }
+
+        let role = team.membershipStatus?.capitalized ?? "Member"
+        return LoadedTeamRoom(
+            room: NetworkSnapshot(
+                id: team.id,
+                name: team.name ?? "Team Room",
+                relationship: "\(role) · Live Team Room",
+                unreadCount: mappedThreads.reduce(0) { $0 + $1.unreadCount },
+                hostOrganization: organizationName ?? "Your organization",
+                collaboratorOrganization: "Shared Team Room",
+                slackChannel: nil
+            ),
+            // The SDK Channel join includes the room's polymorphic user/agent
+            // member list without forcing the REST membership timestamp model.
+            // RoomChannelSession installs those members immediately after join.
+            members: [],
+            threads: mappedThreads,
+            messages: mappedMessages,
+            messageHistories: mappedHistories,
+            events: mappedEvents,
+            workstream: mappedWorkstream
+        )
+    }
+
+    static func mapChannelMembers(
+        joinResponse: JSONValue?,
+        networkID: String,
+        organizationName: String?
+    ) -> [NetworkMember] {
+        let data = joinResponse?["data"]
+        let metadata = data?["metadata"]
+            ?? data?["chunk"]?["metadata"]
+        guard let rawMembers = metadata?["members"]?.arrayValue else { return [] }
+
+        return rawMembers.compactMap { raw in
+            guard let object = raw.objectValue else { return nil }
+            let type = object["type"]?.stringValue ?? "user"
+            let principal = type == "agent"
+                ? object["agent"]?.objectValue
+                : object["user"]?.objectValue
+            let principalID = object[type == "agent" ? "agent_id" : "user_id"]?.stringValue
+                ?? principal?["id"]?.stringValue
+            guard let principalID else { return nil }
+            let name = principal?["name"]?.stringValue
+                ?? principal?["email"]?.stringValue
+                ?? (type == "agent" ? "Agent" : "Team member")
+            return NetworkMember(
+                id: "\(networkID)-\(principalID)",
+                networkID: networkID,
+                name: name,
+                initials: initials(for: name),
+                kind: type == "agent" ? .agent : .user,
+                role: (
+                    object["membership_type"]?.stringValue
+                        ?? object["role"]?.stringValue
+                        ?? "member"
+                ).capitalized,
+                organization: principal?["org_name"]?.stringValue
+                    ?? organizationName
+                    ?? "Team",
+                joined: "",
+                presence: .active
+            )
+        }
+    }
+
     private static func joinedTeams(client: PlatformClient) async throws
-        -> [TeamDTO]
+        -> [TeamListResponseDataItem]
     {
-        var teams: [TeamDTO] = []
+        var teams: [TeamListResponseDataItem] = []
         for page in 1...20 {
-            let response: TeamPage = try await client.http.request(
-                "/api/v1/teams",
-                query: [
-                    ("page", String(page)),
-                    ("page_size", "100"),
-                    ("membership", "joined"),
-                ]
+            let response = try await client.teams.list(
+                page: page,
+                pageSize: 100,
+                membership: "joined"
             )
             teams.append(contentsOf: response.data)
             if !response.hasNext { return teams }
@@ -319,7 +279,7 @@ enum TeamRoomAPI {
     }
 
     static func mapMessage(
-        _ message: MessageDTO,
+        _ message: ThreadMessagesResponseDataMessagesItem,
         currentUserID: String?
     ) -> ChatMessage {
         let actor = message.actors?.first
@@ -347,22 +307,74 @@ enum TeamRoomAPI {
                     url: $0.url,
                     title: $0.title,
                     description: $0.description,
-                    imageURL: $0.imageURL,
+                    imageURL: $0.imageUrl,
                     imageSourceURL: $0.imageSource?.url,
                     width: $0.width ?? $0.imageWidth,
                     height: $0.height ?? $0.imageHeight,
                     version: $0.version,
                     name: $0.name,
                     mediaType: $0.mediaType,
-                    status: $0.status,
-                    object: $0.object
+                    status: nil,
+                    object: $0.object.map(JSONValue.object)
                 )
             } ?? []
         )
     }
 
+    static func mapRealtimeMessage(
+        _ payload: ApiChatMessageAddedPayload,
+        networkID: String,
+        currentUserID: String?
+    ) -> LoadedRealtimeMessage? {
+        guard let message = payload.message else { return nil }
+        return mapRealtimeMessage(
+            message,
+            fallbackThreadID: payload.threadId,
+            networkID: networkID,
+            currentUserID: currentUserID
+        )
+    }
+
+    static func mapRealtimeMessage(
+        _ payload: ApiChatMessageUpdatedPayload,
+        networkID: String,
+        currentUserID: String?
+    ) -> LoadedRealtimeMessage? {
+        guard let message = payload.message else { return nil }
+        return mapRealtimeMessage(
+            message,
+            fallbackThreadID: payload.threadId,
+            networkID: networkID,
+            currentUserID: currentUserID
+        )
+    }
+
+    /// Channel and REST message schemas are generated from the same platform
+    /// contract but have operation-specific Swift names. Re-decode through the
+    /// SDK's shared JSON codec so presentation mapping has one source of truth.
+    private static func mapRealtimeMessage(
+        _ message: some Encodable,
+        fallbackThreadID: String?,
+        networkID: String,
+        currentUserID: String?
+    ) -> LoadedRealtimeMessage? {
+        guard
+            let json = try? JSONValue(encodable: message),
+            var sdkMessage = try? json.decode(
+                ThreadMessagesResponseDataMessagesItem.self
+            )
+        else { return nil }
+        if sdkMessage.thread == nil {
+            sdkMessage.thread = fallbackThreadID
+        }
+        return LoadedRealtimeMessage(
+            message: mapMessage(sdkMessage, currentUserID: currentUserID),
+            event: mapEvent(sdkMessage, networkID: networkID)
+        )
+    }
+
     private static func mapEvent(
-        _ message: MessageDTO,
+        _ message: ThreadMessagesResponseDataMessagesItem,
         networkID: String
     ) -> StreamEvent {
         let actor = message.actors?.first

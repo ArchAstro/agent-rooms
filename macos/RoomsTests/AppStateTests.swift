@@ -31,6 +31,43 @@ import ArchAstroPlatform
         #expect(state.currentTasks.allSatisfy { $0.threadID == state.selectedThread.id })
     }
 
+    @Test @MainActor func older_pages_append_at_the_bottom_without_duplicates() {
+        let state = AppState()
+        let thread = NetworkThread(
+            id: "thr_paged",
+            networkID: "team_paged",
+            title: "Team Room",
+            isDefault: true,
+            unreadCount: 0
+        )
+        state.threads = [thread]
+        state.selectedThread = thread
+        state.messages = [
+            message(id: "msg_3", threadID: thread.id),
+            message(id: "msg_2", threadID: thread.id),
+        ]
+        state.messageHistoryByThread[thread.id] = ThreadMessageHistory(
+            threadID: thread.id,
+            beforeCursor: "page-2"
+        )
+
+        state.appendOlderPage(
+            LoadedMessagePage(
+                threadID: thread.id,
+                messages: [
+                    message(id: "msg_2", threadID: thread.id),
+                    message(id: "msg_1", threadID: thread.id),
+                ],
+                events: [],
+                beforeCursor: nil,
+                afterCursor: "newer-page"
+            )
+        )
+
+        #expect(state.currentMessages.map(\.id) == ["msg_3", "msg_2", "msg_1"])
+        #expect(!state.canLoadOlderMessages)
+    }
+
     @Test @MainActor func composer_requires_a_live_platform_session() async {
         let state = AppState()
         let sent = await state.sendMessage("Status is green")
@@ -182,7 +219,7 @@ import ArchAstroPlatform
         #expect(state.accountOrganization == nil)
     }
 
-    @Test @MainActor func sign_out_stops_background_room_refresh() async {
+    @Test @MainActor func sign_out_stops_live_room_channels() async {
         let state = AppState()
         state.startLiveFeed()
         #expect(state.isBackgroundRefreshRunning)
@@ -207,6 +244,21 @@ import ArchAstroPlatform
         state.archagentsURL = "https://host.example/archagents/"
         #expect(state.webAppURL()?.path == "/archagents/teams/\(state.selectedNetwork.id)")
         UserDefaults.standard.removeObject(forKey: "archagentsURL")
+    }
+
+    private func message(id: String, threadID: String) -> ChatMessage {
+        ChatMessage(
+            id: id,
+            threadID: threadID,
+            author: "Teammate",
+            initials: "T",
+            organization: "Team",
+            body: id,
+            time: "now",
+            isCurrentUser: false,
+            agentMode: nil,
+            attachments: []
+        )
     }
 }
 
@@ -280,23 +332,31 @@ import ArchAstroPlatform
         #expect(rooms.allSatisfy { $0.threads.allSatisfy { $0.title == "Team Room" } })
         #expect(rooms.contains { !$0.messages.isEmpty })
 
-        let marker = "Rooms macOS live smoke \(UUID().uuidString)"
-        let threadID = try #require(rooms.first?.threads.first?.id)
-        try await TeamRoomAPI.post(
+        let allThreads = rooms.flatMap(\.threads)
+        let channel = try await RoomChannelSession.connect(
             client: client,
-            appID: credentials.appID,
-            userID: credentials.userID,
-            threadID: threadID,
-            content: marker
+            threads: allThreads,
+            organizationName: "Live account",
+            onEvent: { _ in }
         )
-        let updated = try await TeamRoomAPI.load(
+        defer { Task { await channel.disconnect() } }
+
+        let marker = "Rooms macOS live smoke \(UUID().uuidString)"
+        let thread = try #require(allThreads.first)
+        try await channel.postMessage(threadID: thread.id, content: marker)
+        try await Task.sleep(for: .milliseconds(250))
+        let updated = try await TeamRoomAPI.loadMessagePage(
             client: client,
+            threadID: thread.id,
+            networkID: thread.networkID,
             currentUserID: credentials.userID,
-            organizationName: "Live account"
         )
         let smokeMessage = try #require(
-            updated.flatMap(\.messages).first(where: { $0.body == marker })
+            updated.messages.first(where: { $0.body == marker })
         )
-        try await client.threadMessages.delete(message: smokeMessage.id)
+        try await channel.deleteMessage(
+            threadID: thread.id,
+            messageID: smokeMessage.id
+        )
     }
 }

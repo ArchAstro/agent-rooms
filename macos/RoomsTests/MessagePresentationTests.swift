@@ -99,8 +99,8 @@ import ArchAstroPlatform
             """.utf8
         )
 
-        let envelope = try JSONDecoder().decode(
-            TeamRoomAPI.MessageEnvelope.self,
+        let envelope = try JSONCoding.decoder.decode(
+            ThreadMessagesResponse.self,
             from: data
         )
         let message = TeamRoomAPI.mapMessage(
@@ -132,6 +132,120 @@ import ArchAstroPlatform
         #expect(link.width == 640)
         #expect(link.height == 360)
         #expect(link.imageURL == "https://example.com/preview.png")
+    }
+
+    @Test func message_pages_keep_cursors_and_present_newest_first() throws {
+        let data = Data(
+            """
+            {
+              "data": {
+                "messages": [
+                  {"id": "msg_1", "thread": "thr_room", "content": "Oldest"},
+                  {"id": "msg_2", "thread": "thr_room", "content": "Middle"},
+                  {"id": "msg_3", "thread": "thr_room", "content": "Newest"}
+                ],
+                "before_cursor": "older-page",
+                "after_cursor": null
+              }
+            }
+            """.utf8
+        )
+
+        let envelope = try JSONCoding.decoder.decode(
+            ThreadMessagesResponse.self,
+            from: data
+        )
+        let page = TeamRoomAPI.mapMessagePage(
+            envelope.data,
+            threadID: "thr_room",
+            networkID: "team_room",
+            currentUserID: nil
+        )
+
+        #expect(TeamRoomAPI.messagePageSize == 20)
+        #expect(page.messages.map(\.id) == ["msg_3", "msg_2", "msg_1"])
+        #expect(page.events.map(\.id) == [
+            "event-msg_3",
+            "event-msg_2",
+            "event-msg_1",
+        ])
+        #expect(page.beforeCursor == "older-page")
+        #expect(page.afterCursor == nil)
+    }
+
+    @Test func generated_channel_messages_use_the_same_presentation_mapping() throws {
+        let payload = try JSONCoding.decoder.decode(
+            ApiChatMessageAddedPayload.self,
+            from: Data(
+                """
+                {
+                  "thread_id": "thr_room",
+                  "before_cursor": "before-live",
+                  "message": {
+                    "id": "msg_live",
+                    "thread": "thr_room",
+                    "content": "Live from Channel",
+                    "created_at": "2026-07-29T20:00:00Z",
+                    "actors": [{"id": "user-usr_me", "name": "Calvin"}],
+                    "attachments": []
+                  }
+                }
+                """.utf8
+            )
+        )
+
+        let mapped = try #require(
+            TeamRoomAPI.mapRealtimeMessage(
+                payload,
+                networkID: "team_room",
+                currentUserID: "usr_me"
+            )
+        )
+        #expect(mapped.message.id == "msg_live")
+        #expect(mapped.message.threadID == "thr_room")
+        #expect(mapped.message.isCurrentUser)
+        #expect(mapped.event.id == "event-msg_live")
+    }
+
+    @Test func channel_join_metadata_maps_users_and_agents_without_timestamp_dtos() throws {
+        let response: JSONValue = [
+            "data": [
+                "metadata": [
+                    "members": [
+                        [
+                            "type": "user",
+                            "user_id": "usr_calvin",
+                            "membership_type": "owner",
+                            "user": [
+                                "id": "usr_calvin",
+                                "name": "Calvin",
+                                "org_name": "ArchAstro",
+                            ],
+                        ],
+                        [
+                            "type": "agent",
+                            "agent_id": "agi_fleet",
+                            "membership_type": "member",
+                            "agent": [
+                                "id": "agi_fleet",
+                                "name": "Fleet",
+                                "org_name": "ArchAstro",
+                            ],
+                        ],
+                    ]
+                ]
+            ]
+        ]
+
+        let members = TeamRoomAPI.mapChannelMembers(
+            joinResponse: response,
+            networkID: "team_room",
+            organizationName: nil
+        )
+
+        #expect(members.map(\.name) == ["Calvin", "Fleet"])
+        #expect(members.map(\.kind) == [.user, .agent])
+        #expect(members.map(\.role) == ["Owner", "Member"])
     }
 
     @Test func chart_payloads_cover_every_web_chart_family() throws {
