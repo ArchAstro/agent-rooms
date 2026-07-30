@@ -198,6 +198,11 @@ struct MessageMention: Equatable, Sendable {
     }
 }
 
+enum MentionNotificationCompletionHandlers {
+    static let authorization: @Sendable (Bool, (any Error)?) -> Void = { _, _ in }
+    static let delivery: @Sendable ((any Error)?) -> Void = { _ in }
+}
+
 @MainActor
 final class MentionNotifier {
     private let center: UNUserNotificationCenter
@@ -216,7 +221,10 @@ final class MentionNotifier {
                 options: []
             )
         ])
-        center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        center.requestAuthorization(
+            options: [.alert, .sound],
+            completionHandler: MentionNotificationCompletionHandlers.authorization
+        )
     }
 
     func deliver(_ mention: MessageMention) {
@@ -225,6 +233,9 @@ final class MentionNotifier {
             content: mention.content(),
             trigger: nil
         )
-        center.add(request) { _ in }
+        center.add(
+            request,
+            withCompletionHandler: MentionNotificationCompletionHandlers.delivery
+        )
     }
 }

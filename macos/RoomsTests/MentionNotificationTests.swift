@@ -3,6 +3,15 @@ import Testing
 import UserNotifications
 @testable import Rooms
 
+@Suite struct MentionNotificationCompletionHandlerTests {
+    @Test func callbacks_can_run_outside_the_main_actor() async {
+        await Task.detached {
+            MentionNotificationCompletionHandlers.authorization(false, nil)
+            MentionNotificationCompletionHandlers.delivery(nil)
+        }.value
+    }
+}
+
 @Suite struct MentionMatcherTests {
     private let identity = MentionIdentity(
         fullName: "Calvin Giddings",
