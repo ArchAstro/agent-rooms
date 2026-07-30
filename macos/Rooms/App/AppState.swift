@@ -446,7 +446,7 @@ final class AppState {
         activeAuthServer?.cancel()
     }
 
-    /// Email/password fallback via `PlatformClient.withCredentials`.
+    /// Email/password fallback using an attributed platform client.
     func signIn(email: String, password: String) async {
         guard !publishableKey.isEmpty else {
             signInError = "Set a publishable key in Settings first."
@@ -455,28 +455,28 @@ final class AppState {
         phase = .signingIn
         signInError = nil
         do {
-            let client = try await PlatformClient.withCredentials(
+            let authClient = PlatformClient(
+                baseUrl: baseURL,
+                defaultHeaders: StoredSession.platformHeaders(apiKey: publishableKey)
+            )
+            defer { Task { await authClient.close() } }
+            let tokens = try await authClient.auth.login(email: email, password: password)
+            guard let accessToken = tokens.accessToken else {
+                throw PlatformClientError.loginFailed("Login did not return an access token")
+            }
+            let session = StoredSession(
+                kind: .password,
+                baseURL: baseURL,
+                accessToken: accessToken,
+                refreshToken: tokens.refreshToken,
                 apiKey: publishableKey,
                 email: email,
-                password: password,
-                baseUrl: baseURL
+                appId: nil,
+                userId: nil
             )
-            if let accessToken = client.http.currentAccessToken() {
-                sessionStore.save(
-                    StoredSession(
-                        kind: .password,
-                        baseURL: baseURL,
-                        accessToken: accessToken,
-                        refreshToken: client.refreshToken,
-                        apiKey: publishableKey,
-                        email: email,
-                        appId: nil,
-                        userId: nil
-                    )
-                )
-            }
+            sessionStore.save(session)
             userEmail = email
-            phase = .signedIn(client)
+            phase = .signedIn(makeClient(for: session))
             await refreshRooms()
             startLiveFeed()
         } catch let error as ApiError {
@@ -603,10 +603,7 @@ final class AppState {
     /// org-login sessions. Password sessions refresh via the standard
     /// publishable-key `/api/v1/auth/refresh`.
     private func makeClient(for session: StoredSession) -> PlatformClient {
-        var headers: [String: String] = [:]
-        if let apiKey = session.apiKey {
-            headers["x-archastro-api-key"] = apiKey
-        }
+        let headers = session.platformHeaders
         let client = PlatformClient(
             baseUrl: session.baseURL,
             accessToken: session.accessToken,

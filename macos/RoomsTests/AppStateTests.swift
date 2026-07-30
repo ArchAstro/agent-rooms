@@ -232,6 +232,27 @@ import ArchAstroPlatform
         #expect(decoded.userId == "usr_test")
         #expect(decoded.apiKey == nil)
     }
+
+    @Test func platform_headers_attribute_keyless_and_password_sessions() {
+        let keyless = StoredSession(
+            kind: .archagents,
+            baseURL: "https://platform.archastro.ai",
+            accessToken: "token"
+        )
+        #expect(keyless.platformHeaders == ["x-client-source": "rooms-skill"])
+
+        let password = StoredSession(
+            kind: .password,
+            baseURL: "https://platform.archastro.ai",
+            accessToken: "token",
+            apiKey: "pk_test"
+        )
+        #expect(password.platformHeaders == [
+            "x-client-source": "rooms-skill",
+            "x-archastro-api-key": "pk_test",
+        ])
+        #expect(StoredSession.platformHeaders(apiKey: "pk_test") == password.platformHeaders)
+    }
 }
 
 @Suite struct TeamRoomAPITests {

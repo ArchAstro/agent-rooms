@@ -46,8 +46,12 @@ class ContractServer(http.server.BaseHTTPRequestHandler):
         self.__class__.writes.append((self.command, self.path, raw))
         return json.loads(raw or b"{}")
 
-    def do_GET(self):
+    def assert_client_identity(self):
         assert self.headers.get("Authorization") == "Bearer room-test-token"
+        assert self.headers.get("X-Client-Source") == "rooms-skill"
+
+    def do_GET(self):
+        self.assert_client_identity()
         self.__class__.reads.append(self.path)
         parsed = urlsplit(self.path)
         if parsed.path == "/api/v1/users/me":
@@ -74,7 +78,7 @@ class ContractServer(http.server.BaseHTTPRequestHandler):
         return {key: artifact[key] for key in ("id", "name", "version", "team", "thread", "file_url", "file_name", "content_type", "created_at", "updated_at")}
 
     def do_POST(self):
-        assert self.headers.get("Authorization") == "Bearer room-test-token"
+        self.assert_client_identity()
         body = self.body()
         if self.path == self.api + "/artifacts":
             assert body["team"] == "team-test" and body["thread"] == "thread-test", body
@@ -117,7 +121,7 @@ class ContractServer(http.server.BaseHTTPRequestHandler):
             self.reply(404, {"error": "missing"})
 
     def do_PUT(self):
-        assert self.headers.get("Authorization") == "Bearer room-test-token"
+        self.assert_client_identity()
         body = self.body()
         assert self.path.startswith(self.api + "/artifacts/")
         aid = self.path.rsplit("/", 1)[-1]

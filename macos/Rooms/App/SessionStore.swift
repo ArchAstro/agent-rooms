@@ -3,6 +3,8 @@ import Security
 
 /// Persisted session credentials.
 struct StoredSession: Codable {
+    static let clientSource = "rooms-skill"
+
     enum Kind: String, Codable {
         /// Browser sign-in through archagents.com's cli-auth handoff.
         case archagents
@@ -25,6 +27,18 @@ struct StoredSession: Codable {
     /// Team Room kit. Optional for sessions saved by older app versions.
     var appId: String?
     var userId: String?
+
+    static func platformHeaders(apiKey: String? = nil) -> [String: String] {
+        var headers = ["x-client-source": Self.clientSource]
+        if let apiKey {
+            headers["x-archastro-api-key"] = apiKey
+        }
+        return headers
+    }
+
+    var platformHeaders: [String: String] {
+        Self.platformHeaders(apiKey: apiKey)
+    }
 }
 
 /// Keychain-backed storage for the signed-in session, scoped to this app.

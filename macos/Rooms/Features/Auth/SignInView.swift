@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Credential sign-in sheet. Uses the publishable key and base URL from
-/// Settings; authenticates via `PlatformClient.withCredentials`.
+/// Settings.
 struct SignInView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.dismiss) private var dismiss

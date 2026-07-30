@@ -53,7 +53,7 @@ Rooms/
   Features/Overlay/       Clickable, auto-dismissing incoming-event panels
   Features/
     Tray/                 Connection, Members, Chat, Activity, network/thread pickers
-    Auth/SignInView.swift Credential sheet → PlatformClient.withCredentials
+    Auth/SignInView.swift Credential sheet → attributed PlatformClient login
   Settings/               Standard Settings window
 RoomsTests/               swift-testing unit tests
 ```
