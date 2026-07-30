@@ -1,292 +1,175 @@
 import SwiftUI
 
-/// The Team Room tray — the panel hosted by the menu bar item (and the
-/// pinned "Keep visible" window). Head row, Picture/Inbox/Stream
-/// segments, and the ask composer, per docs/mocks/team-room-menubar.html.
+/// Compact native counterpart to the web network detail page.
 struct TrayView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.trayChrome) private var trayChrome
-
-    /// True when hosted in the pinned floating window instead of the
-    /// menu-bar popover.
     var isPinned = false
-
-    @State private var showingRoomSwitcher = false
+    @State private var showingNetworkSwitcher = false
 
     var body: some View {
         VStack(spacing: 0) {
             switch appState.phase {
             case .restoring:
-                ProgressView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             case .signedOut, .signingIn:
                 WelcomeTrayView()
             case .signedIn:
                 header
                 activeView
-                    .animation(.easeOut(duration: 0.22), value: appState.selectedTab)
+                    .animation(.easeOut(duration: 0.2), value: appState.selectedTab)
             }
         }
-        .animation(.easeOut(duration: 0.2), value: appState.toast)
         .frame(width: Theme.trayWidth, height: Theme.trayHeight)
         .background(Theme.paper)
         .overlay(alignment: .bottom) { toastOverlay }
     }
 
-    @ViewBuilder
-    private var toastOverlay: some View {
-        if let toast = appState.toast {
-            Text(toast)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(Color(hex: 0x201E1B).opacity(0.9), in: RoundedRectangle(cornerRadius: 9))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 9)
-                        .stroke(Color.white.opacity(0.13), lineWidth: 1)
-                )
-                .shadow(color: .black.opacity(0.24), radius: 17, y: 6)
-                .padding(.bottom, 74)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-                .id(toast)
-        }
-    }
-
     private var header: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                roomButton
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(Theme.green)
-                        .frame(width: 5, height: 5)
-                        .shadow(color: Theme.green.opacity(0.35), radius: 3)
-                    Text("live")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Theme.green)
-                }
-                Spacer()
-                iconButton(
-                    systemImage: "pin",
-                    title: isPinned ? "Back to the menu bar" : "Keep visible",
-                    active: isPinned
-                ) {
-                    if isPinned {
-                        trayChrome.close()
-                    } else {
-                        trayChrome.openPinned()
+            HStack(spacing: 9) {
+                Button { showingNetworkSwitcher.toggle() } label: {
+                    HStack(spacing: 8) {
+                        Text(String(appState.selectedNetwork.name.prefix(1)))
+                            .font(.system(size: 12, weight: .heavy))
+                            .foregroundStyle(.white)
+                            .frame(width: 27, height: 27)
+                            .background(Theme.green, in: RoundedRectangle(cornerRadius: 8))
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(appState.selectedNetwork.name)
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(Theme.ink)
+                            Text("Active network")
+                                .font(.system(size: 9))
+                                .foregroundStyle(Theme.green)
+                        }
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(Theme.muted2)
                     }
+                    .contentShape(RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .hoverHighlight()
+                .popover(isPresented: $showingNetworkSwitcher, arrowEdge: .bottom) {
+                    NetworkSwitcherView(isPresented: $showingNetworkSwitcher)
+                        .environment(appState)
+                }
+
+                Spacer()
+                chromeButton("arrow.up.right.square", help: "Open full web app") {
+                    appState.openInFullApp(appState.selectedNetwork.name)
+                }
+                chromeButton("pin", help: isPinned ? "Back to menu bar" : "Keep visible", active: isPinned) {
+                    isPinned ? trayChrome.close() : trayChrome.openPinned()
                 }
                 if !isPinned {
-                    iconButton(systemImage: "xmark", title: "Close tray") {
-                        trayChrome.close()
-                    }
+                    chromeButton("xmark", help: "Close") { trayChrome.close() }
                 }
             }
-            .frame(height: 39)
-            .padding(.horizontal, 15)
+            .frame(height: 43)
+            .padding(.horizontal, 14)
 
-            segments
-                .padding(.horizontal, 15)
-                .padding(.bottom, 8)
+            HStack(spacing: 2) {
+                ForEach(Array(TrayTab.allCases.enumerated()), id: \.element) { index, tab in
+                    Button {
+                        appState.selectedTab = tab
+                        if tab == .chat { appState.markSelectedThreadRead() }
+                    } label: {
+                        Text(tab.rawValue)
+                            .font(.system(size: 10, weight: .semibold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                            .foregroundStyle(appState.selectedTab == tab ? Theme.ink : Theme.muted)
+                            .background(appState.selectedTab == tab ? Color.white : .clear, in: RoundedRectangle(cornerRadius: 7))
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: .command)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, 8)
 
-            Rectangle()
-                .fill(Theme.line)
-                .frame(height: 1)
+            Rectangle().fill(Theme.line).frame(height: 1)
         }
         .padding(.top, isPinned ? 8 : 4)
     }
 
-    private var roomButton: some View {
-        Button {
-            showingRoomSwitcher.toggle()
-        } label: {
-            HStack(spacing: 8) {
-                Text(String(appState.selectedRoom.name.prefix(1)))
-                    .font(.system(size: 12, weight: .heavy))
-                    .foregroundStyle(.white)
-                    .frame(width: 26, height: 26)
-                    .background(
-                        LinearGradient(
-                            colors: [Color(hex: 0x0D8B6A), Color(hex: 0x075B47)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        in: RoundedRectangle(cornerRadius: 8)
-                    )
-                Text(appState.selectedRoom.name)
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(Theme.ink)
-                    .lineLimit(1)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(Theme.muted2)
-            }
-            .padding(.vertical, 4)
-            .padding(.leading, 3)
-            .padding(.trailing, 6)
-            .contentShape(RoundedRectangle(cornerRadius: 7))
-        }
-        .buttonStyle(.plain)
-        .hoverHighlight()
-        .popover(isPresented: $showingRoomSwitcher, arrowEdge: .bottom) {
-            RoomSwitcherView(isPresented: $showingRoomSwitcher)
-                .environment(appState)
-        }
-    }
-
-    private var segments: some View {
-        HStack(spacing: 2) {
-            ForEach(Array(TrayTab.allCases.enumerated()), id: \.element) { index, tab in
-                Button {
-                    appState.selectedTab = tab
-                } label: {
-                    HStack(spacing: 3) {
-                        Text(tab.rawValue)
-                            .font(.system(size: 11, weight: .semibold))
-                        if tab == .inbox && appState.inboxCount > 0 {
-                            Text("\(appState.inboxCount)")
-                                .font(.system(size: 9, weight: .bold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1)
-                                .background(Theme.badgeRed, in: Capsule())
-                        }
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
-                    .foregroundStyle(appState.selectedTab == tab ? Theme.ink : Theme.muted)
-                    .background(
-                        appState.selectedTab == tab ? Color.white.opacity(0.9) : .clear,
-                        in: RoundedRectangle(cornerRadius: 7)
-                    )
-                    .shadow(
-                        color: appState.selectedTab == tab ? Color(hex: 0x1E1B17).opacity(0.1) : .clear,
-                        radius: 1.5, y: 1
-                    )
-                    .contentShape(RoundedRectangle(cornerRadius: 7))
-                }
-                .buttonStyle(.plain)
-                .hoverHighlight(color: appState.selectedTab == tab ? .clear : Color(hex: 0x21201C).opacity(0.045))
-                .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: .command)
-                .help("\(tab.rawValue) (⌘\(index + 1))")
-            }
-        }
-        .padding(.top, 4)
-    }
-
-    @ViewBuilder
-    private var activeView: some View {
+    @ViewBuilder private var activeView: some View {
         switch appState.selectedTab {
-        case .picture:
-            PictureView()
-        case .inbox:
-            InboxView()
-        case .stream:
-            StreamView()
+        case .connection: ConnectionView()
+        case .members: MembersView()
+        case .chat: ChatView()
+        case .activity: ActivityView()
         }
     }
 
-    private func iconButton(
-        systemImage: String,
-        title: String,
-        active: Bool = false,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            Image(systemName: systemImage)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(active ? Theme.purple : Color(hex: 0x595650))
-                .frame(width: 28, height: 28)
-                .background(
-                    active ? Theme.purpleSoft : .clear,
-                    in: RoundedRectangle(cornerRadius: 7)
-                )
-                .contentShape(RoundedRectangle(cornerRadius: 7))
+    @ViewBuilder private var toastOverlay: some View {
+        if let toast = appState.toast {
+            Text(toast)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(Theme.ink.opacity(0.92), in: RoundedRectangle(cornerRadius: 9))
+                .shadow(color: .black.opacity(0.2), radius: 14, y: 5)
+                .padding(.bottom, 18)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
         }
-        .buttonStyle(.plain)
-        .hoverHighlight()
-        .help(title)
+    }
+
+    private func chromeButton(_ image: String, help: String, active: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: image)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(active ? Theme.green : Theme.muted)
+                .frame(width: 28, height: 28)
+                .background(active ? Theme.greenSoft : .clear, in: RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain).hoverHighlight().help(help)
     }
 }
 
-/// Room picker popover — mirrors `.channel-switcher`.
-struct RoomSwitcherView: View {
+struct NetworkSwitcherView: View {
     @Environment(AppState.self) private var appState
     @Binding var isPresented: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("ROOMS")
-                .font(.system(size: 9, weight: .bold))
+            Text("NETWORKS")
+                .font(.system(size: 9, weight: .heavy))
                 .kerning(0.8)
                 .foregroundStyle(Theme.muted2)
-                .padding(.horizontal, 8)
-                .padding(.top, 5)
-                .padding(.bottom, 4)
-
-            ForEach(appState.availableRooms) { room in
+                .padding(.horizontal, 9).padding(.top, 8).padding(.bottom, 4)
+            ForEach(appState.availableNetworks) { network in
                 Button {
-                    appState.selectRoom(room)
+                    appState.selectNetwork(network)
                     isPresented = false
                 } label: {
                     HStack(spacing: 9) {
-                        Text("#")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(Color(hex: 0x716D66))
-                            .frame(width: 21, height: 21)
-                            .background(Color(hex: 0xE6E3DD), in: RoundedRectangle(cornerRadius: 6))
+                        Text(String(network.name.prefix(1)))
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 24, height: 24)
+                            .background(Theme.green, in: RoundedRectangle(cornerRadius: 7))
                         VStack(alignment: .leading, spacing: 1) {
-                            Text(room.name)
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(Theme.ink)
-                            Text(room.meta)
-                                .font(.system(size: 10))
-                                .foregroundStyle(Theme.muted2)
+                            Text(network.name).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.ink)
+                            Text(network.relationship).font(.system(size: 9)).foregroundStyle(Theme.muted2)
                         }
-                        Spacer(minLength: 4)
-                        if room.unreadCount > 0 {
-                            Text("\(room.unreadCount)")
-                                .font(.system(size: 9, weight: .bold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1)
+                        Spacer()
+                        let unreadCount = appState.unreadCount(for: network.id)
+                        if unreadCount > 0 {
+                            Text("\(unreadCount)")
+                                .font(.system(size: 9, weight: .bold)).foregroundStyle(.white)
+                                .padding(.horizontal, 5).padding(.vertical, 1)
                                 .background(Theme.badgeRed, in: Capsule())
                         }
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 7)
-                    .background(
-                        room.id == appState.selectedRoom.id ? Color(hex: 0xECE9E3) : .clear,
-                        in: RoundedRectangle(cornerRadius: 7)
-                    )
-                    .contentShape(RoundedRectangle(cornerRadius: 7))
+                    .padding(.horizontal, 9).padding(.vertical, 7)
+                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-                .hoverHighlight(color: Theme.surface)
-            }
-
-            // Identity — membership decides what each member can ask.
-            if let email = appState.userEmail {
-                Rectangle()
-                    .fill(Theme.line)
-                    .frame(height: 1)
-                    .padding(.vertical, 5)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Signed in as \(email)")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Theme.ink2)
-                        .lineLimit(1)
-                    Text("Membership decides what you can ask.")
-                        .font(.system(size: 9))
-                        .foregroundStyle(Theme.muted2)
-                }
-                .padding(.horizontal, 8)
-                .padding(.bottom, 5)
+                .buttonStyle(.plain).hoverHighlight()
             }
         }
-        .padding(6)
-        .frame(width: 236)
+        .padding(5).frame(width: 285)
     }
 }

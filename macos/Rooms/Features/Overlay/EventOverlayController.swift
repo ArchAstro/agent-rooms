@@ -5,7 +5,7 @@ import SwiftUI
 /// normal windows, join every Space, and never steal keyboard focus.
 @MainActor
 final class EventOverlayController {
-    var onOpen: (() -> Void)?
+    var onOpen: ((StreamEvent) -> Void)?
 
     private var panels: [EventOverlayPanel] = []
     private let maxStack = 3
@@ -14,7 +14,7 @@ final class EventOverlayController {
         let panel = EventOverlayPanel()
         let root = EventOverlayView(event: event) { [weak self, weak panel] in
             guard let self, let panel else { return }
-            self.onOpen?()
+            self.onOpen?(event)
             self.dismiss(panel)
         }
         let hosting = NSHostingView(rootView: root)
