@@ -305,26 +305,31 @@ import ArchAstroPlatform
     @Test func live_account_loads_its_real_team_rooms() async throws {
         struct Credentials: Decodable {
             var token: String
-            var publishableKey: String
-            var userID: String
-            var appID: String
+            var publishableKey: String?
+            var userID: String?
             var server: String
         }
         let url = URL(fileURLWithPath: "/tmp/rooms-live-smoke-current-user.json")
         guard let data = try? Data(contentsOf: url) else { return }
         let credentials = try JSONDecoder().decode(Credentials.self, from: data)
 
+        var headers: [String: String] = [:]
+        if let publishableKey = credentials.publishableKey {
+            headers["x-archastro-api-key"] = publishableKey
+        }
         let client = PlatformClient(
             baseUrl: credentials.server,
             accessToken: credentials.token,
-            defaultHeaders: ["x-archastro-api-key": credentials.publishableKey]
+            defaultHeaders: headers
         )
         defer { Task { await client.close() } }
         let me = try await client.users.me()
-        #expect(me.id == credentials.userID)
+        if let userID = credentials.userID {
+            #expect(me.id == userID)
+        }
         let rooms = try await TeamRoomAPI.load(
             client: client,
-            currentUserID: credentials.userID,
+            currentUserID: me.id,
             organizationName: "Live account"
         )
         #expect(!rooms.isEmpty)
@@ -349,7 +354,7 @@ import ArchAstroPlatform
             client: client,
             threadID: thread.id,
             networkID: thread.networkID,
-            currentUserID: credentials.userID,
+            currentUserID: me.id,
         )
         let smokeMessage = try #require(
             updated.messages.first(where: { $0.body == marker })

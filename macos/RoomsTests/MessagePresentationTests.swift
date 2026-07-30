@@ -173,6 +173,38 @@ import ArchAstroPlatform
         #expect(page.afterCursor == nil)
     }
 
+    @Test func production_messages_decode_timestamps_without_timezones() throws {
+        let envelope = try JSONCoding.decoder.decode(
+            ThreadMessagesResponse.self,
+            from: Data(
+                """
+                {
+                  "data": {
+                    "messages": [{
+                      "id": "msg_production",
+                      "thread": "thr_room",
+                      "content": "Production timestamp",
+                      "created_at": "2026-07-23T01:16:47"
+                    }]
+                  }
+                }
+                """.utf8
+            )
+        )
+
+        let page = TeamRoomAPI.mapMessagePage(
+            envelope.data,
+            threadID: "thr_room",
+            networkID: "team_room",
+            currentUserID: nil
+        )
+
+        let message = try #require(envelope.data.messages.first)
+        let createdAt = try #require(message.createdAt)
+        #expect(JSONCoding.isoString(from: createdAt) == "2026-07-23T01:16:47Z")
+        #expect(page.messages.map(\.id) == ["msg_production"])
+    }
+
     @Test func generated_channel_messages_use_the_same_presentation_mapping() throws {
         let payload = try JSONCoding.decoder.decode(
             ApiChatMessageAddedPayload.self,
