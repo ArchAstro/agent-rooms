@@ -6,17 +6,21 @@ import UserNotifications
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private(set) var appState: AppState!
     private var statusItemController: StatusItemController!
-    private let mentionNotifier = MentionNotifier()
+    private var mentionNotifier: MentionNotifier?
     private var launchTask: Task<Void, Never>?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        mentionNotifier.configure(delegate: self)
+        if !Self.isRunningUnitTests {
+            let notifier = MentionNotifier()
+            mentionNotifier = notifier
+            notifier.configure(delegate: self)
+        }
 
         let state = AppState()
         appState = state
         state.onMention = { [weak self] mention in
-            self?.mentionNotifier.deliver(mention)
+            self?.mentionNotifier?.deliver(mention)
         }
 
         let controller = StatusItemController(appState: state)
@@ -44,6 +48,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func showSettings() {
         statusItemController?.showSettingsWindow()
+    }
+
+    private static var isRunningUnitTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+            || NSClassFromString("XCTestCase") != nil
     }
 }
 
