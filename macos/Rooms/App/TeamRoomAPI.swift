@@ -106,15 +106,15 @@ enum TeamRoomAPI {
         var name: String?
     }
 
-    private struct MessageEnvelope: Decodable, Sendable {
+    struct MessageEnvelope: Decodable, Sendable {
         var data: MessagePage
     }
 
-    private struct MessagePage: Decodable, Sendable {
+    struct MessagePage: Decodable, Sendable {
         var messages: [MessageDTO]
     }
 
-    private struct MessageDTO: Decodable, Sendable {
+    struct MessageDTO: Decodable, Sendable {
         struct ActorDTO: Decodable, Sendable {
             var id: String?
             var name: String?
@@ -122,12 +122,44 @@ enum TeamRoomAPI {
         }
 
         struct AttachmentDTO: Decodable, Sendable {
+            struct ImageSourceDTO: Decodable, Sendable {
+                var url: String?
+            }
+
+            var id: String
+            var type: String
             var filename: String?
+            var contentType: String?
+            var url: String?
             var title: String?
+            var description: String?
+            var imageURL: String?
+            var imageSource: ImageSourceDTO?
+            var width: Int?
+            var height: Int?
+            var imageWidth: Int?
+            var imageHeight: Int?
+            var version: Int?
+            var name: String?
+            var mediaType: String?
+            var status: String?
+            var object: JSONValue?
+
+            enum CodingKeys: String, CodingKey {
+                case id, type, filename, url, title, description, width, height
+                case version, name, status, object
+                case contentType = "content_type"
+                case imageURL = "image_url"
+                case imageSource = "image_source"
+                case imageWidth = "image_width"
+                case imageHeight = "image_height"
+                case mediaType = "media_type"
+            }
         }
 
         var actors: [ActorDTO]?
         var agent: String?
+        var agentMode: String?
         var attachments: [AttachmentDTO]?
         var content: String?
         var createdAt: String?
@@ -137,6 +169,7 @@ enum TeamRoomAPI {
 
         enum CodingKeys: String, CodingKey {
             case actors, agent, attachments, content, id, metadata, thread
+            case agentMode = "agent_mode"
             case createdAt = "created_at"
         }
     }
@@ -285,7 +318,7 @@ enum TeamRoomAPI {
         throw TeamRoomAPIError.tooManyTeamPages
     }
 
-    private static func mapMessage(
+    static func mapMessage(
         _ message: MessageDTO,
         currentUserID: String?
     ) -> ChatMessage {
@@ -304,8 +337,27 @@ enum TeamRoomAPI {
             body: message.content ?? "",
             time: relativeTime(message.createdAt),
             isCurrentUser: isCurrentUser,
-            attachmentName: message.attachments?.first?.filename
-                ?? message.attachments?.first?.title
+            agentMode: message.agentMode,
+            attachments: message.attachments?.map {
+                ChatAttachment(
+                    id: $0.id,
+                    type: $0.type,
+                    filename: $0.filename,
+                    contentType: $0.contentType,
+                    url: $0.url,
+                    title: $0.title,
+                    description: $0.description,
+                    imageURL: $0.imageURL,
+                    imageSourceURL: $0.imageSource?.url,
+                    width: $0.width ?? $0.imageWidth,
+                    height: $0.height ?? $0.imageHeight,
+                    version: $0.version,
+                    name: $0.name,
+                    mediaType: $0.mediaType,
+                    status: $0.status,
+                    object: $0.object
+                )
+            } ?? []
         )
     }
 
