@@ -12,6 +12,7 @@ final class AppState {
     /// UI shell hooks kept as closures so the product state remains testable
     /// without owning AppKit windows.
     var onNewEvent: ((StreamEvent) -> Void)?
+    var onMention: ((MessageMention) -> Void)?
 
     enum SessionPhase {
         case restoring
@@ -28,6 +29,8 @@ final class AppState {
     var userEmail: String?
     /// Signed-in user's display name, loaded from `/users/me`.
     var userName: String?
+    /// Signed-in user's @ handle, loaded from `/users/me`.
+    var userAlias: String?
     /// Signed-in org name, when known.
     var orgName: String?
     var roomLoadError: String?
@@ -86,6 +89,7 @@ final class AppState {
     var activityPaused = false
     var typingByThread = ["thread_general": "Fleet"]
     var newEventIDs: Set<String> = []
+    var messageFocus: MessageFocus?
 
     var currentMembers: [NetworkMember] {
         members.filter { $0.networkID == selectedNetwork.id }
@@ -126,6 +130,8 @@ final class AppState {
     private var channelConnectTask: Task<RoomChannelSession, any Error>?
     private var pendingLiveEvents = TrayPlaceholders.liveFeed
     private var suppressActivityReadTracking = false
+    private var notifiedMentionMessageIDs: Set<String> = []
+    private var pendingMentionTarget: MentionNavigationTarget?
 
     func showToast(_ message: String) {
         toastTask?.cancel()
@@ -143,6 +149,7 @@ final class AppState {
         }
         let networkChanged = selectedNetwork.id != network.id
         selectedNetwork = network
+        if networkChanged { messageFocus = nil }
         if networkChanged,
            let defaultThread = currentThreads.first(where: \.isDefault) ?? currentThreads.first {
             selectedThread = defaultThread
@@ -160,6 +167,7 @@ final class AppState {
     }
 
     func selectThread(_ thread: NetworkThread) {
+        messageFocus = nil
         selectedThread = thread
         markSelectedThreadRead()
         showToast("Opened \(thread.title)")
@@ -343,7 +351,7 @@ final class AppState {
 
                 // Subscribe first, then catch up. Any message created during
                 // this request is either in the page or buffered by Channel.
-                await syncLatestMessagePages(client: client, notify: false)
+                await syncLatestMessagePages(client: client, notify: true)
             } catch {
                 if hadConnection {
                     showToast("Live connection lost — reconnecting")
@@ -436,7 +444,7 @@ final class AppState {
             return loaded
         }
 
-        let knownEventIDs = Set(events.map(\.id))
+        let knownMessageIDs = Set(messages.map(\.id))
         for page in pages {
             messages = mergeNewestFirst(page.messages, with: messages)
             events = mergeNewestFirst(page.events, with: events)
@@ -449,13 +457,19 @@ final class AppState {
         }
 
         guard notify else { return }
-        let ownEventIDs = Set(
-            messages.filter(\.isCurrentUser).map { "event-\($0.id)" }
-        )
-        for event in events.reversed()
-        where !knownEventIDs.contains(event.id) && !ownEventIDs.contains(event.id)
-        {
-            announceLiveEvent(event)
+        for page in pages {
+            let eventsByMessageID = Dictionary(
+                uniqueKeysWithValues: page.events.map {
+                    (String($0.id.dropFirst("event-".count)), $0)
+                }
+            )
+            for message in page.messages.reversed()
+            where !knownMessageIDs.contains(message.id) && !message.isCurrentUser
+            {
+                if let event = eventsByMessageID[message.id] {
+                    announceIncomingMessage(message, event: event)
+                }
+            }
         }
     }
 
@@ -471,7 +485,7 @@ final class AppState {
             let isNew = !messages.contains { $0.id == mapped.message.id }
             upsertNewestMessage(mapped)
             if isNew && !mapped.message.isCurrentUser {
-                announceLiveEvent(mapped.event)
+                announceIncomingMessage(mapped.message, event: mapped.event)
             }
 
         case .messageUpdated(let networkID, let payload):
@@ -480,7 +494,16 @@ final class AppState {
                 networkID: networkID,
                 currentUserID: currentUserID
             ) else { return }
+            let prior = messages.first { $0.id == mapped.message.id }
+            let wasMention = prior.map(messageMentionsCurrentUser) ?? false
             upsertNewestMessage(mapped)
+            if !mapped.message.isCurrentUser {
+                if prior == nil {
+                    announceIncomingMessage(mapped.message, event: mapped.event)
+                } else if !wasMention && messageMentionsCurrentUser(mapped.message) {
+                    announceMentionIfNeeded(mapped.message, networkID: networkID)
+                }
+            }
 
         case .threadEvent(_, let payload):
             guard let threadID = payload.threadId,
@@ -534,6 +557,56 @@ final class AppState {
             newEventIDs.insert(event.id)
         }
         onNewEvent?(event)
+    }
+
+    func announceIncomingMessage(_ message: ChatMessage, event: StreamEvent) {
+        announceLiveEvent(event)
+        announceMentionIfNeeded(message, networkID: event.networkID)
+    }
+
+    private func announceMentionIfNeeded(
+        _ message: ChatMessage,
+        networkID: String
+    ) {
+        guard !message.isCurrentUser,
+              messageMentionsCurrentUser(message),
+              notifiedMentionMessageIDs.insert(message.id).inserted
+        else { return }
+
+        let roomName = availableNetworks.first { $0.id == networkID }?.name
+            ?? "Team Room"
+        let threadName = threads.first { $0.id == message.threadID }?.title
+            ?? "Team Room"
+        let plainBody = MessageText.plainText(message.displayBody)
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+        let excerpt = plainBody.count > 240
+            ? "\(plainBody.prefix(239))…"
+            : plainBody
+        onMention?(
+            MessageMention(
+                target: MentionNavigationTarget(
+                    networkID: networkID,
+                    threadID: message.threadID,
+                    messageID: message.id
+                ),
+                roomName: roomName,
+                threadName: threadName,
+                author: message.displayAuthor,
+                body: excerpt
+            )
+        )
+    }
+
+    private func messageMentionsCurrentUser(_ message: ChatMessage) -> Bool {
+        MentionMatcher.matches(
+            message.displayBody,
+            identity: MentionIdentity(
+                fullName: userName,
+                alias: userAlias,
+                email: userEmail
+            )
+        )
     }
 
     /// Internal for placeholder/demo tests; production updates use SDK channels.
@@ -767,6 +840,7 @@ final class AppState {
         phase = .signedOut
         userEmail = nil
         userName = nil
+        userAlias = nil
         orgName = nil
         activeAppID = nil
         currentUserID = nil
@@ -776,6 +850,9 @@ final class AppState {
         loadingOlderThreadIDs = []
         threadsWithLoadedOlderHistory = []
         hasLoadedCurrentUserProfile = false
+        notifiedMentionMessageIDs = []
+        pendingMentionTarget = nil
+        messageFocus = nil
     }
 
     // MARK: Team Rooms
@@ -792,13 +869,14 @@ final class AppState {
         }
 
         do {
-            let knownEventIDs = Set(events.map(\.id))
+            let knownMessageIDs = Set(messages.map(\.id))
             let shouldNotify = hasLoadedRooms
             if !hasLoadedCurrentUserProfile {
                 let me = try await client.users.me()
                 currentUserID = me.id
                 activeAppID = activeAppID ?? me.app
                 userName = me.name
+                userAlias = me.alias
                 if userEmail == nil || userEmail?.isEmpty == true {
                     userEmail = me.email
                 }
@@ -816,11 +894,6 @@ final class AppState {
             let refreshedMessages = loaded.flatMap(\.messages)
             let refreshedEvents = loaded.flatMap(\.events)
             let hadLiveHistory = !messageHistoryByThread.isEmpty
-            let currentUserEventIDs = Set(
-                refreshedMessages
-                    .filter(\.isCurrentUser)
-                    .map { "event-\($0.id)" }
-            )
             availableNetworks = loaded.map(\.room)
             members = loaded.flatMap(\.members)
             threads = loaded.flatMap(\.threads)
@@ -845,17 +918,18 @@ final class AppState {
             typingByThread = [:]
             newEventIDs.formIntersection(Set(events.map(\.id)))
             if shouldNotify {
-                for event in events.reversed()
-                where !knownEventIDs.contains(event.id)
-                    && !currentUserEventIDs.contains(event.id)
-                {
-                    if selectedTab != .activity
-                        || event.networkID != selectedNetwork.id
-                        || !event.matches(activityFilter)
-                    {
-                        newEventIDs.insert(event.id)
+                let eventsByMessageID = Dictionary(
+                    uniqueKeysWithValues: refreshedEvents.map {
+                        (String($0.id.dropFirst("event-".count)), $0)
                     }
-                    onNewEvent?(event)
+                )
+                for message in refreshedMessages.reversed()
+                where !knownMessageIDs.contains(message.id)
+                    && !message.isCurrentUser
+                {
+                    if let event = eventsByMessageID[message.id] {
+                        announceIncomingMessage(message, event: event)
+                    }
                 }
             }
 
@@ -890,6 +964,91 @@ final class AppState {
         }
     }
 
+    @discardableResult
+    func prepareMentionNavigation(_ target: MentionNavigationTarget) -> Bool {
+        guard let thread = threads.first(where: {
+            $0.id == target.threadID && $0.networkID == target.networkID
+        }),
+        let network = availableNetworks.first(where: {
+            $0.id == target.networkID
+        })
+        else { return false }
+
+        selectedNetwork = network
+        selectedThread = thread
+        selectedTab = .chat
+        guard currentMessages.contains(where: { $0.id == target.messageID }) else {
+            return false
+        }
+        messageFocus = MessageFocus(
+            threadID: target.threadID,
+            messageID: target.messageID
+        )
+        return true
+    }
+
+    func navigateToMention(_ target: MentionNavigationTarget) async {
+        pendingMentionTarget = target
+
+        while sessionIsRestoring || isLoadingRooms {
+            guard pendingMentionTarget == target else { return }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        guard pendingMentionTarget == target else { return }
+        guard isSignedIn else {
+            showToast("Sign in to open this mention")
+            pendingMentionTarget = nil
+            return
+        }
+        if !hasLoadedRooms {
+            await refreshRooms()
+        }
+        guard pendingMentionTarget == target else { return }
+
+        if prepareMentionNavigation(target) {
+            pendingMentionTarget = nil
+            markSelectedThreadRead()
+            return
+        }
+        guard let client,
+              threads.contains(where: {
+                  $0.id == target.threadID && $0.networkID == target.networkID
+              })
+        else {
+            showToast("That Team Room is no longer available")
+            pendingMentionTarget = nil
+            return
+        }
+
+        do {
+            let page = try await TeamRoomAPI.loadMessageContext(
+                client: client,
+                threadID: target.threadID,
+                networkID: target.networkID,
+                messageID: target.messageID,
+                currentUserID: currentUserID
+            )
+            guard pendingMentionTarget == target else { return }
+            appendMessageContext(page)
+            guard prepareMentionNavigation(target) else {
+                showToast("That message is no longer available")
+                pendingMentionTarget = nil
+                return
+            }
+            pendingMentionTarget = nil
+            markSelectedThreadRead()
+        } catch {
+            guard pendingMentionTarget == target else { return }
+            showToast("Could not open that mention")
+            pendingMentionTarget = nil
+        }
+    }
+
+    private var sessionIsRestoring: Bool {
+        if case .restoring = phase { return true }
+        return false
+    }
+
     /// Fetch the next older page through the generated thread resource. The
     /// platform returns pages oldest-first; TeamRoomAPI normalizes them to
     /// newest-first so each page appends at the bottom without re-sorting.
@@ -922,6 +1081,22 @@ final class AppState {
     }
 
     func appendOlderPage(_ page: LoadedMessagePage) {
+        let messageIDs = Set(messages.map(\.id))
+        messages.append(
+            contentsOf: page.messages.filter { !messageIDs.contains($0.id) }
+        )
+        let eventIDs = Set(events.map(\.id))
+        events.append(
+            contentsOf: page.events.filter { !eventIDs.contains($0.id) }
+        )
+        messageHistoryByThread[page.threadID] = ThreadMessageHistory(
+            threadID: page.threadID,
+            beforeCursor: page.beforeCursor
+        )
+        threadsWithLoadedOlderHistory.insert(page.threadID)
+    }
+
+    func appendMessageContext(_ page: LoadedMessagePage) {
         let messageIDs = Set(messages.map(\.id))
         messages.append(
             contentsOf: page.messages.filter { !messageIDs.contains($0.id) }

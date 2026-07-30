@@ -217,6 +217,19 @@ final class StatusItemController: NSObject {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    func openMention(_ target: MentionNavigationTarget) {
+        let isReady = appState.prepareMentionNavigation(target)
+        showPopover()
+        guard !isReady else {
+            appState.markSelectedThreadRead()
+            return
+        }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.appState.navigateToMention(target)
+        }
+    }
+
     private func startObservingState() {
         observationTask?.cancel()
         observationTask = Task { @MainActor [weak self] in
