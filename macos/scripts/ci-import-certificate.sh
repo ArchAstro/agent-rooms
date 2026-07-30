@@ -63,11 +63,13 @@ cleanup_on_exit() {
 }
 trap cleanup_on_exit EXIT
 
+echo "==> Cleaning stale signing state"
+cleanup_signing_keychain
+
 echo "==> Decoding certificate"
 echo "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode >"$CERT_PATH"
 
 echo "==> Creating temporary keychain"
-cleanup_signing_keychain
 security list-keychains -d user |
   sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//' >"$SEARCH_LIST_PATH"
 security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
