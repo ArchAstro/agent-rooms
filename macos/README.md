@@ -123,6 +123,7 @@ Pull requests run unsigned macOS tests and build/mount/verify the branded DMG
 with an ad-hoc signature. Version tags run the separate release workflow,
 which imports a Developer ID certificate, signs with hardened runtime,
 notarizes, staples the ticket, and attaches the DMG to a GitHub Release.
+Release assets use the versioned filename `Rooms-X.Y.Z.dmg`.
 
 ```bash
 ./scripts/package-dmg.sh --adhoc

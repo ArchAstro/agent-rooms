@@ -169,13 +169,14 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAG: ${{ needs.resolve-release.outputs.tag }}
         run: |
           set -euo pipefail
           chmod +x scripts/package-dmg.sh
-          ./scripts/package-dmg.sh --out "$GITHUB_WORKSPACE/dist/Rooms.dmg"
-          if compgen -G "build/Rooms-*.dmg" > /dev/null; then
-            cp build/Rooms-*.dmg "$GITHUB_WORKSPACE/dist/"
-          fi
+          VERSION="${TAG#v}"
+          DMG="$GITHUB_WORKSPACE/dist/Rooms-${VERSION}.dmg"
+          ./scripts/package-dmg.sh --out "$DMG"
+          test -f "$DMG"
           ls -lh "$GITHUB_WORKSPACE/dist/"
 
       - name: Remove signing keychain
@@ -185,7 +186,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: Rooms-dmg
+          name: Rooms-${{ needs.resolve-release.outputs.tag }}-dmg
           path: dist/*.dmg
           if-no-files-found: error
           retention-days: 90
