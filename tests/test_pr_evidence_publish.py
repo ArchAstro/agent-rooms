@@ -70,6 +70,10 @@ class ContractServer(http.server.BaseHTTPRequestHandler):
             self.reply(200 if artifact else 404, self.metadata(artifact) if artifact else {"error": "missing"})
         elif parsed.path == self.api + "/threads/thread-test/messages":
             self.reply(200, {"data": self.messages})
+        elif parsed.path.startswith(self.api + "/threads/thread-test/messages/"):
+            message_id = parsed.path.rsplit("/", 1)[-1]
+            message = next((item for item in self.messages if item.get("id") == message_id), None)
+            self.reply(200 if message else 404, {"data": message} if message else {"error": "missing"})
         else:
             self.reply(404, {"error": "missing"})
 

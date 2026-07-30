@@ -49,13 +49,19 @@ class ArtifactClient:
         self.app_base = server.rstrip("/") + f"/protected/api/v1/developer/apps/{app_id}"
         self.team_id, self.thread_id, self.token, self.user_id = team_id, thread_id, token, user_id
 
-    def _call(self, method: str, url: str, body: Mapping[str, Any] | None = None) -> Any:
+    def _call(
+        self,
+        method: str,
+        url: str,
+        body: Mapping[str, Any] | None = None,
+        timeout: float = 8,
+    ) -> Any:
         data = None if body is None else json.dumps(body, separators=(",", ":"), allow_nan=False).encode()
         if data is not None and len(data) > 5 * 1024 * 1024:
             raise ValueError("artifact request exceeds bounded JSON envelope")
         request = urllib.request.Request(url, data=data, method=method,
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.token}", "User-Agent": "room-post/pr-evidence-v1", "X-Client-Source": CLIENT_SOURCE})
-        with urllib.request.urlopen(request, timeout=8) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read(5 * 1024 * 1024 + 1)
         if len(raw) > 5 * 1024 * 1024: raise ArtifactValidationError("artifact response exceeds byte limit")
         decoded = json.loads(raw)
@@ -95,10 +101,25 @@ class ArtifactClient:
     def list_messages(self):
         value = self._call("GET", self.app_base + "/threads/" + urllib.parse.quote(self.thread_id, safe="") + "/messages")
         return value.get("data", value) if isinstance(value, Mapping) else value
+    def show_message(self, message_id: str):
+        return self._call(
+            "GET",
+            self.app_base
+            + "/threads/"
+            + urllib.parse.quote(self.thread_id, safe="")
+            + "/messages/"
+            + urllib.parse.quote(message_id, safe=""),
+            timeout=1,
+        )
     def create_message(self, content: str, idempotency_key: str, attachments: list[dict[str, str]] | None = None):
         body: dict[str, Any] = {"content": content, "user": self.user_id, "idempotency_key": idempotency_key}
         if attachments: body["attachments"] = attachments
-        return self._call("POST", self.app_base + "/threads/" + urllib.parse.quote(self.thread_id, safe="") + "/messages", body)
+        return self._call(
+            "POST",
+            self.app_base + "/threads/" + urllib.parse.quote(self.thread_id, safe="") + "/messages",
+            body,
+            timeout=2,
+        )
 class Publisher:
     def __init__(self, client: Any, state_path: Path, policy: Policy, ancestor: Callable[[str, str], bool] | None = None):
         self.client, self.state_path, self.policy = client, state_path, policy
@@ -193,22 +214,72 @@ class Publisher:
     def _message_key(self, request: PublishRequest) -> str:
         return "pr-evidence:initial:" + request.subject_key
 
-    def _has_initial_message(self, request: PublishRequest, artifact: Mapping[str, Any]) -> bool:
-        key = self._message_key(request)
-        expected = {"id": artifact["id"], "type": "artifact"}
+    @staticmethod
+    def _attachment_key(value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+        for prefix in ("art_", "mat_"):
+            if value.startswith(prefix):
+                return value[len(prefix):]
+        return value
+
+    @classmethod
+    def _has_artifact_attachment(
+        cls, message: object, artifact: Mapping[str, Any]
+    ) -> bool:
+        nested = message.get("data", message) if isinstance(message, Mapping) else None
+        if not isinstance(nested, Mapping) or not isinstance(nested.get("attachments"), list):
+            return False
+        expected = cls._attachment_key(artifact.get("id"))
         return any(
-            isinstance(message, Mapping)
-            and message.get("idempotency_key") == key
-            and isinstance(message.get("attachments"), list)
-            and expected in message["attachments"]
-            for message in self.client.list_messages()
+            isinstance(item, Mapping)
+            and item.get("type") == "artifact"
+            and cls._attachment_key(item.get("id")) == expected
+            for item in nested["attachments"]
         )
 
-    def _initial_message(self, request: PublishRequest, artifact: Mapping[str, Any]) -> None:
-        if self._has_initial_message(request, artifact):
-            return
+    def _has_initial_message(
+        self, request: PublishRequest, artifact: Mapping[str, Any]
+    ) -> Mapping[str, Any] | None:
         key = self._message_key(request)
-        return self.client.create_message(f"PR evidence published [{key}]", key, [{"id": artifact["id"], "type": "artifact"}])
+        return next(
+            (
+                message
+                for message in self.client.list_messages()
+                if isinstance(message, Mapping)
+                and message.get("idempotency_key") == key
+                and self._has_artifact_attachment(message, artifact)
+            ),
+            None,
+        )
+
+    def _initial_message(self, request: PublishRequest, artifact: Mapping[str, Any]) -> Any:
+        existing = self._has_initial_message(request, artifact)
+        if existing:
+            return existing
+        key = self._message_key(request)
+        for attempt in range(2):
+            message = self.client.create_message(
+                f"PR evidence published [{key}]",
+                key,
+                [{"id": artifact["id"], "type": "artifact"}],
+            )
+            if not hasattr(self.client, "show_message"):
+                # Older compatible clients cannot perform the authoritative
+                # confirmation; retain their pre-v1 behavior.
+                return message
+            candidate = message
+            message_id = self._message_id(message)
+            if message_id:
+                candidate = self.client.show_message(message_id)
+            if self._has_artifact_attachment(candidate, artifact):
+                return candidate
+            if attempt == 0:
+                # Production artifact materialization can lag the successful
+                # message response by a fraction of a second. One bounded,
+                # idempotent retry keeps PR creation fast and duplicate-free.
+                time.sleep(0.25)
+        raise ArtifactValidationError("initial PR evidence attachment did not materialize")
 
     def _current_after_initial_message(self, request: PublishRequest, artifact: Mapping[str, Any]) -> dict[str, Any]:
         """Do not turn an attachment effect into false ownership of a newer current pointer."""
@@ -312,6 +383,7 @@ class Publisher:
                 return PublishResult("published", created["id"], created["version"])
             remote = self._remote(artifact, request.artifact_name, request.subject_key)
             cold_attachment_needed = False
+            existing_initial_message = None
             if cold_recovery and not state:
                 # Exact-name discovery is not proof this orphan belongs to the
                 # requested PR head. Reject it before policy rewriting, state,
@@ -346,7 +418,8 @@ class Publisher:
                         recovered,
                     )
                     remote = self._validated_written(updated, recovery_request, recovered, remote["id"])
-                cold_attachment_needed = not self._has_initial_message(request, remote)
+                existing_initial_message = self._has_initial_message(request, remote)
+                cold_attachment_needed = existing_initial_message is None
             # A response-loss retry is also a recovery path. Recheck the
             # current head before either attaching or recording its outcome.
             if not self._head_is_allowed(remote, request):
@@ -363,7 +436,12 @@ class Publisher:
             # Preserve the server's timestamp for semantic equality.
             merged.setdefault("current", {})["generated_at"] = remote["content"].get("current", {}).get("generated_at")
             if semantic_hash(merged) == semantic_hash(remote["content"]):
-                self._save_state(request, remote, remote["content"])
+                self._save_state(
+                    request,
+                    remote,
+                    remote["content"],
+                    message_id=self._message_id(existing_initial_message),
+                )
                 if cold_attachment_needed:
                     self._save_state(request, remote, remote["content"], "initial")
                     message = self._initial_message(request, remote)
@@ -376,7 +454,12 @@ class Publisher:
                     self._save_state(request, remote, merged, "update")
                     updated = self.client.update_artifact(remote["id"], merged, remote["version"])
                     updated = self._validated_written(updated, request, merged, remote["id"])
-                    self._save_state(request, updated, merged)
+                    self._save_state(
+                        request,
+                        updated,
+                        merged,
+                        message_id=self._message_id(existing_initial_message),
+                    )
                     if cold_attachment_needed:
                         self._save_state(request, updated, merged, "initial")
                         message = self._initial_message(request, updated)
@@ -392,7 +475,12 @@ class Publisher:
                     merged = restrict_payload(self._merge(remote["content"], content, request.session_id), self.policy)
                     merged.setdefault("current", {})["generated_at"] = remote["content"].get("current", {}).get("generated_at")
                     if semantic_hash(merged) == semantic_hash(remote["content"]):
-                        self._save_state(request, remote, remote["content"])
+                        self._save_state(
+                            request,
+                            remote,
+                            remote["content"],
+                            message_id=self._message_id(existing_initial_message),
+                        )
                         return PublishResult("unchanged", remote["id"], remote["version"])
             return self._queue(request, "version_conflict", remote)
         except Exception as exc:
