@@ -200,6 +200,124 @@ class LegacyProductionOrphanClient(ConflictClient):
         return {"id": "m-legacy-recovered"}
 
 
+class DelayedAttachmentClient(ResponseLossClient):
+    """Production can return a message before its artifact attachment materializes."""
+    def __init__(self):
+        super().__init__()
+        self.show_calls = 0
+        self.message_keys = []
+
+    def create_message(self, _content, idempotency_key, _attachments):
+        self.message_calls += 1
+        self.message_keys.append(idempotency_key)
+        return {"id": "m-delayed", "attachments": []}
+
+    def show_message(self, message_id):
+        assert message_id == "m-delayed"
+        self.show_calls += 1
+        attachments = (
+            [{"id": "mat_a2", "type": "artifact"}]
+            if self.show_calls == 2
+            else []
+        )
+        return {"id": message_id, "attachments": attachments}
+
+
+class ConfirmationReadFailureClient(ResponseLossClient):
+    def create_message(self, *_args):
+        self.message_calls += 1
+        return {"id": "m-unconfirmed", "attachments": [{"id": "mat_a2", "type": "artifact"}]}
+
+    def show_message(self, _message_id):
+        raise TimeoutError("authoritative message read timed out")
+
+
+class ExistingConfirmedMessageClient(ConflictClient):
+    def __init__(self):
+        super().__init__()
+        self.message_calls = 0
+        self.artifact = {**self.artifact, "content": full_content()}
+
+    def list_messages(self):
+        return [{
+            "id": "m-existing",
+            "idempotency_key": "pr-evidence:initial:github.com/owner/repository#7",
+            "attachments": [{"id": "mat_a1", "type": "artifact"}],
+        }]
+
+    def create_message(self, *_args):
+        self.message_calls += 1
+        return {"id": "m-duplicate"}
+
+
+def test_initial_message_confirms_the_attachment_and_retries_once_when_materialization_lags():
+    with tempfile.TemporaryDirectory() as td:
+        client = DelayedAttachmentClient()
+        request = PublishRequest(
+            "github.com/owner/repository#7",
+            "pr-evidence--owner-repository--7--x",
+            SHA_A,
+            SHA_A,
+            "session-one",
+            full_content(),
+        )
+
+        result = Publisher(client, Path(td) / "state.json", Policy()).publish(request)
+
+        assert result.status == "published", result
+        assert client.message_calls == 2
+        assert client.show_calls == 2
+        assert client.message_keys == [
+            "pr-evidence:initial:github.com/owner/repository#7",
+            "pr-evidence:initial:github.com/owner/repository#7",
+        ]
+        state = json.loads((Path(td) / "state.json").read_text())
+        assert state[request.subject_key]["message_id"] == "m-delayed"
+    print("PASS  initial message confirms a materialized normalized artifact attachment")
+
+
+def test_authoritative_confirmation_failure_queues_instead_of_claiming_publication():
+    with tempfile.TemporaryDirectory() as td:
+        client = ConfirmationReadFailureClient()
+        request = PublishRequest(
+            "github.com/owner/repository#7",
+            "pr-evidence--owner-repository--7--x",
+            SHA_A,
+            SHA_A,
+            "session-one",
+            full_content(),
+        )
+
+        result = Publisher(client, Path(td) / "state.json", Policy()).publish(request)
+
+        assert result.status == "queued", result
+        assert client.message_calls == 1
+        state = json.loads((Path(td) / "state.json").read_text())
+        assert state[request.subject_key]["message_pending"] == "initial"
+    print("PASS  failed authoritative attachment confirmation stays queued")
+
+
+def test_cold_recovery_records_an_existing_confirmed_message_identity():
+    with tempfile.TemporaryDirectory() as td:
+        client = ExistingConfirmedMessageClient()
+        request = PublishRequest(
+            "github.com/owner/repository#7",
+            "pr-evidence--owner-repository--7--x",
+            SHA_A,
+            SHA_A,
+            "session-one",
+            full_content(),
+        )
+
+        result = Publisher(client, Path(td) / "state.json", Policy()).publish(request)
+
+        assert result.status == "updated", result
+        assert client.message_calls == 0
+        state = json.loads((Path(td) / "state.json").read_text())
+        assert state[request.subject_key]["message_id"] == "m-existing"
+    print("PASS  cold recovery records an existing confirmed message identity")
+
+
 def test_large_legacy_production_artifact_is_recovered_and_attached_without_data_loss():
     with tempfile.TemporaryDirectory() as td:
         client = LegacyProductionOrphanClient()
@@ -599,6 +717,9 @@ def test_merge_preserves_remote_safety_evidence_and_canonical_tool_test_results(
 
 
 if __name__ == "__main__":
+    test_initial_message_confirms_the_attachment_and_retries_once_when_materialization_lags()
+    test_authoritative_confirmation_failure_queues_instead_of_claiming_publication()
+    test_cold_recovery_records_an_existing_confirmed_message_identity()
     test_large_legacy_production_artifact_is_recovered_and_attached_without_data_loss()
     test_one_conflict_refetches_and_second_conflict_queues_sanitized_state()
     test_explicit_local_capture_mode_only_narrows_the_complete_default()
