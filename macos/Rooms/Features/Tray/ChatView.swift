@@ -55,18 +55,31 @@ struct ChatView: View {
                 .overlay(alignment: .bottom) { Rectangle().fill(Theme.line).frame(height: 1) }
             }
 
-            ScrollView {
-                LazyVStack(spacing: 13) {
-                    ForEach(filteredMessages) { message in
-                        messageRow(message).id(message.id)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 13) {
+                        ForEach(filteredMessages) { message in
+                            messageRow(message).id(message.id)
+                        }
+                        if let typingName = appState.typingByThread[appState.selectedThread.id] {
+                            typingIndicator(typingName)
+                        }
+                        paginationFooter
+                    }.padding(14)
+                }
+                .scrollIndicators(.hidden)
+                .onAppear {
+                    revealFocusedMessage(using: proxy)
+                }
+                .onChange(of: appState.messageFocus) { _, _ in
+                    revealFocusedMessage(using: proxy)
+                }
+                .onChange(of: searchTerm) { _, value in
+                    if value.isEmpty {
+                        revealFocusedMessage(using: proxy)
                     }
-                    if let typingName = appState.typingByThread[appState.selectedThread.id] {
-                        typingIndicator(typingName)
-                    }
-                    paginationFooter
-                }.padding(14)
+                }
             }
-            .scrollIndicators(.hidden)
 
             HStack(spacing: 7) {
                 Button { showingImporter = true } label: {
@@ -145,6 +158,14 @@ struct ChatView: View {
                 MessageContentView(message: message)
             }
         }
+        .padding(6)
+        .background(
+            appState.messageFocus?.threadID == message.threadID
+                && appState.messageFocus?.messageID == message.id
+                ? Theme.greenSoft
+                : .clear,
+            in: RoundedRectangle(cornerRadius: 9)
+        )
         .contextMenu {
             Button("Copy message") {
                 NSPasteboard.general.clearContents()
@@ -202,6 +223,23 @@ struct ChatView: View {
         let content = draft
         Task {
             if await appState.sendMessage(content) { draft = "" }
+        }
+    }
+
+    private func revealFocusedMessage(using proxy: ScrollViewProxy) {
+        guard let focus = appState.messageFocus,
+              focus.threadID == appState.selectedThread.id,
+              appState.currentMessages.contains(where: {
+                  $0.id == focus.messageID
+              })
+        else { return }
+        if !searchTerm.isEmpty {
+            searchTerm = ""
+            showingSearch = false
+            return
+        }
+        withAnimation(.easeOut(duration: 0.25)) {
+            proxy.scrollTo(focus.messageID, anchor: .center)
         }
     }
 

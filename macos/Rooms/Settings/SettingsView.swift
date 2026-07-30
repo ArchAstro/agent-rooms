@@ -20,6 +20,9 @@ struct GeneralSettingsView: View {
         @Bindable var appState = appState
         Form {
             Section("Notifications") {
+                Text("Name and @ mentions stay in Notification Center until you dismiss them.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Toggle("Show new network activity above other windows", isOn: $appState.overlayEnabled)
                 Toggle("Dismiss overlays automatically", isOn: $appState.overlayAutoDismiss)
                     .disabled(!appState.overlayEnabled)

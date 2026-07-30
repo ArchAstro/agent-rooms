@@ -113,6 +113,29 @@ enum TeamRoomAPI {
         )
     }
 
+    static func loadMessageContext(
+        client: PlatformClient,
+        threadID: String,
+        networkID: String,
+        messageID: String,
+        currentUserID: String?
+    ) async throws -> LoadedMessagePage {
+        let response = try await client.threads.messages(
+            thread: threadID,
+            anchor: messageID,
+            direction: "around",
+            beforeLimit: messagePageSize,
+            afterLimit: messagePageSize,
+            includeAnchor: true
+        )
+        return mapMessagePage(
+            response.data,
+            threadID: threadID,
+            networkID: networkID,
+            currentUserID: currentUserID
+        )
+    }
+
     static func mapMessagePage(
         _ page: ThreadMessagesResponseData,
         threadID: String,
