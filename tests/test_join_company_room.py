@@ -34,6 +34,7 @@ KIT = os.path.join(HERE, "..", "skills", "team-room", "room_post.py")
 
 CALLS = []
 MESSAGE_ATTEMPTS = []
+CLIENT_SOURCES = []
 
 MY_ORG = "org_mine"
 ROOM_LABEL = "archastro_team_room"
@@ -106,6 +107,7 @@ class Stub(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         CALLS.append(("GET", self.path))
+        CLIENT_SOURCES.append(("GET", self.path, self.headers.get("X-Client-Source")))
         token = (self.headers.get("Authorization") or "").removeprefix("Bearer ")
         if self.path.startswith("/org/cli-auth"):
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -182,6 +184,7 @@ class Stub(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         CALLS.append(("POST", self.path))
+        CLIENT_SOURCES.append(("POST", self.path, self.headers.get("X-Client-Source")))
         token = (self.headers.get("Authorization") or "").removeprefix("Bearer ")
         if self.path.endswith("/join"):
             Stub.joined.add(self.path.split("/api/v1/teams/")[1].split("/join")[0])
@@ -250,6 +253,24 @@ def reset(teams=None, joined=None, threads=None):
     } if threads is None else threads)
     CALLS.clear()
     MESSAGE_ATTEMPTS.clear()
+    CLIENT_SOURCES.clear()
+
+
+def test_room_skill_marks_every_platform_request_with_its_client_source():
+    reset()
+    home = tempfile.mkdtemp()
+
+    result = run_kit(["discover"], home, SERVER)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    platform_requests = [
+        request for request in CLIENT_SOURCES if request[1].startswith("/api/")
+    ]
+    assert platform_requests, CLIENT_SOURCES
+    assert all(source == "rooms-skill" for _, _, source in platform_requests), (
+        platform_requests
+    )
+    print("PASS  room skill marks every platform request with rooms-skill")
 
 
 def test_a_teammate_is_joined_to_the_room_their_company_already_has():
@@ -772,6 +793,7 @@ def main():
     with socketserver.TCPServer(("127.0.0.1", 0), Stub) as srv:
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         SERVER = f"http://127.0.0.1:{srv.server_address[1]}"
+        test_room_skill_marks_every_platform_request_with_its_client_source()
         test_a_teammate_is_joined_to_the_room_their_company_already_has()
         test_a_forged_room_is_not_joined()
         test_environment_cannot_choose_the_company_to_join()
