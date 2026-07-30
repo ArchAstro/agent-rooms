@@ -58,13 +58,13 @@ Rooms/
 RoomsTests/               swift-testing unit tests
 ```
 
-The tray mirrors the web network detail page: **Connection** (host and
-collaborator relationship, workstream, Slack binding), **Members** (people,
-agents, roles and organizations), **Chat** (real threads, messages,
-attachments and typing), and **Activity** (web activity levels, pause/resume
-and session drill-in). Permissioned setup and destructive management stay in
-the full web app. The current sample content uses the same domain shapes the
-platform APIs and live chat channel will hydrate.
+After sign-in the app discovers every joined team containing a **Team Room**
+thread, drains all team-membership pages, and hydrates real members and recent
+messages through the platform SDK. **Connection** summarizes the selected
+room, **Members** shows its people and agents, **Chat** reads and posts to the
+live Team Room thread, and **Activity** classifies those same posts using the
+Team Room grammar. The app refreshes every 20 seconds; file uploads and
+permissioned management hand off to the full web app.
 
 ## Sign-in
 
@@ -92,9 +92,9 @@ rebuilds the client and re-wires automatic 401 refresh via
 `/api/v1/auth/refresh` (rotated tokens are persisted back to the
 Keychain).
 
-The sidebar rooms are placeholders — next step is backing them with
-`client.threads` and wiring `ApiChatChannel` over `client.openSocket()`
-for realtime messages.
+Sessions saved by builds before live-room support can still read rooms. Signing
+in once with the current build refreshes the app/user identifiers required for
+posting.
 
 ## Configuration
 

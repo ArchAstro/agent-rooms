@@ -20,6 +20,11 @@ struct StoredSession: Codable {
     var email: String?
     /// Signed-in org name, when known (display only).
     var orgName: String?
+    /// App and user identifiers from the ArchAgents browser handoff. They
+    /// let the native app use the same user-authored message route as the
+    /// Team Room kit. Optional for sessions saved by older app versions.
+    var appId: String?
+    var userId: String?
 }
 
 /// Keychain-backed storage for the signed-in session, scoped to this app.

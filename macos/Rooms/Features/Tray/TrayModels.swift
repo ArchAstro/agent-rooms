@@ -18,6 +18,16 @@ struct NetworkSnapshot: Identifiable, Hashable {
     var hostOrganization: String
     var collaboratorOrganization: String
     var slackChannel: String?
+
+    static let empty = NetworkSnapshot(
+        id: "",
+        name: "Team Rooms",
+        relationship: "",
+        unreadCount: 0,
+        hostOrganization: "",
+        collaboratorOrganization: "",
+        slackChannel: nil
+    )
 }
 
 struct NetworkMember: Identifiable, Hashable {
@@ -41,6 +51,16 @@ struct NetworkThread: Identifiable, Hashable {
     var title: String
     var isDefault: Bool
     var unreadCount: Int
+
+    static func empty(networkID: String) -> NetworkThread {
+        NetworkThread(
+            id: "",
+            networkID: networkID,
+            title: "Team Room",
+            isDefault: true,
+            unreadCount: 0
+        )
+    }
 }
 
 struct ChatMessage: Identifiable, Hashable {

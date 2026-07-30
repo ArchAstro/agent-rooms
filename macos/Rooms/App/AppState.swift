@@ -28,6 +28,10 @@ final class AppState {
     var userEmail: String?
     /// Signed-in org name, when known.
     var orgName: String?
+    var roomLoadError: String?
+    var isLoadingRooms = false
+    var hasLoadedRooms = false
+    var isSendingMessage = false
 
     // MARK: Network tray state
 
@@ -159,7 +163,7 @@ final class AppState {
     func webAppURL(extraQueryItems: [URLQueryItem] = []) -> URL? {
         guard var components = URLComponents(string: archagentsURL) else { return nil }
         let basePath = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        components.path = (basePath.isEmpty ? "" : "/\(basePath)") + "/networks/\(selectedNetwork.id)"
+        components.path = (basePath.isEmpty ? "" : "/\(basePath)") + "/teams/\(selectedNetwork.id)"
         components.queryItems = [
             URLQueryItem(name: "tab", value: selectedTab.rawValue.lowercased()),
             URLQueryItem(name: "thread", value: selectedThread.id),
@@ -168,45 +172,66 @@ final class AppState {
     }
 
     @discardableResult
-    func sendMessage(_ body: String, attachmentName: String? = nil) -> Bool {
+    func sendMessage(_ body: String, attachmentName: String? = nil) async -> Bool {
         guard !selectedThread.id.isEmpty else {
-            showToast("Create a thread in the web app first")
+            showToast("No Team Room is selected")
             return false
         }
+        guard let client else { return false }
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || attachmentName != nil else { return false }
-        messages.append(
-            ChatMessage(
-                id: UUID().uuidString,
+
+        // Uploads are not yet exposed by the Swift SDK. Never pretend a local
+        // filename crossed the network.
+        guard attachmentName == nil else {
+            showToast("Open the web app to attach files")
+            return false
+        }
+
+        isSendingMessage = true
+        defer { isSendingMessage = false }
+        do {
+            try await TeamRoomAPI.post(
+                client: client,
+                appID: activeAppID,
+                userID: currentUserID,
                 threadID: selectedThread.id,
-                author: "You",
-                initials: "CG",
-                organization: orgName ?? "ArchAstro",
-                body: trimmed,
-                time: "now",
-                isCurrentUser: true,
-                attachmentName: attachmentName
+                content: trimmed
             )
-        )
-        showToast("Message sent")
-        return true
+            await refreshRooms()
+            showToast("Posted to Team Room")
+            return true
+        } catch let error as ApiError {
+            showToast(error.message)
+            return false
+        } catch {
+            showToast(error.localizedDescription)
+            return false
+        }
     }
 
-    func deleteMessage(_ message: ChatMessage) {
-        guard message.isCurrentUser else { return }
-        messages.removeAll { $0.id == message.id }
-        showToast("Message deleted")
+    func deleteMessage(_ message: ChatMessage) async {
+        guard message.isCurrentUser, let client else { return }
+        do {
+            try await client.threadMessages.delete(message: message.id)
+            await refreshRooms()
+            showToast("Message deleted")
+        } catch let error as ApiError {
+            showToast(error.message)
+        } catch {
+            showToast(error.localizedDescription)
+        }
     }
 
-    // MARK: Activity subscription simulation
+    // MARK: Background refresh
 
     func startLiveFeed() {
         guard liveFeedTask == nil else { return }
         liveFeedTask = Task {
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64.random(in: 14_000_000_000...24_000_000_000))
+                try? await Task.sleep(for: .seconds(20))
                 guard !Task.isCancelled, isSignedIn, !activityPaused else { continue }
-                deliverNextLiveEvent()
+                await refreshRooms()
             }
         }
     }
@@ -244,6 +269,8 @@ final class AppState {
 
     private let sessionStore = SessionStore()
     private var activeAuthServer: LoopbackCallbackServer?
+    private var activeAppID: String?
+    private var currentUserID: String?
 
     var isSignedIn: Bool {
         if case .signedIn = phase { return true }
@@ -324,7 +351,11 @@ final class AppState {
         }
         userEmail = session.email
         orgName = session.orgName
-        phase = .signedIn(makeClient(for: session))
+        activeAppID = session.appId
+        currentUserID = session.userId
+        let client = makeClient(for: session)
+        phase = .signedIn(client)
+        await refreshRooms()
     }
 
     /// Browser sign-in through ArchAgents — opens archagents.com's
@@ -360,12 +391,17 @@ final class AppState {
                 accessToken: result.accessToken,
                 refreshToken: result.refreshToken,
                 email: result.email.isEmpty ? nil : result.email,
-                orgName: result.orgName.isEmpty ? nil : result.orgName
+                orgName: result.orgName.isEmpty ? nil : result.orgName,
+                appId: result.appId,
+                userId: result.userId
             )
             sessionStore.save(session)
             userEmail = session.email
             orgName = session.orgName
+            activeAppID = result.appId
+            currentUserID = result.userId
             phase = .signedIn(makeClient(for: session))
+            await refreshRooms()
         } catch ArchAgentsAuth.AuthError.cancelled {
             phase = .signedOut
         } catch LoopbackCallbackServer.ServerError.cancelled {
@@ -407,12 +443,15 @@ final class AppState {
                         accessToken: accessToken,
                         refreshToken: client.refreshToken,
                         apiKey: publishableKey,
-                        email: email
+                        email: email,
+                        appId: nil,
+                        userId: nil
                     )
                 )
             }
             userEmail = email
             phase = .signedIn(client)
+            await refreshRooms()
         } catch let error as ApiError {
             signInError = error.message
             phase = .signedOut
@@ -430,6 +469,95 @@ final class AppState {
         phase = .signedOut
         userEmail = nil
         orgName = nil
+        activeAppID = nil
+        currentUserID = nil
+        hasLoadedRooms = false
+        roomLoadError = nil
+    }
+
+    // MARK: Team Rooms
+
+    /// Discover and hydrate every joined team containing a Team Room thread.
+    /// Team pagination is fully drained inside TeamRoomAPI.
+    func refreshRooms() async {
+        guard let client else { return }
+        isLoadingRooms = true
+        roomLoadError = nil
+        defer {
+            isLoadingRooms = false
+            hasLoadedRooms = true
+        }
+
+        do {
+            let knownEventIDs = Set(events.map(\.id))
+            let shouldNotify = hasLoadedRooms
+            let me = try await client.users.me()
+            currentUserID = me.id
+            activeAppID = activeAppID ?? me.app
+            if orgName == nil || orgName?.isEmpty == true {
+                orgName = me.orgName
+            }
+
+            let loaded = try await TeamRoomAPI.load(
+                client: client,
+                currentUserID: currentUserID,
+                organizationName: orgName
+            )
+            let currentUserEventIDs = Set(
+                loaded.flatMap(\.messages)
+                    .filter(\.isCurrentUser)
+                    .map { "event-\($0.id)" }
+            )
+            availableNetworks = loaded.map(\.room)
+            members = loaded.flatMap(\.members)
+            threads = loaded.flatMap(\.threads)
+            messages = loaded.flatMap(\.messages)
+            events = loaded.flatMap(\.events)
+            workstream = loaded.flatMap(\.workstream)
+            tasks = []
+            typingByThread = [:]
+            newEventIDs.formIntersection(Set(events.map(\.id)))
+            if shouldNotify {
+                for event in events.reversed()
+                where !knownEventIDs.contains(event.id)
+                    && !currentUserEventIDs.contains(event.id)
+                {
+                    if selectedTab != .activity
+                        || event.networkID != selectedNetwork.id
+                        || !event.matches(activityFilter)
+                    {
+                        newEventIDs.insert(event.id)
+                    }
+                    onNewEvent?(event)
+                }
+            }
+
+            if let prior = availableNetworks.first(where: { $0.id == selectedNetwork.id }) {
+                selectedNetwork = prior
+            } else if let first = availableNetworks.first {
+                selectedNetwork = first
+            } else {
+                selectedNetwork = .empty
+                selectedThread = .empty(networkID: "")
+                return
+            }
+            selectedThread = currentThreads.first(where: { $0.id == selectedThread.id })
+                ?? currentThreads.first(where: \.isDefault)
+                ?? currentThreads.first
+                ?? .empty(networkID: selectedNetwork.id)
+        } catch let error as ApiError {
+            if hasLoadedRooms && !availableNetworks.isEmpty {
+                showToast("Room refresh failed: \(error.message)")
+            } else {
+                roomLoadError = error.message
+            }
+        } catch {
+            if hasLoadedRooms && !availableNetworks.isEmpty {
+                showToast("Room refresh failed")
+            } else {
+                roomLoadError = error.localizedDescription
+            }
+        }
     }
 
     // MARK: Client construction

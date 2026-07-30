@@ -49,7 +49,7 @@ struct EventOverlayView: View {
                 .shadow(color: .black.opacity(0.2), radius: 22, y: 9)
         )
         .padding(2)
-        .help("Open network activity")
-        .accessibilityLabel("\(event.author): \(event.body). Open network activity.")
+        .help("Open Team Room activity")
+        .accessibilityLabel("\(event.author): \(event.body). Open Team Room activity.")
     }
 }

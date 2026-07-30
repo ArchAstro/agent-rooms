@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import ArchAstroPlatform
 @testable import Rooms
 
 @Suite struct AppStateTests {
@@ -30,13 +31,10 @@ import Testing
         #expect(state.currentTasks.allSatisfy { $0.threadID == state.selectedThread.id })
     }
 
-    @Test @MainActor func composer_sends_text_and_attachment_only_messages() {
+    @Test @MainActor func composer_requires_a_live_platform_session() async {
         let state = AppState()
-        let initial = state.messages.count
-        state.sendMessage("Status is green")
-        state.sendMessage("", attachmentName: "report.pdf")
-        #expect(state.messages.count == initial + 2)
-        #expect(state.messages.last?.attachmentName == "report.pdf")
+        let sent = await state.sendMessage("Status is green")
+        #expect(!sent)
     }
 
     @Test @MainActor func activity_marks_new_until_activity_is_left() {
@@ -141,7 +139,7 @@ import Testing
         #expect(state.selectedThread.id == selected)
     }
 
-    @Test @MainActor func network_without_threads_clears_chat_context() {
+    @Test @MainActor func network_without_threads_clears_chat_context() async {
         let state = AppState()
         let empty = NetworkSnapshot(
             id: "net_empty",
@@ -157,7 +155,8 @@ import Testing
         #expect(state.selectedThread.id.isEmpty)
         #expect(state.currentMessages.isEmpty)
         #expect(state.currentTasks.isEmpty)
-        #expect(!state.sendMessage("Keep this draft"))
+        let sent = await state.sendMessage("Keep this draft")
+        #expect(!sent)
     }
 
     @Test @MainActor func base_url_defaults_to_production() {
@@ -171,7 +170,7 @@ import Testing
         let url = state.webAppURL(
             extraQueryItems: [URLQueryItem(name: "session", value: "ses_test")]
         )
-        #expect(url?.path == "/networks/\(state.selectedNetwork.id)")
+        #expect(url?.path == "/teams/\(state.selectedNetwork.id)")
         let values = URLComponents(url: url!, resolvingAgainstBaseURL: false)?
             .queryItems?.reduce(into: [String: String]()) { $0[$1.name] = $1.value }
         #expect(values?["tab"] == "activity")
@@ -179,7 +178,7 @@ import Testing
         #expect(values?["session"] == "ses_test")
 
         state.archagentsURL = "https://host.example/archagents/"
-        #expect(state.webAppURL()?.path == "/archagents/networks/\(state.selectedNetwork.id)")
+        #expect(state.webAppURL()?.path == "/archagents/teams/\(state.selectedNetwork.id)")
         UserDefaults.standard.removeObject(forKey: "archagentsURL")
     }
 }
@@ -192,7 +191,9 @@ import Testing
             accessToken: "token",
             refreshToken: "refresh",
             email: "dev@example.com",
-            orgName: "Acme"
+            orgName: "Acme",
+            appId: "dap_test",
+            userId: "usr_test"
         )
         let data = try JSONEncoder().encode(session)
         let decoded = try JSONDecoder().decode(StoredSession.self, from: data)
@@ -200,6 +201,75 @@ import Testing
         #expect(decoded.accessToken == "token")
         #expect(decoded.refreshToken == "refresh")
         #expect(decoded.orgName == "Acme")
+        #expect(decoded.appId == "dap_test")
+        #expect(decoded.userId == "usr_test")
         #expect(decoded.apiKey == nil)
+    }
+}
+
+@Suite struct TeamRoomAPITests {
+    @Test func initials_are_stable_for_people_agents_and_empty_names() {
+        #expect(TeamRoomAPI.initials(for: "Calvin Giddings") == "CG")
+        #expect(TeamRoomAPI.initials(for: "Fleet") == "F")
+        #expect(TeamRoomAPI.initials(for: "") == "?")
+    }
+
+    @Test func relative_time_is_compact() {
+        #expect(TeamRoomAPI.relativeTime(Date()) == "now")
+        #expect(TeamRoomAPI.relativeTime(Date().addingTimeInterval(-3_700)) == "1h")
+        #expect(TeamRoomAPI.relativeTime(nil as Date?) == "")
+    }
+
+    /// Opt-in production smoke used by maintainers. Normal CI skips it; a
+    /// local authenticated run creates a mode-0600 temporary credential file
+    /// and proves the exact SDK/mapping path the app ships.
+    @Test func live_account_loads_its_real_team_rooms() async throws {
+        struct Credentials: Decodable {
+            var token: String
+            var publishableKey: String
+            var userID: String
+            var appID: String
+            var server: String
+        }
+        let url = URL(fileURLWithPath: "/tmp/rooms-live-smoke-current-user.json")
+        guard let data = try? Data(contentsOf: url) else { return }
+        let credentials = try JSONDecoder().decode(Credentials.self, from: data)
+
+        let client = PlatformClient(
+            baseUrl: credentials.server,
+            accessToken: credentials.token,
+            defaultHeaders: ["x-archastro-api-key": credentials.publishableKey]
+        )
+        defer { Task { await client.close() } }
+        let me = try await client.users.me()
+        #expect(me.id == credentials.userID)
+        let rooms = try await TeamRoomAPI.load(
+            client: client,
+            currentUserID: credentials.userID,
+            organizationName: "Live account"
+        )
+        #expect(!rooms.isEmpty)
+        #expect(rooms.allSatisfy { !$0.threads.isEmpty })
+        #expect(rooms.allSatisfy { $0.threads.allSatisfy { $0.title == "Team Room" } })
+        #expect(rooms.contains { !$0.messages.isEmpty })
+
+        let marker = "Rooms macOS live smoke \(UUID().uuidString)"
+        let threadID = try #require(rooms.first?.threads.first?.id)
+        try await TeamRoomAPI.post(
+            client: client,
+            appID: credentials.appID,
+            userID: credentials.userID,
+            threadID: threadID,
+            content: marker
+        )
+        let updated = try await TeamRoomAPI.load(
+            client: client,
+            currentUserID: credentials.userID,
+            organizationName: "Live account"
+        )
+        let smokeMessage = try #require(
+            updated.flatMap(\.messages).first(where: { $0.body == marker })
+        )
+        try await client.threadMessages.delete(message: smokeMessage.id)
     }
 }
