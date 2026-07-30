@@ -700,6 +700,7 @@ def _guard_config_origin(kind: str, value: str, trusted: set):
 # it in a real environment removes every configured-origin exfiltration guard.
 _guard_config_origin("server", PRODUCTION_SERVER, _trusted_servers())
 KIT_VERSION = "2026.07.25"
+CLIENT_SOURCE = "rooms-skill"
 ROOM_APP_NAME = "ArchAgents"
 
 # Where `doctor` looks to answer "is this copy behind?". The script itself is
@@ -1426,6 +1427,7 @@ def http_json(
             # which versions the fleet actually runs. A week of stale-kit
             # drift once went unmeasurable because this header didn't exist.
             "User-Agent": f"room-post/{KIT_VERSION}",
+            "X-Client-Source": CLIENT_SOURCE,
             **({"Authorization": f"Bearer {token}"} if token else {}),
         },
         method="POST" if body is not None else "GET",
@@ -1997,7 +1999,8 @@ def _http_json_short(url, token, timeout=3):
     than 3 seconds of a developer's post."""
     req = urllib.request.Request(
         url, headers={"Authorization": f"Bearer {token}",
-                      "User-Agent": f"room-post/{KIT_VERSION}"})
+                      "User-Agent": f"room-post/{KIT_VERSION}",
+                      "X-Client-Source": CLIENT_SOURCE})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.load(resp)
 
@@ -2128,7 +2131,8 @@ def objects_url(session, suffix=""):
 def http_get(url: str, token: str, timeout: float = 8) -> dict:
     req = urllib.request.Request(
         url, headers={"Authorization": f"Bearer {token}",
-                      "User-Agent": f"room-post/{KIT_VERSION}"}
+                      "User-Agent": f"room-post/{KIT_VERSION}",
+                      "X-Client-Source": CLIENT_SOURCE}
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.load(resp)
@@ -2174,6 +2178,7 @@ def _room_api(server: str, token: str, pub_key: str):
             method=method,
             headers={"Authorization": f"Bearer {token}",
                      "User-Agent": f"room-post/{KIT_VERSION}",
+                     "X-Client-Source": CLIENT_SOURCE,
                      "Content-Type": "application/json",
                      "x-archastro-api-key": pub_key})
         with urllib.request.urlopen(req, timeout=15) as r:
@@ -2469,6 +2474,7 @@ def _patch_record(session, object_id, fields):
         data=json.dumps({"fields": fields}).encode(),
         headers={"Content-Type": "application/json",
                  "User-Agent": f"room-post/{KIT_VERSION}",
+                 "X-Client-Source": CLIENT_SOURCE,
                  "Authorization": f"Bearer {session['accessToken']}"},
         method="PUT",
     )
@@ -2930,6 +2936,7 @@ def read_raw(limit: int = 30, session=None):
         headers={
             "Authorization": f"Bearer {session['accessToken']}",
             "User-Agent": f"room-post/{KIT_VERSION}",
+            "X-Client-Source": CLIENT_SOURCE,
             "x-archastro-api-key": _ROOM_CFG["publishable_key"],
         },
     )

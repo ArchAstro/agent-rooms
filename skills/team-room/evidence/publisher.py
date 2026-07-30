@@ -19,6 +19,8 @@ from .retry import clear_retry, save_retry
 from .sanitize import sanitize, SanitizationError
 from .bundle import rebuild_payload
 
+CLIENT_SOURCE = "rooms-skill"
+
 
 @dataclass(frozen=True)
 class PublishRequest:
@@ -52,7 +54,7 @@ class ArtifactClient:
         if data is not None and len(data) > 5 * 1024 * 1024:
             raise ValueError("artifact request exceeds bounded JSON envelope")
         request = urllib.request.Request(url, data=data, method=method,
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.token}", "User-Agent": "room-post/pr-evidence-v1"})
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.token}", "User-Agent": "room-post/pr-evidence-v1", "X-Client-Source": CLIENT_SOURCE})
         with urllib.request.urlopen(request, timeout=8) as response:
             raw = response.read(5 * 1024 * 1024 + 1)
         if len(raw) > 5 * 1024 * 1024: raise ArtifactValidationError("artifact response exceeds byte limit")
@@ -67,7 +69,7 @@ class ArtifactClient:
         if version is not None:
             url += "?" + urllib.parse.urlencode({"version": version})
         request = urllib.request.Request(url,
-            headers={"Authorization": f"Bearer {self.token}", "User-Agent": "room-post/pr-evidence-v1"})
+            headers={"Authorization": f"Bearer {self.token}", "User-Agent": "room-post/pr-evidence-v1", "X-Client-Source": CLIENT_SOURCE})
         with urllib.request.urlopen(request, timeout=8) as response:
             raw = response.read(3 * 1024 * 1024 + 1)
         if len(raw) > 3 * 1024 * 1024: raise ArtifactValidationError("artifact content exceeds byte limit")
