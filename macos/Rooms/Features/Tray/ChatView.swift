@@ -55,22 +55,18 @@ struct ChatView: View {
                 .overlay(alignment: .bottom) { Rectangle().fill(Theme.line).frame(height: 1) }
             }
 
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 13) {
-                        ForEach(filteredMessages) { message in
-                            messageRow(message).id(message.id)
-                        }
-                        if let typingName = appState.typingByThread[appState.selectedThread.id] {
-                            typingIndicator(typingName)
-                        }
-                    }.padding(14)
-                }
-                .scrollIndicators(.hidden)
-                .onChange(of: appState.messages.count) {
-                    if let id = appState.messages.last?.id { proxy.scrollTo(id, anchor: .bottom) }
-                }
+            ScrollView {
+                LazyVStack(spacing: 13) {
+                    ForEach(filteredMessages) { message in
+                        messageRow(message).id(message.id)
+                    }
+                    if let typingName = appState.typingByThread[appState.selectedThread.id] {
+                        typingIndicator(typingName)
+                    }
+                    paginationFooter
+                }.padding(14)
             }
+            .scrollIndicators(.hidden)
 
             HStack(spacing: 7) {
                 Button { showingImporter = true } label: {
@@ -171,6 +167,35 @@ struct ChatView: View {
             Text("\(name) is typing…").font(.system(size: 9)).foregroundStyle(Theme.muted)
             Spacer()
         }.padding(.leading, 36)
+    }
+
+    @ViewBuilder
+    private var paginationFooter: some View {
+        if searchTerm.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if appState.isLoadingOlderMessages {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Loading older messages…")
+                }
+                .font(.system(size: 8))
+                .foregroundStyle(Theme.muted2)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 5)
+            } else if appState.canLoadOlderMessages {
+                Color.clear
+                    .frame(height: 1)
+                    .onAppear {
+                        Task { await appState.loadOlderMessages() }
+                    }
+                    .accessibilityLabel("Load older messages")
+            } else if !appState.currentMessages.isEmpty {
+                Text("Beginning of room")
+                    .font(.system(size: 8))
+                    .foregroundStyle(Theme.muted2)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 5)
+            }
+        }
     }
 
     private func send() {

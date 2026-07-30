@@ -47,6 +47,8 @@ Rooms/
     AppDelegate.swift     Shared AppState + native menu-bar lifecycle
     StatusItemController  Status item, popover, pinned panel, settings window
     AppState.swift        @MainActor session + network, thread, chat, activity state
+    RoomChannelSession    SDK socket + ApiChatChannel subscriptions and mutations
+    TeamRoomAPI.swift     Generated SDK resource mapping and cursor history
     SessionStore.swift    Keychain persistence for tokens
     Theme.swift           Design tokens from the menubar mock (warm paper palette)
     Auth/                 ArchAgents browser handoff + loopback listener
@@ -63,8 +65,10 @@ thread, drains all team-membership pages, and hydrates real members and recent
 messages through the platform SDK. **Connection** summarizes the selected
 room, **Members** shows its people and agents, **Chat** reads and posts to the
 live Team Room thread, and **Activity** classifies those same posts using the
-Team Room grammar. The app refreshes every 20 seconds; file uploads and
-permissioned management hand off to the full web app.
+Team Room grammar. Generated `ApiChatChannel` subscriptions deliver new and
+updated messages, typing, unread counts, posting, deletion, and mark-read in
+real time; there is no recurring room poll. File uploads and permissioned
+management hand off to the full web app.
 
 Chat renders the same rich message grammar as the web room: GitHub-Flavored
 Markdown, protocol event bylines, images, files/media, link previews, tasks,
@@ -100,6 +104,13 @@ Keychain).
 Sessions saved by builds before live-room support can still read rooms. Signing
 in once with the current build refreshes the app/user identifiers required for
 posting.
+
+Room discovery checks joined teams concurrently. Each Team Room initially
+loads only its newest 20 messages, displayed newest-first. Reaching the bottom
+of the chat requests the next older page with the platform's opaque
+`before_cursor`. Both discovery/history requests and live chat use generated
+Swift SDK surfaces. On a Channel reconnect, a bounded SDK history request
+closes the offline gap without discarding history already paged into the view.
 
 ## Configuration
 
