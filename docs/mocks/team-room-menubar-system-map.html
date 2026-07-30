@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Rooms web ↔ macOS feature map</title>
+  <style>
+    :root{--ink:#121212;--muted:#68645e;--paper:#fbfaf7;--green:#0d8b6a;--soft:#e8f2ec;--line:rgba(18,18,18,.12);--amber:#a96300}
+    *{box-sizing:border-box}body{margin:0;background:#eeece7;color:var(--ink);font:14px Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.page{max-width:1180px;margin:38px auto;padding:34px;background:var(--paper);border:1px solid var(--line);border-radius:18px;box-shadow:0 20px 60px rgba(0,0,0,.08)}h1{font-size:30px;margin:0 0 8px}p{color:var(--muted);line-height:1.55}.summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:24px 0}.metric{padding:16px;border:1px solid var(--line);border-radius:12px;background:#fff}.metric b{display:block;font-size:24px}.metric span{font-size:11px;color:var(--muted)}table{border-collapse:collapse;width:100%;font-size:12px}th,td{padding:12px 10px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}th{font-size:10px;letter-spacing:.7px;color:var(--muted)}td:first-child{font-weight:700;width:17%}.status{display:inline-block;padding:3px 7px;border-radius:99px;font-size:9px;font-weight:800}.keep,.add{color:var(--green);background:var(--soft)}.drop{color:#9a3e3e;background:#f9e8e7}.web{color:var(--amber);background:#fdf3e3}.note{margin-top:22px;padding:14px 16px;border-left:3px solid var(--green);background:var(--soft);color:#315f52}.legend{display:flex;gap:7px;flex-wrap:wrap;margin:10px 0 20px}
+  </style>
+</head>
+<body><article class="page">
+  <h1>Web app → macOS Rooms map</h1>
+  <p>The web network detail page is the product source of truth. The macOS tray is a compact client of the same network, thread, member, task, and activity data—not a second product taxonomy.</p>
+  <div class="summary"><div class="metric"><b>4</b><span>shared primary sections</span></div><div class="metric"><b>6</b><span>mock-only concepts removed</span></div><div class="metric"><b>1</b><span>native-only shell capability: pin/overlay</span></div></div>
+  <div class="legend"><span class="status keep">KEEP / SHARED</span><span class="status add">ADD TO MAC</span><span class="status web">WEB HANDOFF</span><span class="status drop">DROP</span></div>
+  <table>
+    <thead><tr><th>Capability</th><th>Web app presence</th><th>Old mac mock</th><th>Reconciled mac app</th><th>Disposition</th></tr></thead>
+    <tbody>
+      <tr><td>Connection</td><td>Host/collaborator cards, member status and workstream.</td><td>Absent.</td><td>Dedicated Connection tab with relationship, workstream, Slack binding summary.</td><td><span class="status add">ADD TO MAC</span></td></tr>
+      <tr><td>Members</td><td>People/agent roster, role, org, joined date, permissioned management.</td><td>“Who’s working” synthesized card.</td><td>Dedicated roster. Add/role/remove hand off to web.</td><td><span class="status add">ADD TO MAC</span></td></tr>
+      <tr><td>Chat threads</td><td>Thread list, default badge, create/switch, live conversation.</td><td>No actual conversation UI.</td><td>Chat is default; thread picker and live-shaped message list.</td><td><span class="status add">ADD TO MAC</span></td></tr>
+      <tr><td>Composer</td><td>Text, attachment-only messages, drag/drop, previews, typing.</td><td>“Ask this room” synthetic prompt.</td><td>Real message composer, attachments and typing presence.</td><td><span class="status add">ADD TO MAC</span></td></tr>
+      <tr><td>Message actions</td><td>Copy, delete permitted own messages, attachment display.</td><td>Absent.</td><td>Context menu supports copy and permitted deletion; attachments render inline.</td><td><span class="status add">ADD TO MAC</span></td></tr>
+      <tr><td>Participants & tasks</td><td>Chat inspector with participant roster and live thread tasks.</td><td>Absent.</td><td>Compact thread inspector includes participants, tasks and settings handoff.</td><td><span class="status add">ADD TO MAC</span></td></tr>
+      <tr><td>Activity</td><td>Network activity, debug/info/warn/error/audit, pause and drill-in.</td><td>Generic start/done/lesson stream.</td><td>Uses web levels, pause/resume, session IDs and drill links.</td><td><span class="status add">REPLACE</span></td></tr>
+      <tr><td>Slack binding</td><td>Connect/edit/remove channel and choose replying agents.</td><td>Absent.</td><td>Binding is visible; editing opens the full web UI.</td><td><span class="status web">WEB HANDOFF</span></td></tr>
+      <tr><td>Network management</td><td>Rename, collaborators, leave, invite, create.</td><td>Fake “rooms” menu.</td><td>Actual network selector; mutation-heavy flows open web.</td><td><span class="status web">WEB HANDOFF</span></td></tr>
+      <tr><td>Picture/digest</td><td>No corresponding network-detail surface.</td><td>Primary tab with generated digest.</td><td>Removed.</td><td><span class="status drop">DROP</span></td></tr>
+      <tr><td>Personal inbox</td><td>No network-detail inbox or approval queue.</td><td>Approval/handoff/notice cards and Clear all.</td><td>Removed.</td><td><span class="status drop">DROP</span></td></tr>
+      <tr><td>Decision card</td><td>No dedicated decision-card primitive.</td><td>Synthesized review decision.</td><td>Removed; decisions remain ordinary thread messages/activity.</td><td><span class="status drop">DROP</span></td></tr>
+      <tr><td>Fake room categories</td><td>Networks and their real chat threads.</td><td>Deployments and Customer watch.</td><td>Replaced by network and thread selectors.</td><td><span class="status drop">DROP</span></td></tr>
+      <tr><td>Pin & overlay</td><td>Not applicable to browser.</td><td>Native tray behavior.</td><td>Kept as native UX; overlays are opt-in and carry real activity.</td><td><span class="status keep">NATIVE ONLY</span></td></tr>
+    </tbody>
+  </table>
+  <p class="note"><b>Boundary:</b> the tray optimizes frequent reading and messaging. Permissioned setup and destructive management stay in the web app, reached through explicit deep-link actions.</p>
+</article></body></html>

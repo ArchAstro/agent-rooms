@@ -7,11 +7,11 @@ struct EventOverlayView: View {
     var body: some View {
         Button(action: onOpen) {
             HStack(alignment: .top, spacing: 12) {
-                Text(event.kind.glyph)
-                    .font(.system(size: 13, weight: .heavy))
-                    .foregroundStyle(event.kind.color)
+                Image(systemName: event.level.systemImage)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(event.level.color)
                     .frame(width: 30, height: 30)
-                    .background(event.kind.background, in: RoundedRectangle(cornerRadius: 9))
+                    .background(event.level.background, in: RoundedRectangle(cornerRadius: 9))
 
                 VStack(alignment: .leading, spacing: 5) {
                     HStack {
@@ -20,7 +20,7 @@ struct EventOverlayView: View {
                             .foregroundStyle(Theme.ink)
                             .lineLimit(1)
                         Spacer()
-                        Text("Open stream")
+                        Text("Open activity")
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(Theme.purple)
                         Image(systemName: "chevron.right")
@@ -49,7 +49,7 @@ struct EventOverlayView: View {
                 .shadow(color: .black.opacity(0.2), radius: 22, y: 9)
         )
         .padding(2)
-        .help("Open Rooms stream")
-        .accessibilityLabel("\(event.author): \(event.body). Open Rooms stream.")
+        .help("Open network activity")
+        .accessibilityLabel("\(event.author): \(event.body). Open network activity.")
     }
 }

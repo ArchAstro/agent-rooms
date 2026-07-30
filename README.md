@@ -128,12 +128,16 @@ TEAM_ROOM_TOKEN=$token room-post done "nightly index rebuild finished clean" \
 ## Rooms for macOS
 
 The native companion keeps the room one click from the menu bar. Left-click
-opens the Picture / Inbox / Stream tray, right-click exposes Settings and Quit,
-and the tray can be pinned above normal windows. Optional event overlays are
-clickable, auto-dismiss by default, and never steal keyboard focus.
+opens the web-aligned Connection / Members / Chat / Activity tray, right-click
+exposes Settings and Quit, and the tray can be pinned above normal windows.
+Optional activity overlays are clickable, auto-dismiss by default, and never
+steal keyboard focus.
 
 Development and release instructions live in [`macos/README.md`](macos/README.md);
 Developer ID and notarization setup is in [`docs/SIGNING.md`](docs/SIGNING.md).
+The interactive tray mock and web-to-mac capability map live in
+[`docs/mocks/team-room-menubar.html`](docs/mocks/team-room-menubar.html) and
+[`docs/mocks/team-room-menubar-system-map.html`](docs/mocks/team-room-menubar-system-map.html).
 
 ---
 

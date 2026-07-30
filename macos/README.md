@@ -32,10 +32,11 @@ xcodebuild -project Rooms.xcodeproj -scheme Rooms test
 
 A menu-bar app (`NSStatusItem` + `NSPopover`, `LSUIElement`) — left-click
 drops the tray, right-click exposes Open / Settings / Quit, and "Keep visible"
-moves the same view into a floating panel. New room events use a bounded,
+moves the same view into a floating panel. New network activity uses a bounded,
 clickable overlay stack that joins every Space without stealing focus. Design source of truth:
-`firstlanding/docs/mocks/team-room-menubar.html` and the Agent Rooms
-product brief. Brand colors and the app/menu-bar mark follow
+[`../docs/mocks/team-room-menubar.html`](../docs/mocks/team-room-menubar.html),
+the [web-to-mac feature map](../docs/mocks/team-room-menubar-system-map.html),
+and the working ArchAgents network detail page. Brand colors and the app/menu-bar mark follow
 [`archagents.com`](https://archagents.com/) (`Design/archagents-mark.svg`
 preserves the source mark). Swift 6 strict concurrency, `@Observable` state.
 
@@ -45,25 +46,25 @@ Rooms/
   App/
     AppDelegate.swift     Shared AppState + native menu-bar lifecycle
     StatusItemController  Status item, popover, pinned panel, settings window
-    AppState.swift        @MainActor session + tray state (rooms, inbox, stream, ask)
+    AppState.swift        @MainActor session + network, thread, chat, activity state
     SessionStore.swift    Keychain persistence for tokens
     Theme.swift           Design tokens from the menubar mock (warm paper palette)
     Auth/                 ArchAgents browser handoff + loopback listener
   Features/Overlay/       Clickable, auto-dismissing incoming-event panels
   Features/
-    Tray/                 TrayView (head/segments/composer), Picture, Inbox,
-                          Stream, room switcher, welcome state, placeholder models
+    Tray/                 Connection, Members, Chat, Activity, network/thread pickers
     Auth/SignInView.swift Credential sheet → PlatformClient.withCredentials
   Settings/               Standard Settings window
 RoomsTests/               swift-testing unit tests
 ```
 
-The tray's three views mirror the mock: **Picture** (greeting, digest,
-who's-working-on-what live view, decisions, ✦ ask composer), **Inbox**
-(needs-you request cards with approve/hold actions and an all-clear
-state), and **Stream** (machine-exhaust event rows with All/You/Lessons
-filters). Content is placeholder data shaped like the mock until the
-views hydrate from the platform's thread APIs and `ApiChatChannel`.
+The tray mirrors the web network detail page: **Connection** (host and
+collaborator relationship, workstream, Slack binding), **Members** (people,
+agents, roles and organizations), **Chat** (real threads, messages,
+attachments and typing), and **Activity** (web activity levels, pause/resume
+and session drill-in). Permissioned setup and destructive management stay in
+the full web app. The current sample content uses the same domain shapes the
+platform APIs and live chat channel will hydrate.
 
 ## Sign-in
 

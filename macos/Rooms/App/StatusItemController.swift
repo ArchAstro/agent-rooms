@@ -53,9 +53,9 @@ final class StatusItemController: NSObject {
                 duration: self.appState.overlayDuration
             )
         }
-        overlayController.onOpen = { [weak self] in
+        overlayController.onOpen = { [weak self] event in
             guard let self else { return }
-            self.appState.selectedTab = .stream
+            self.appState.prepareActivityOverlay(event)
             self.showPopover()
         }
 
@@ -128,6 +128,7 @@ final class StatusItemController: NSObject {
 
     private func showPopover() {
         guard let button = statusItem?.button, let popover else { return }
+        if appState.selectedTab == .chat { appState.markSelectedThreadRead() }
         reloadPopoverContent()
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
@@ -156,6 +157,7 @@ final class StatusItemController: NSObject {
 
     private func showPinnedWindow() {
         closePopover()
+        if appState.selectedTab == .chat { appState.markSelectedThreadRead() }
         if pinnedWindow == nil {
             let root = TrayView(isPinned: true)
                 .environment(appState)
@@ -226,7 +228,7 @@ final class StatusItemController: NSObject {
                     (continuation: CheckedContinuation<Void, Never>) in
                     withObservationTracking {
                         _ = self.appState.isSignedIn
-                        _ = self.appState.inboxCount
+                        _ = self.appState.totalUnreadCount
                         _ = self.appState.overlayEnabled
                     } onChange: {
                         continuation.resume()
@@ -242,8 +244,8 @@ final class StatusItemController: NSObject {
         image?.isTemplate = true
         image?.accessibilityDescription = "Rooms"
         button.image = image
-        button.title = appState.isSignedIn && appState.inboxCount > 0
-            ? " \(appState.inboxCount)"
+        button.title = appState.isSignedIn && appState.totalUnreadCount > 0
+            ? " \(appState.totalUnreadCount)"
             : ""
     }
 }

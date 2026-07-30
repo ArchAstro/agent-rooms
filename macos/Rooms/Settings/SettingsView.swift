@@ -20,7 +20,7 @@ struct GeneralSettingsView: View {
         @Bindable var appState = appState
         Form {
             Section("Notifications") {
-                Toggle("Show new room events above other windows", isOn: $appState.overlayEnabled)
+                Toggle("Show new network activity above other windows", isOn: $appState.overlayEnabled)
                 Toggle("Dismiss overlays automatically", isOn: $appState.overlayAutoDismiss)
                     .disabled(!appState.overlayEnabled)
                 HStack {
