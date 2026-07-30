@@ -10,7 +10,7 @@ options:
 packages:
   ArchAstroPlatform:
     url: https://github.com/ArchAstro/archastro-swift
-    revision: 984cec2ddc74f554c8a57748d52868a70c019414
+    revision: 08fb1b5f92ac5f8997d252398a05105810e60bdc
   MarkdownUI:
     url: https://github.com/gonzalezreal/swift-markdown-ui
     revision: 5f613358148239d0292c0cef674a3c2314737f9e
