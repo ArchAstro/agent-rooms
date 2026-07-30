@@ -318,6 +318,135 @@ def test_cold_recovery_records_an_existing_confirmed_message_identity():
     print("PASS  cold recovery records an existing confirmed message identity")
 
 
+def confirmed_state(client, request, **overrides):
+    value = {
+        "artifact_id": client.artifact["id"],
+        "artifact_version": client.artifact["version"],
+        "head_sha": SHA_A,
+        "content_hash": semantic_hash(client.artifact["content"]),
+        "message_id": "m-existing",
+        "message_pending": None,
+    }
+    value.update(overrides)
+    return {request.subject_key: value}
+
+
+def test_confirmed_local_state_replaces_a_rebased_head_without_manual_flags():
+    with tempfile.TemporaryDirectory() as td:
+        client = ConflictClient()
+        state_path = Path(td) / "state.json"
+        request = PublishRequest(
+            "github.com/owner/repository#7",
+            "pr-evidence--owner-repository--7--x",
+            SHA_A,
+            SHA_B,
+            "session-other",
+            full_content(SHA_B, session_id="session-other"),
+        )
+        state_path.write_text(json.dumps(confirmed_state(client, request)))
+        state_path.chmod(0o600)
+
+        result = Publisher(client, state_path, Policy()).publish(request)
+
+        assert result.status == "updated", result
+        assert client.artifact["content"]["subject"]["head_sha"] == SHA_B
+        state = json.loads(state_path.read_text())[request.subject_key]
+        assert state["head_sha"] == SHA_B
+        assert state["message_id"] == "m-existing"
+    print("PASS  confirmed local state safely replaces a rebased PR head")
+
+
+def test_inexact_local_state_cannot_replace_a_rebased_head():
+    cases = {
+        "artifact id": {"artifact_id": "a-stale"},
+        "artifact version": {"artifact_version": 2},
+        "head": {"head_sha": "c" * 40},
+        "content hash": {"content_hash": "0" * 64},
+        "missing message": {"message_id": None},
+        "empty message": {"message_id": ""},
+        "initial pending": {"message_pending": "initial"},
+        "update pending": {"message_pending": "update"},
+    }
+    for label, overrides in cases.items():
+        with tempfile.TemporaryDirectory() as td:
+            client = ConflictClient()
+            state_path = Path(td) / "state.json"
+            request = PublishRequest(
+                "github.com/owner/repository#7",
+                "pr-evidence--owner-repository--7--x",
+                SHA_A,
+                SHA_B,
+                "session-other",
+                full_content(SHA_B, session_id="session-other"),
+            )
+            state_path.write_text(json.dumps(
+                confirmed_state(client, request, **overrides)
+            ))
+            state_path.chmod(0o600)
+
+            result = Publisher(client, state_path, Policy()).publish(request)
+
+            assert result.status == "withheld", (label, result)
+            assert client.updated == 0, label
+            assert client.artifact["content"]["subject"]["head_sha"] == SHA_A, label
+    print("PASS  every local replacement witness must match exactly")
+
+
+def test_untrusted_local_state_cannot_authorize_a_rebased_head():
+    for kind in ("world-readable", "symlink"):
+        with tempfile.TemporaryDirectory() as td:
+            client = ConflictClient()
+            root = Path(td)
+            state_path = root / "state.json"
+            request = PublishRequest(
+                "github.com/owner/repository#7",
+                "pr-evidence--owner-repository--7--x",
+                SHA_A,
+                SHA_B,
+                "session-other",
+                full_content(SHA_B, session_id="session-other"),
+            )
+            encoded = json.dumps(confirmed_state(client, request))
+            if kind == "world-readable":
+                state_path.write_text(encoded)
+                state_path.chmod(0o644)
+            else:
+                target = root / "substituted.json"
+                target.write_text(encoded)
+                target.chmod(0o600)
+                state_path.symlink_to(target)
+
+            result = Publisher(client, state_path, Policy()).publish(request)
+
+            assert result.status == "withheld", (kind, result)
+            assert client.updated == 0, kind
+            assert client.artifact["content"]["subject"]["head_sha"] == SHA_A, kind
+    print("PASS  untrusted local state cannot authorize head replacement")
+
+
+def test_state_authorized_rebase_loses_safely_to_a_concurrent_remote_head():
+    with tempfile.TemporaryDirectory() as td:
+        client = ConcurrentRewriteClient()
+        state_path = Path(td) / "state.json"
+        request = PublishRequest(
+            "github.com/owner/repository#7",
+            "pr-evidence--owner-repository--7--x",
+            SHA_A,
+            SHA_B,
+            "session-other",
+            full_content(SHA_B, session_id="session-other"),
+        )
+        state_path.write_text(json.dumps(confirmed_state(client, request)))
+        state_path.chmod(0o600)
+
+        result = Publisher(client, state_path, Policy()).publish(request)
+
+        assert result.status == "withheld", result
+        assert client.artifact["version"] == 2
+        assert client.artifact["content"]["subject"]["head_sha"] == "c" * 40
+    print("PASS  concurrent remote head wins over state-authorized replacement")
+
+
 def test_large_legacy_production_artifact_is_recovered_and_attached_without_data_loss():
     with tempfile.TemporaryDirectory() as td:
         client = LegacyProductionOrphanClient()
@@ -720,6 +849,10 @@ if __name__ == "__main__":
     test_initial_message_confirms_the_attachment_and_retries_once_when_materialization_lags()
     test_authoritative_confirmation_failure_queues_instead_of_claiming_publication()
     test_cold_recovery_records_an_existing_confirmed_message_identity()
+    test_confirmed_local_state_replaces_a_rebased_head_without_manual_flags()
+    test_inexact_local_state_cannot_replace_a_rebased_head()
+    test_untrusted_local_state_cannot_authorize_a_rebased_head()
+    test_state_authorized_rebase_loses_safely_to_a_concurrent_remote_head()
     test_large_legacy_production_artifact_is_recovered_and_attached_without_data_loss()
     test_one_conflict_refetches_and_second_conflict_queues_sanitized_state()
     test_explicit_local_capture_mode_only_narrows_the_complete_default()
