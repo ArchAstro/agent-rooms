@@ -9,7 +9,7 @@ struct ActivityView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Activity").font(.system(size: 17, weight: .bold)).foregroundStyle(Theme.ink)
-                    Text("Network-scoped agent and thread events").font(.system(size: 9)).foregroundStyle(Theme.muted)
+                    Text("Room posts classified by the Team Room grammar").font(.system(size: 9)).foregroundStyle(Theme.muted)
                 }
                 Spacer()
                 Button {

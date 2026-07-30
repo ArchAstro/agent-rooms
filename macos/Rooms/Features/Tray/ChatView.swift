@@ -81,7 +81,10 @@ struct ChatView: View {
                 Button(action: send) {
                     Image(systemName: "arrow.up").font(.system(size: 10, weight: .bold)).foregroundStyle(.white)
                         .frame(width: 25, height: 25).background(Theme.ink, in: RoundedRectangle(cornerRadius: 7))
-                }.buttonStyle(.plain).disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }.buttonStyle(.plain).disabled(
+                    draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || appState.isSendingMessage
+                )
             }
             .padding(8).background(Color.white, in: RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.lineStrong, lineWidth: 1))
@@ -89,7 +92,7 @@ struct ChatView: View {
         }
         .fileImporter(isPresented: $showingImporter, allowedContentTypes: [.data]) { result in
             if case .success(let url) = result {
-                appState.sendMessage("", attachmentName: url.lastPathComponent)
+                Task { await appState.sendMessage("", attachmentName: url.lastPathComponent) }
             }
         }
     }
@@ -143,7 +146,7 @@ struct ChatView: View {
             }
             if message.isCurrentUser {
                 Button("Delete message", role: .destructive) {
-                    appState.deleteMessage(message)
+                    Task { await appState.deleteMessage(message) }
                 }
             }
         }
@@ -158,7 +161,10 @@ struct ChatView: View {
     }
 
     private func send() {
-        if appState.sendMessage(draft) { draft = "" }
+        let content = draft
+        Task {
+            if await appState.sendMessage(content) { draft = "" }
+        }
     }
 
     private var filteredMessages: [ChatMessage] {
@@ -193,7 +199,7 @@ struct ThreadInspectorView: View {
                         .frame(width: 25, height: 25).background(Theme.green, in: Circle())
                         .overlay(Circle().stroke(Theme.paper, lineWidth: 2))
                 }
-                Text("\(appState.currentMembers.count) in network").font(.system(size: 9)).foregroundStyle(Theme.muted).padding(.leading, 10)
+                Text("\(appState.currentMembers.count) in room").font(.system(size: 9)).foregroundStyle(Theme.muted).padding(.leading, 10)
             }
             SectionLabel(text: "Tasks")
             ForEach(appState.currentTasks) { task in
