@@ -202,7 +202,7 @@ That workflow:
 - Pushes branch `release/vX.Y.Z`
 - Opens a PR back to `main`
 - After approval and merge, **Release DMG** tags that reviewed commit, signs,
-  notarizes, and publishes the GitHub Release
+  notarizes, and publishes `Rooms-X.Y.Z.dmg` on the GitHub Release
 
 ```fish
 gh workflow run "Cut release" --repo "$GH_REPO" -f bump=patch
