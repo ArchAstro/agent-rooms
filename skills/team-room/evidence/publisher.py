@@ -7,6 +7,7 @@ import base64
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
 import time
 import urllib.error
@@ -147,6 +148,28 @@ class Publisher:
             data = json.loads(self.state_path.read_text())
             return data if isinstance(data, dict) else {}
         except (OSError, ValueError): return {}
+
+    def _trusted_state(self) -> dict[str, Any] | None:
+        """Read state that is private enough to authorize head replacement."""
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(self.state_path, flags)
+            with os.fdopen(fd, "r", encoding="utf-8") as handle:
+                metadata = os.fstat(handle.fileno())
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_uid != os.getuid()
+                    or stat.S_IMODE(metadata.st_mode) != 0o600
+                    or metadata.st_size > 5 * 1024 * 1024
+                ):
+                    return None
+                raw = handle.read(5 * 1024 * 1024 + 1)
+            if len(raw.encode("utf-8")) > 5 * 1024 * 1024:
+                return None
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else None
+        except (OSError, UnicodeError, ValueError):
+            return None
 
     def _save_state(self, request: PublishRequest, artifact: Mapping[str, Any], content: Mapping[str, Any], pending: str | None = None, message_id: str | None = None):
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -299,13 +322,33 @@ class Publisher:
             return nested.get("id") if isinstance(nested, Mapping) and isinstance(nested.get("id"), str) else None
         return None
 
-    def _head_is_allowed(self, remote: Mapping[str, Any], request: PublishRequest) -> bool:
+    def _head_is_allowed(
+        self,
+        remote: Mapping[str, Any],
+        request: PublishRequest,
+        state: Mapping[str, Any] | None = None,
+    ) -> bool:
         existing_head = remote["content"]["subject"]["head_sha"]
         if existing_head == request.head_sha:
             return True
-        return self.ancestor(existing_head, request.head_sha) or (
+        explicit_replacement = (
             request.replace_head_from == existing_head
             and request.from_artifact_version == remote["version"]
+        )
+        confirmed_local_replacement = (
+            isinstance(state, Mapping)
+            and state.get("artifact_id") == remote["id"]
+            and state.get("artifact_version") == remote["version"]
+            and state.get("head_sha") == existing_head
+            and state.get("content_hash") == semantic_hash(remote["content"])
+            and isinstance(state.get("message_id"), str)
+            and bool(state["message_id"])
+            and state.get("message_pending") is None
+        )
+        return (
+            self.ancestor(existing_head, request.head_sha)
+            or explicit_replacement
+            or confirmed_local_replacement
         )
 
     def _show_written_version(self, artifact_id: str, version: int) -> Mapping[str, Any]:
@@ -361,7 +404,14 @@ class Publisher:
         except (SanitizationError, ValueError, TypeError):
             return PublishResult("withheld")
         try:
-            state = self._state().get(request.subject_key, {})
+            trusted_state = self._trusted_state()
+            state_document = trusted_state if trusted_state is not None else self._state()
+            state = state_document.get(request.subject_key, {})
+            replacement_state = (
+                trusted_state.get(request.subject_key, {})
+                if trusted_state is not None
+                else None
+            )
             artifact = None
             cold_recovery = False
             aid = state.get("artifact_id") if isinstance(state, Mapping) else None
@@ -388,7 +438,7 @@ class Publisher:
                 # Exact-name discovery is not proof this orphan belongs to the
                 # requested PR head. Reject it before policy rewriting, state,
                 # or an attachment can make that false adoption durable.
-                if not self._head_is_allowed(remote, request):
+                if not self._head_is_allowed(remote, request, replacement_state):
                     return PublishResult("withheld", remote["id"], remote["version"])
                 # A create response may have vanished after the server stored
                 # the artifact. Exact-name discovery plus a native message key
@@ -422,7 +472,7 @@ class Publisher:
                 cold_attachment_needed = existing_initial_message is None
             # A response-loss retry is also a recovery path. Recheck the
             # current head before either attaching or recording its outcome.
-            if not self._head_is_allowed(remote, request):
+            if not self._head_is_allowed(remote, request, replacement_state):
                 return PublishResult("withheld", remote["id"], remote["version"])
             if isinstance(state, Mapping) and state.get("message_pending") == "initial":
                 message = self._initial_message(request, remote)
@@ -470,7 +520,7 @@ class Publisher:
                 except Exception as exc:
                     if not self._is_conflict(exc) or attempt: return self._queue(request, "version_conflict", remote)
                     remote = self._remote(self.client.show_artifact(remote["id"]), request.artifact_name, request.subject_key)
-                    if not self._head_is_allowed(remote, request):
+                    if not self._head_is_allowed(remote, request, replacement_state):
                         return PublishResult("withheld", remote["id"], remote["version"])
                     merged = restrict_payload(self._merge(remote["content"], content, request.session_id), self.policy)
                     merged.setdefault("current", {})["generated_at"] = remote["content"].get("current", {}).get("generated_at")
