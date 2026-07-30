@@ -305,15 +305,31 @@ def test_posted_confirmation_line_never_crashes():
     print("PASS  test_posted_confirmation_line_never_crashes")
 
 
-def test_wrapper_never_claims_a_landed_post_was_lost():
-    # A NameError AFTER a successful send once produced "did NOT land" and
-    # a duplicate repost. Once _POST_LANDED is set, the message must say so.
-    rp._POST_LANDED = True
+def test_wrapper_does_not_invite_a_duplicate_after_a_late_failure():
+    # A failure AFTER a successful send once produced "did NOT land" and
+    # invited a duplicate repost. The non-disruptive wrapper now stays quiet
+    # when it cannot distinguish a pre-send failure from a post-send failure.
+    original_main = rp.main
+    original_health = rp.health_event
+    original_argv = list(sys.argv)
+    output = io.StringIO()
+    rp.main = lambda: (_ for _ in ()).throw(RuntimeError("after send"))
+    rp.health_event = lambda *_args, **_kwargs: None
+    sys.argv = ["room-post", "done", "already accepted"]
     try:
-        assert rp._POST_LANDED  # the wrapper reads this exact flag
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            try:
+                rp._run_never_blocking()
+            except SystemExit as exc:
+                assert exc.code == 0, exc.code
+            else:
+                raise AssertionError("soft-failure wrapper did not exit")
     finally:
-        rp._POST_LANDED = False
-    print("PASS  test_wrapper_never_claims_a_landed_post_was_lost")
+        rp.main = original_main
+        rp.health_event = original_health
+        sys.argv = original_argv
+    assert "did NOT land" not in output.getvalue(), output.getvalue()
+    print("PASS  test_wrapper_does_not_invite_a_duplicate_after_a_late_failure")
 
 
 def test_mention_matcher_finds_others_mentions_only():

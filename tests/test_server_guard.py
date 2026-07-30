@@ -34,6 +34,22 @@ def run_kit(cfg, *args, env_extra=None):
 
 HOSTILE = {"thread_id": "t", "team_id": "m", "server": "https://evil.example",
            "portal": "p", "app_slug": "a", "publishable_key": "k"}
+HOSTILE_PORTAL = {
+    **HOSTILE,
+    "server": "https://platform.archastro.ai",
+    "portal": "https://evil.example",
+}
+HOSTILE_MIRROR_PORTAL = {
+    **HOSTILE,
+    "server": "https://platform.archastro.ai",
+    "portal": "https://archagents.com",
+    "mirrors": [{
+        "name": "staging",
+        "server": "https://platform.archastro.ai",
+        "portal": "https://evil.example",
+        "app_slug": "agentnetwork",
+    }],
+}
 
 
 def test_hostile_config_is_refused_before_any_auth():
@@ -62,9 +78,25 @@ def test_trust_escape_is_explicit_only():
     print("PASS  test_trust_escape_is_explicit_only")
 
 
+def test_hostile_login_portal_is_refused_even_with_a_trusted_api_server():
+    r = run_kit(HOSTILE_PORTAL, "doctor")
+    assert "REFUSING" in r.stderr, r.stderr
+    assert "evil.example" in r.stderr, r.stderr
+    print("PASS  test_hostile_login_portal_is_refused_even_with_a_trusted_api_server")
+
+
+def test_hostile_mirror_portal_is_refused_before_auto_login_can_open_it():
+    r = run_kit(HOSTILE_MIRROR_PORTAL, "doctor")
+    assert "REFUSING" in r.stderr, r.stderr
+    assert "evil.example" in r.stderr, r.stderr
+    print("PASS  test_hostile_mirror_portal_is_refused_before_auto_login_can_open_it")
+
+
 if __name__ == "__main__":
     test_hostile_config_is_refused_before_any_auth()
     test_refusal_never_blocks_a_read_verb()
     test_refusal_is_loud_for_operator_verbs()
     test_trust_escape_is_explicit_only()
+    test_hostile_login_portal_is_refused_even_with_a_trusted_api_server()
+    test_hostile_mirror_portal_is_refused_before_auto_login_can_open_it()
     print("OK")

@@ -33,6 +33,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 KIT = os.path.join(HERE, "..", "skills", "team-room", "room_post.py")
 
 CALLS = []
+MESSAGE_ATTEMPTS = []
 
 MY_ORG = "org_mine"
 ROOM_LABEL = "archastro_team_room"
@@ -82,6 +83,8 @@ class Stub(http.server.BaseHTTPRequestHandler):
     teams = [REAL, FORGED]
     paginate_joinable = False
     fail_me_status = None
+    courier_message_status = 403
+    human_message_status = None
     threads = {
         "tem_real": [{"id": "thr_real", "title": "team room"}],
         "tem_forged": [{"id": "thr_forged", "title": "team room"}],
@@ -106,7 +109,7 @@ class Stub(http.server.BaseHTTPRequestHandler):
         token = (self.headers.get("Authorization") or "").removeprefix("Bearer ")
         if self.path.startswith("/org/cli-auth"):
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            callback = query["redirect_uri"][0]
+            callback = query["redirect_uri"][-1]
             sep = "&" if "?" in callback else "?"
             target = callback + sep + urllib.parse.urlencode({
                 "access_token": "human-token",
@@ -126,7 +129,7 @@ class Stub(http.server.BaseHTTPRequestHandler):
                 self._json(Stub.fail_me_status, {"error": "identity unavailable"})
                 return
             org = "org_attacker" if token == "courier-token" else MY_ORG
-            self._json(200, {"id": "usr_teammate", "org": org})
+            self._json(200, {"id": "usr_teammate", "org": org, "app_id": "app"})
             return
         if self.path.startswith("/api/v1/teams/tem_"):
             team_id = self.path.split("/api/v1/teams/")[1].split("?")[0]
@@ -179,11 +182,29 @@ class Stub(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         CALLS.append(("POST", self.path))
+        token = (self.headers.get("Authorization") or "").removeprefix("Bearer ")
         if self.path.endswith("/join"):
             Stub.joined.add(self.path.split("/api/v1/teams/")[1].split("/join")[0])
             # The real self-join endpoint succeeds with no response body.
             self.send_response(204)
             self.end_headers()
+        elif "/messages" in self.path:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length) or b"{}")
+            MESSAGE_ATTEMPTS.append({
+                "token": token,
+                "path": self.path,
+                "body": body,
+            })
+            status = (
+                Stub.courier_message_status
+                if token == "courier-token"
+                else Stub.human_message_status
+            )
+            if status:
+                self._json(status, {"error": "message rejected"})
+            else:
+                self._json(200, {})
         else:
             self._json(200, {})
 
@@ -218,6 +239,8 @@ def reset(teams=None, joined=None, threads=None):
     Stub.joined = set([] if joined is None else joined)
     Stub.paginate_joinable = False
     Stub.fail_me_status = None
+    Stub.courier_message_status = 403
+    Stub.human_message_status = None
     Stub.threads = dict({
         "tem_real": [{"id": "thr_real", "title": "team room"}],
         "tem_forged": [{"id": "thr_forged", "title": "team room"}],
@@ -226,6 +249,7 @@ def reset(teams=None, joined=None, threads=None):
         "tem_foreign_legacy": [{"id": "thr_foreign", "title": "team room"}],
     } if threads is None else threads)
     CALLS.clear()
+    MESSAGE_ATTEMPTS.clear()
 
 
 def test_a_teammate_is_joined_to_the_room_their_company_already_has():
@@ -435,7 +459,7 @@ def test_untrusted_discovery_server_never_receives_the_token():
     print("PASS  an untrusted discovery server receives no bearer token")
 
 
-def write_room_config(path, team_id, thread_id):
+def write_room_config(path, team_id, thread_id, app_slug="agentnetwork"):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         json.dump({
@@ -443,7 +467,7 @@ def write_room_config(path, team_id, thread_id):
             "team_id": team_id,
             "server": SERVER,
             "portal": SERVER,
-            "app_slug": "agentnetwork",
+            "app_slug": app_slug,
             "publishable_key": "stub-publishable-key",
         }, f)
 
@@ -490,8 +514,10 @@ def run_browser_login(module):
     import webbrowser
 
     old_open = webbrowser.open
+    opened = []
 
     def open_callback(url):
+        opened.append(url)
         def visit():
             with urllib.request.urlopen(url, timeout=5) as response:
                 response.read()
@@ -503,6 +529,8 @@ def run_browser_login(module):
         module.login(timeout=5)
     finally:
         webbrowser.open = old_open
+    assert len(opened) == 1, opened
+    return opened[0]
 
 
 def test_browser_login_ends_with_a_usable_company_room():
@@ -531,6 +559,161 @@ def test_browser_login_ends_with_a_usable_company_room():
         for method, path in CALLS
     ), CALLS
     print("PASS  browser login ends with a usable room and first post")
+
+
+def test_first_post_falls_back_to_the_human_login_when_a_courier_is_for_another_room():
+    reset()
+    home = tempfile.mkdtemp()
+    module = load_kit_module(home)
+
+    run_browser_login(module)
+
+    posted = run_kit(
+        ["done", "first Stripe pilot post"],
+        home,
+        SERVER,
+        {"TEAM_ROOM_TOKEN": "courier-token"},
+    )
+
+    assert posted.returncode == 0, posted.stdout + posted.stderr
+    assert [attempt["token"] for attempt in MESSAGE_ATTEMPTS] == [
+        "courier-token",
+        "human-token",
+    ], MESSAGE_ATTEMPTS
+    assert all(
+        "/apps/app/threads/thr_real/messages" in attempt["path"]
+        for attempt in MESSAGE_ATTEMPTS
+    ), MESSAGE_ATTEMPTS
+    assert all(
+        attempt["body"]["user"] == "usr_teammate"
+        and attempt["body"]["content"].endswith(": first Stripe pilot post")
+        for attempt in MESSAGE_ATTEMPTS
+    ), MESSAGE_ATTEMPTS
+    print("PASS  a foreign courier cannot make the human's first post fail")
+
+
+def test_first_post_ignores_a_stale_courier_token_file_after_human_login():
+    reset()
+    home = tempfile.mkdtemp()
+    token_path = os.path.join(home, ".config", "team-room", "token")
+    os.makedirs(os.path.dirname(token_path), exist_ok=True)
+    with open(token_path, "w") as f:
+        f.write("courier-token")
+    module = load_kit_module(home)
+
+    run_browser_login(module)
+
+    posted = run_kit(
+        ["done", "first Stripe pilot post"],
+        home,
+        SERVER,
+        {"TEAM_ROOM_TOKEN": None},
+    )
+
+    assert posted.returncode == 0, posted.stdout + posted.stderr
+    assert [attempt["token"] for attempt in MESSAGE_ATTEMPTS] == [
+        "courier-token",
+        "human-token",
+    ], MESSAGE_ATTEMPTS
+    assert all(
+        "/apps/app/threads/thr_real/messages" in attempt["path"]
+        and attempt["body"]["user"] == "usr_teammate"
+        for attempt in MESSAGE_ATTEMPTS
+    ), MESSAGE_ATTEMPTS
+    print("PASS  a stale courier token file cannot break the human's first post")
+
+
+def test_an_authorized_courier_posts_once_without_using_the_human_login():
+    reset()
+    Stub.courier_message_status = None
+    home = tempfile.mkdtemp()
+    module = load_kit_module(home)
+    run_browser_login(module)
+
+    posted = run_kit(
+        ["done", "courier post"],
+        home,
+        SERVER,
+        {"TEAM_ROOM_TOKEN": "courier-token"},
+    )
+
+    assert posted.returncode == 0, posted.stdout + posted.stderr
+    assert [attempt["token"] for attempt in MESSAGE_ATTEMPTS] == [
+        "courier-token",
+    ], MESSAGE_ATTEMPTS
+    assert MESSAGE_ATTEMPTS[0]["body"]["user"] == "usr_teammate"
+    print("PASS  an authorized courier remains the single posting principal")
+
+
+def test_courier_fallback_is_narrow_and_bounded():
+    for status, expected_tokens in (
+        (401, ["courier-token", "human-token"]),
+        (404, ["courier-token", "human-token"]),
+        (500, ["courier-token"]),
+    ):
+        reset()
+        Stub.courier_message_status = status
+        home = tempfile.mkdtemp()
+        module = load_kit_module(home)
+        run_browser_login(module)
+
+        run_kit(
+            ["done", f"courier status {status}"],
+            home,
+            SERVER,
+            {"TEAM_ROOM_TOKEN": "courier-token"},
+        )
+
+        assert [attempt["token"] for attempt in MESSAGE_ATTEMPTS] == expected_tokens, (
+            status,
+            MESSAGE_ATTEMPTS,
+        )
+
+    reset()
+    Stub.courier_message_status = 403
+    Stub.human_message_status = 403
+    home = tempfile.mkdtemp()
+    module = load_kit_module(home)
+    run_browser_login(module)
+
+    run_kit(
+        ["done", "both principals rejected"],
+        home,
+        SERVER,
+        {"TEAM_ROOM_TOKEN": "courier-token"},
+    )
+
+    assert [attempt["token"] for attempt in MESSAGE_ATTEMPTS] == [
+        "courier-token",
+        "human-token",
+    ], MESSAGE_ATTEMPTS
+    print("PASS  courier fallback covers auth mismatch without retry loops")
+
+
+def test_repo_controlled_app_slug_cannot_inject_a_second_callback():
+    reset()
+    home = tempfile.mkdtemp()
+    pinned = os.path.join(tempfile.mkdtemp(), "room.json")
+    malicious_slug = "agentnetwork&redirect_uri=https://evil.example/callback"
+    write_room_config(
+        pinned,
+        "tem_real",
+        "thr_real",
+        app_slug=malicious_slug,
+    )
+    module = load_kit_module(home, room_json_path=pinned)
+
+    os.environ["ROOM_JSON"] = pinned
+    try:
+        opened_url = run_browser_login(module)
+    finally:
+        os.environ.pop("ROOM_JSON", None)
+
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(opened_url).query)
+    assert query["slug"] == [malicious_slug], query
+    assert len(query["redirect_uri"]) == 1, query
+    assert query["redirect_uri"][0].startswith("http://127.0.0.1:"), query
+    print("PASS  a repo-controlled app slug cannot replace the login callback")
 
 
 def test_browser_login_fails_when_room_connection_is_incomplete():
@@ -603,6 +786,11 @@ def main():
         test_corrupt_human_credentials_do_not_fall_back_to_a_courier()
         test_untrusted_discovery_server_never_receives_the_token()
         test_browser_login_ends_with_a_usable_company_room()
+        test_first_post_falls_back_to_the_human_login_when_a_courier_is_for_another_room()
+        test_first_post_ignores_a_stale_courier_token_file_after_human_login()
+        test_an_authorized_courier_posts_once_without_using_the_human_login()
+        test_courier_fallback_is_narrow_and_bounded()
+        test_repo_controlled_app_slug_cannot_inject_a_second_callback()
         test_browser_login_fails_when_room_connection_is_incomplete()
         test_browser_login_replaces_a_stale_foreign_machine_room()
         test_browser_login_joins_an_org_valid_pinned_room()
