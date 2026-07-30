@@ -24,6 +24,7 @@ from .sanitize import SanitizationError, sanitize, sanitize_event
 SCHEMA = "agent-room-pr-evidence/v1"
 DEFAULT_MAX_BYTES = 3 * 1024 * 1024
 CAPTURE_MODES = {"review_capsule", "metadata_only", "local_review"}
+RENDERED_PREVIEW_MAX_BYTES = 96 * 1024
 
 
 @dataclass(frozen=True)
@@ -169,21 +170,109 @@ def _tests_json(chapters: Iterable[Mapping[str, Any]]) -> list[dict[str, str]]:
     return result
 
 
+def _preview_items(
+    lines: list[str],
+    heading: str,
+    items: Iterable[str],
+    budget: int,
+    full_pointer: str,
+) -> None:
+    lines.extend(["", heading])
+    suffix = f"- … Full {full_pointer}"
+    used = 0
+    found = False
+    for item in items:
+        found = True
+        available = budget - used - len(suffix.encode("utf-8")) - 1
+        item_bytes = item.encode("utf-8")
+        if len(item_bytes) + 1 > available:
+            if available > 2:
+                clipped = item_bytes[: available - len("…".encode("utf-8"))]
+                lines.append(clipped.decode("utf-8", "ignore") + "…")
+            lines.append(suffix)
+            return
+        lines.append(item)
+        used += len(item_bytes) + 1
+    if not found:
+        lines.append("- None captured")
+
+
 def _render(subject: Mapping[str, Any], chapters: list[Mapping[str, Any]], patch: Mapping[str, Any], tests: list[Mapping[str, Any]], omissions: list[Omission]) -> str:
-    lines = [f"## Evidence for {subject['key']}", "", f"Head: `{subject['head_sha']}`", "", "### Prompts"]
-    for chapter in chapters:
-        for prompt in chapter["prompts"]:
-            lines.extend([f"- {prompt}"])
-    lines.extend(["", "### Trajectory"])
-    for chapter in chapters:
-        for event in chapter["events"]:
-            lines.append(f"- {event['sequence']}. {event['type']}: {event['summary']}")
-    lines.extend(["", "### Patch", "```diff", patch["text"].rstrip("\n"), "```", "", "### Tests"])
-    lines.extend(f"- `{test['command']}` — {test['outcome']}" for test in tests)
+    """Render a useful preview without duplicating the complete JSON evidence."""
+    prompt_count = sum(len(chapter["prompts"]) for chapter in chapters)
+    event_count = sum(len(chapter["events"]) for chapter in chapters)
+    stats = patch.get("stats", {})
+    lines = [
+        f"## Evidence for {subject['key']}",
+        "",
+        f"Head: `{subject['head_sha']}`",
+        "",
+        (
+            f"Full structured evidence: {prompt_count} prompt(s), "
+            f"{event_count} trajectory event(s), and the exact patch are in this attachment."
+        ),
+    ]
+    _preview_items(
+        lines,
+        "### Prompts",
+        (f"- {prompt}" for chapter in chapters for prompt in chapter["prompts"]),
+        16 * 1024,
+        "prompts: `chapters[].prompts`",
+    )
+    _preview_items(
+        lines,
+        "### Trajectory",
+        (
+            f"- {event['sequence']}. {event['type']}: {event['summary']}"
+            for chapter in chapters
+            for event in chapter["events"]
+        ),
+        40 * 1024,
+        "trajectory: `chapters[].events`",
+    )
+    patch_text = patch.get("text", "")
+    patch_budget = 24 * 1024
+    patch_bytes = patch_text.encode("utf-8")
+    patch_preview = patch_bytes[:patch_budget].decode("utf-8", "ignore").rstrip("\n")
+    patch_truncated = len(patch_bytes) > patch_budget
+    lines.extend([
+        "",
+        "### Patch",
+        (
+            f"{stats.get('files', 0)} file(s), +{stats.get('added', 0)} "
+            f"/ -{stats.get('deleted', 0)}"
+        ),
+        "",
+        "```diff",
+        patch_preview,
+        "```",
+    ])
+    if patch_truncated:
+        lines.append("- … Full patch: `patch.text`")
+    _preview_items(
+        lines,
+        "### Tests",
+        (f"- `{test['command']}` — {test['outcome']}" for test in tests),
+        8 * 1024,
+        "test evidence: `tests`",
+    )
     if omissions:
-        lines.extend(["", "### Omissions"])
-        lines.extend(f"- {item.category}: {item.reason}" for item in omissions)
-    return "\n".join(lines) + "\n"
+        _preview_items(
+            lines,
+            "### Omissions",
+            (f"- {item.category}: {item.reason}" for item in omissions),
+            4 * 1024,
+            "omission details: `omissions`",
+        )
+    rendered = "\n".join(lines) + "\n"
+    rendered_bytes = rendered.encode("utf-8")
+    if len(rendered_bytes) > RENDERED_PREVIEW_MAX_BYTES:
+        suffix = "\n\n… Full evidence remains available in the structured attachment.\n"
+        prefix = rendered_bytes[
+            : RENDERED_PREVIEW_MAX_BYTES - len(suffix.encode("utf-8"))
+        ].decode("utf-8", "ignore")
+        return prefix + suffix
+    return rendered
 
 
 def _encode(payload: Mapping[str, Any]) -> bytes:

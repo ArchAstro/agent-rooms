@@ -10,6 +10,7 @@ from typing import Any, Mapping
 
 MAX_RAW_BYTES = 3 * 1024 * 1024
 MAX_BASE64_BYTES = 4 * 1024 * 1024
+MAX_NESTED_STRING_CHARS = 131_072
 
 
 class ArtifactValidationError(ValueError):
@@ -65,18 +66,35 @@ def validate_content(content: object, subject_key: str, expected_name: str) -> d
         raise ArtifactValidationError("remote artifact content is not strict JSON") from exc
     if len(raw) > MAX_RAW_BYTES or content.get("schema") != "agent-room-pr-evidence/v1":
         raise ArtifactValidationError("remote artifact has invalid size or schema")
-    def bounded(value: Any, depth: int = 0) -> None:
+    def bounded(value: Any, depth: int = 0, path: tuple[str, ...] = ()) -> None:
         if depth > 20: raise ArtifactValidationError("remote artifact nesting exceeds limit")
         if isinstance(value, str):
-            if len(value) > 131_072: raise ArtifactValidationError("remote artifact string exceeds limit")
+            # The exact patch and legacy human rendering can legitimately be
+            # larger than an ordinary leaf. The full serialized artifact is
+            # already bounded above, so allow only these named evidence fields
+            # to consume that envelope. New renderings are kept compact by the
+            # bundle builder, while this exception recovers packages already
+            # accepted by production before that preview was bounded.
+            exact_evidence = (
+                path in {
+                    ("chapters", "prompts"),
+                    ("chapters", "events", "summary"),
+                    ("patch", "text"),
+                    ("rendered_markdown",),
+                    ("tests", "command"),
+                }
+                or path[:3] == ("chapters", "events", "data")
+            )
+            limit = MAX_RAW_BYTES if exact_evidence else MAX_NESTED_STRING_CHARS
+            if len(value) > limit: raise ArtifactValidationError("remote artifact string exceeds limit")
         elif isinstance(value, Mapping):
             if len(value) > 1_000: raise ArtifactValidationError("remote artifact mapping exceeds limit")
             for key, nested in value.items():
                 if not isinstance(key, str) or len(key) > 256: raise ArtifactValidationError("remote artifact key is invalid")
-                bounded(nested, depth + 1)
+                bounded(nested, depth + 1, (*path, key))
         elif isinstance(value, list):
             if len(value) > 10_000: raise ArtifactValidationError("remote artifact array exceeds limit")
-            for nested in value: bounded(nested, depth + 1)
+            for nested in value: bounded(nested, depth + 1, path)
         elif value is not None and not isinstance(value, (bool, int, float)):
             raise ArtifactValidationError("remote artifact value is invalid")
     bounded(content)
