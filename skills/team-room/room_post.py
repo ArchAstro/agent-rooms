@@ -663,23 +663,42 @@ def _trusted_servers():
     return {s for s in trusted if s}
 
 
-if PRODUCTION_SERVER and not os.environ.get("TEAM_ROOM_TRUST_SERVER"):
-    # TEAM_ROOM_TRUST_SERVER exists for test harnesses pointing at fakes;
-    # setting it in a real environment removes the exfiltration guard.
+def _trusted_portals():
+    trusted = {DEFAULT_PORTAL}
+    try:
+        mc = json.load(open(ROOM_CONFIG_PATH))
+        if mc.get("portal"):
+            trusted.add(mc["portal"])
+        for m in mc.get("mirrors") or []:
+            if isinstance(m, dict) and m.get("portal"):
+                trusted.add(m["portal"])
+    except Exception:
+        pass
+    return {p for p in trusted if p}
+
+
+def _guard_config_origin(kind: str, value: str, trusted: set):
+    """Repo/env config may select only origins this machine already trusts."""
+    if not value or os.environ.get("TEAM_ROOM_TRUST_SERVER"):
+        return
     _cfg_src = _room_config_path() or ""
     _machine_cfg = os.path.abspath(ROOM_CONFIG_PATH)
-    if os.path.abspath(_cfg_src) != _machine_cfg and PRODUCTION_SERVER not in _trusted_servers():
+    if os.path.abspath(_cfg_src) != _machine_cfg and value not in trusted:
         if _AMBIENT_PR_PUBLISH:
             _consume_early_evidence_files()
         print(
-            f"room_post: REFUSING to use server {PRODUCTION_SERVER!r} from "
-            f"{_cfg_src} — it is not this machine's configured server, and a "
-            "committed room.json must never redirect your credentials. If "
-            "this server is legitimate, run `room-post login` against it "
-            "once (that records it as trusted).",
+            f"room_post: REFUSING to use {kind} {value!r} from {_cfg_src} — "
+            f"it is not this machine's configured {kind}, and a committed "
+            "room.json must never redirect authentication. Install or init "
+            "this room locally before trusting that origin.",
             file=sys.stderr,
         )
         sys.exit(0 if (len(sys.argv) > 1 and sys.argv[1] in _NEVER_BLOCK) else 3)
+
+
+# TEAM_ROOM_TRUST_SERVER exists for test harnesses pointing at fakes; setting
+# it in a real environment removes every configured-origin exfiltration guard.
+_guard_config_origin("server", PRODUCTION_SERVER, _trusted_servers())
 KIT_VERSION = "2026.07.25"
 ROOM_APP_NAME = "ArchAgents"
 
@@ -723,6 +742,7 @@ def extract_addressee(headline: str):
 
 PORTAL_URL = _ROOM_CFG.get("portal", "")
 ROOM_APP_SLUG = _ROOM_CFG.get("app_slug", "")
+_guard_config_origin("portal", PORTAL_URL, _trusted_portals())
 ROOM_CREDS_PATH = os.path.expanduser("~/.config/team-room/credentials.json")
 ROOM_TOKEN_PATH = os.path.expanduser("~/.config/team-room/token")
 ROOM_LOCK_PATH = os.path.expanduser("~/.config/team-room/.lock")
@@ -744,6 +764,17 @@ MIRRORS = [
     and all(isinstance(m.get(k), str) and m[k]
             for k in ("name", "server", "portal", "app_slug"))
 ]
+for _mirror in MIRRORS:
+    _guard_config_origin(
+        f"mirror '{_mirror['name']}' server",
+        _mirror["server"],
+        _trusted_servers(),
+    )
+    _guard_config_origin(
+        f"mirror '{_mirror['name']}' portal",
+        _mirror["portal"],
+        _trusted_portals(),
+    )
 MIRRORS_DIR = os.path.expanduser("~/.config/team-room/mirrors")
 MIRROR_FANOUT_BUDGET_SECONDS = 1.0
 
@@ -2524,35 +2555,48 @@ def age(updated_at: str) -> str:
     return f"{mins // (24 * 60)}d"
 
 
-_POST_LANDED = False
-
-
-def post(message: str, metadata: dict | None = None, uploads: list | None = None):
-    creds, key, creds_path, session = authed_session()
+def _post_once(session: dict, message: str, metadata: dict | None, uploads: list | None):
     url = (
         f"{PRODUCTION_SERVER}/protected/api/v1/developer/apps/"
         f"{session['appId']}/threads/{THREAD_ID}/messages"
     )
-    try:
-        body = {"content": message, "user": session["userId"]}
-        if metadata:
-            body["metadata"] = metadata
-        if uploads:
-            body["uploads"] = uploads
-        msg = http_json(url, body, token=session["accessToken"])
-    except urllib.error.HTTPError as e:
-        if e.code == 401 and not session.get("static"):
-            session = refresh_session(creds, key, creds_path)
-            msg = http_json(url, body, token=session["accessToken"])
-        elif e.code == 401:
-            die("your room credential was rejected (revoked or expired). "
-            "Reconnect with `room-post login`; for a courier token, "
-            "mint a fresh one.", 3)
-        else:
+    body = {"content": message, "user": session["userId"]}
+    if metadata:
+        body["metadata"] = metadata
+    if uploads:
+        body["uploads"] = uploads
+    return http_json(url, body, token=session["accessToken"])
+
+
+def post(message: str, metadata: dict | None = None, uploads: list | None = None):
+    creds, key, creds_path, session = authed_session()
+    courier_fallback_attempted = False
+    refresh_attempted = False
+    while True:
+        try:
+            msg = _post_once(session, message, metadata, uploads)
+            break
+        except urllib.error.HTTPError as e:
+            if (
+                session.get("static")
+                and e.code in (401, 403, 404)
+                and not courier_fallback_attempted
+            ):
+                courier_fallback_attempted = True
+                human = login_session()
+                if human:
+                    creds, key, creds_path, session = human
+                    continue
+            if e.code == 401 and not session.get("static") and not refresh_attempted:
+                refresh_attempted = True
+                session = refresh_session(creds, key, creds_path)
+                continue
+            if e.code == 401 and session.get("static"):
+                die("your room credential was rejected (revoked or expired). "
+                    "Reconnect with `room-post login`; for a courier token, "
+                    "mint a fresh one.", 3)
             die(f"post failed ({e.code}): {e.read().decode()[:200]}")
     print(_posted_line(metadata, msg))
-    global _POST_LANDED
-    _POST_LANDED = True
     return session
 
 
@@ -2735,10 +2779,10 @@ def login(mirror: dict | None = None, best_effort: bool = False,
     port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
     cb = f"http://127.0.0.1:{port}/callback/{expected_state}"
-    url = (
-        f"{portal}/org/cli-auth?slug={slug}"
-        f"&redirect_uri={urllib.parse.quote(cb, safe='')}"
-    )
+    url = f"{portal}/org/cli-auth?" + urllib.parse.urlencode({
+        "slug": slug,
+        "redirect_uri": cb,
+    })
     print("Open this URL in your browser to authenticate the Team Room:\n")
     print(f"  {url}\n")
     try:
