@@ -14,6 +14,7 @@ import statistics
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "team-room"))
 from evidence.artifacts import encode_artifact
+from evidence.bundle import rebuild_payload
 from evidence.publisher import Publisher
 from evidence.policy import Policy
 from evidence.publisher import PublishRequest
@@ -33,8 +34,12 @@ class LocalClient:
     def create_message(self, *_): self.writes += 1; return {"id":"m"}
 
 def request(session):
-    return PublishRequest("subject", "pr-evidence--owner-repository--7--x", SHA, SHA, session,
-      {"schema":"agent-room-pr-evidence/v1","subject":{"key":"subject","repository":"github.com/owner/repository","pr_number":7,"pr_url":None,"base_ref":"main","base_sha":SHA,"merge_base_sha":SHA,"head_sha":SHA},"current":{"complete":False,"capture_mode":"review_capsule","capture_fidelity":"exact","generated_at":"2026-01-01T00:00:00Z"},"chapters":[{"session_id":session,"capture_fidelity":"exact","prompts":["p"],"events":[{"event_id":session+":1","sequence":1,"type":"test","summary":"pytest","data":{"command":"pytest","outcome":"passed"}}],"execution_spans":[]}],"patch":{"text":"x","stats":{"files":1,"added":1,"deleted":0}},"tests":[{"command":"pytest","outcome":"passed"}],"provenance":{},"redactions":[],"omissions":[],"rendered_markdown":"## Evidence for subject\n\nHead: `"+SHA+"`\n\n### Prompts\n- p\n\n### Trajectory\n- 1. test: pytest\n\n### Patch\n```diff\nx\n```\n\n### Tests\n- `pytest` — passed\n"})
+    content = {"schema":"agent-room-pr-evidence/v1","subject":{"key":"subject","repository":"github.com/owner/repository","pr_number":7,"pr_url":None,"base_ref":"main","base_sha":SHA,"merge_base_sha":SHA,"head_sha":SHA},"current":{"complete":False,"capture_mode":"review_capsule","capture_fidelity":"exact","generated_at":"2026-01-01T00:00:00Z"},"chapters":[{"session_id":session,"capture_fidelity":"exact","prompts":["p"],"events":[{"event_id":session+":1","sequence":1,"type":"test","summary":"pytest","data":{"command":"pytest","outcome":"passed"}}],"execution_spans":[]}],"patch":{"text":"x","stats":{"files":1,"added":1,"deleted":0}},"tests":[{"command":"pytest","outcome":"passed"}],"provenance":{},"redactions":[],"omissions":[],"rendered_markdown":""}
+    content = rebuild_payload(content, content["chapters"])
+    return PublishRequest(
+        "subject", "pr-evidence--owner-repository--7--x",
+        SHA, SHA, session, content,
+    )
 
 
 def test_artifact_base64_and_warm_unchanged_path_stay_bounded():

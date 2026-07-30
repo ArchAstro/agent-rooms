@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "team-room"))
 
 from evidence.adapters.codex import CodexAdapter  # noqa: E402
+from evidence.artifacts import validate_content  # noqa: E402
 from evidence.bundle import build_bundle, git_evidence_from_repo  # noqa: E402
 from evidence.bundle import GitEvidence  # noqa: E402
 from evidence.model import Chapter, EvidenceEvent, ExecutionSpan, Patch, Subject  # noqa: E402
@@ -231,9 +232,41 @@ def test_only_anchored_native_test_runners_create_test_evidence_and_schema_domai
         print("PASS  test_only_anchored_native_test_runners_create_test_evidence_and_schema_domains_hold")
 
 
+def test_large_exact_evidence_stays_structured_while_the_human_preview_is_bounded():
+    with tempfile.TemporaryDirectory() as raw:
+        temp = Path(raw)
+        subject = Subject("github.com/acme/evidence", 22, None, "main", "a" * 40, "a" * 40, "b" * 40)
+        exact_prompt = "Preserve the complete review evidence " + ("prompt context " * 11_000)
+        exact_trajectory = "🧠" * 150_000
+        exact_test_command = "python3 tests/test_pr_evidence_bundle.py " + ("--case exact-evidence " * 8_000)
+        chapter = Chapter.from_events("large-patch-session", [
+            EvidenceEvent("prompt", 1, "human_prompt", exact_prompt, {}),
+            EvidenceEvent("agent", 2, "agent_message", exact_trajectory, {}),
+            EvidenceEvent("test", 3, "test", "proof", {"command": exact_test_command, "outcome": "passed"}),
+        ], [ExecutionSpan("large-patch-session")])
+        exact_patch = "diff --git a/large b/large\n" + ("+complete evidence line\n" * 9_000)
+        evidence = GitEvidence(Patch(exact_patch, 1, 9_000, 0), "a" * 40, "a" * 40, "b" * 40)
+
+        result = build_bundle(subject, [chapter], evidence, {"output_dir": temp / "artifact"})
+        payload = json.loads(Path(result.path).read_text())
+
+        assert payload["patch"]["text"] == exact_patch
+        assert payload["chapters"][0]["prompts"] == [exact_prompt]
+        assert payload["chapters"][0]["events"][1]["summary"] == exact_trajectory
+        assert payload["tests"][0]["command"] == exact_test_command
+        assert len(payload["rendered_markdown"].encode("utf-8")) <= 96 * 1024
+        assert "Full patch: `patch.text`" in payload["rendered_markdown"]
+        validated = validate_content(payload, subject.key, "pr-evidence--acme-evidence--22")
+        assert validated["chapters"][0]["prompts"] == [exact_prompt]
+        assert validated["chapters"][0]["events"][1]["summary"] == exact_trajectory
+        assert validated["tests"][0]["command"] == exact_test_command
+        print("PASS  large exact evidence stays structured while the human preview is bounded")
+
+
 if __name__ == "__main__":
     test_exact_codex_session_becomes_safe_complete_current_json_artifact()
     test_git_binding_completeness_and_test_outcomes_are_never_fabricated()
     test_size_cap_and_policy_strings_are_sanitized_before_atomic_persistence()
     test_non_test_tools_and_unknown_outcomes_cannot_make_bundle_complete()
     test_only_anchored_native_test_runners_create_test_evidence_and_schema_domains_hold()
+    test_large_exact_evidence_stays_structured_while_the_human_preview_is_bounded()

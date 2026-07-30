@@ -167,6 +167,63 @@ class BadCreateClient(ResponseLossClient):
         return {"id": "attacker", "name": "wrong", "version": "bad", "content": "hostile"}
 
 
+class LegacyProductionOrphanClient(ConflictClient):
+    def __init__(self):
+        super().__init__()
+        self.message_calls = 0
+        content = full_content()
+        content["chapters"][0]["prompts"] = ["large exact prompt " + ("context " * 20_000)]
+        content["chapters"][0]["events"] = [{
+            "event_id": "large-visible-event",
+            "sequence": 1,
+            "type": "agent_message",
+            "summary": "🧠" * 150_000,
+            "data": {},
+        }]
+        content["provenance"] = {
+            "adapter": {"value": "legacy-production-adapter", "source": "observed"},
+        }
+        content["redactions"] = [{"category": "authorization", "count": 2}]
+        content["omissions"] = [{"category": "tool_result", "reason": "bounded before capture"}]
+        content["patch"] = {
+            "text": "diff --git a/large b/large\n" + ("+complete evidence line\n" * 9_000),
+            "stats": {"files": 1, "added": 9_000, "deleted": 0},
+        }
+        content["rendered_markdown"] = "# Legacy production preview\n" + ("duplicated preview\n" * 45_000)
+        self.artifact = {**self.artifact, "content": content}
+
+    def list_messages(self):
+        return []
+
+    def create_message(self, *_args):
+        self.message_calls += 1
+        return {"id": "m-legacy-recovered"}
+
+
+def test_large_legacy_production_artifact_is_recovered_and_attached_without_data_loss():
+    with tempfile.TemporaryDirectory() as td:
+        client = LegacyProductionOrphanClient()
+        original = json.loads(json.dumps(client.artifact["content"]))
+        request = PublishRequest(
+            "github.com/owner/repository#7",
+            "pr-evidence--owner-repository--7--x",
+            SHA_A,
+            SHA_A,
+            "session-one",
+            client.artifact["content"],
+        )
+
+        result = Publisher(client, Path(td) / "state.json", Policy()).publish(request)
+
+        assert result.status == "published", result
+        assert client.message_calls == 1
+        recovered = client.artifact["content"]
+        for field in ("chapters", "patch", "provenance", "redactions", "omissions"):
+            assert recovered[field] == original[field]
+        assert len(recovered["rendered_markdown"].encode("utf-8")) <= 96 * 1024
+    print("PASS  large legacy production artifact is recovered and attached without data loss")
+
+
 def test_one_conflict_refetches_and_second_conflict_queues_sanitized_state():
     with tempfile.TemporaryDirectory() as td:
         request = PublishRequest("github.com/owner/repository#7", "pr-evidence--owner-repository--7--x", SHA_A, SHA_B, "session-one", full_content(SHA_B), is_fast_forward=True)
@@ -542,6 +599,7 @@ def test_merge_preserves_remote_safety_evidence_and_canonical_tool_test_results(
 
 
 if __name__ == "__main__":
+    test_large_legacy_production_artifact_is_recovered_and_attached_without_data_loss()
     test_one_conflict_refetches_and_second_conflict_queues_sanitized_state()
     test_explicit_local_capture_mode_only_narrows_the_complete_default()
     test_local_review_restricts_previously_stored_chapters_before_upload()
