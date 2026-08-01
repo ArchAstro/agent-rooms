@@ -226,29 +226,36 @@ final class AppState {
     }
 
     @discardableResult
-    func sendMessage(_ body: String, attachmentName: String? = nil) async -> Bool {
-        guard !selectedThread.id.isEmpty else {
+    func sendMessage(
+        _ body: String,
+        to threadID: String? = nil,
+        uploads: [MessageUpload] = []
+    ) async -> Bool {
+        let destinationThreadID = threadID ?? selectedThread.id
+        guard !destinationThreadID.isEmpty else {
             showToast("No Team Room is selected")
             return false
         }
-        guard let client else { return false }
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty || attachmentName != nil else { return false }
-
-        // Uploads are not yet exposed by the Swift SDK. Never pretend a local
-        // filename crossed the network.
-        guard attachmentName == nil else {
-            showToast("Open the web app to attach files")
+        guard !trimmed.isEmpty || !uploads.isEmpty else { return false }
+        guard uploads.count <= MessageUpload.maximumCount else {
+            showToast("A message can include at most \(MessageUpload.maximumCount) files")
             return false
         }
+        guard !uploads.contains(where: { $0.data.count > MessageUpload.maximumBytes }) else {
+            showToast("Each attachment must be smaller than 5 MB")
+            return false
+        }
+        guard let client else { return false }
 
         isSendingMessage = true
         defer { isSendingMessage = false }
         do {
             let channel = try await requireRoomChannelSession(client: client)
             try await channel.postMessage(
-                threadID: selectedThread.id,
-                content: trimmed
+                threadID: destinationThreadID,
+                content: trimmed.isEmpty ? " " : trimmed,
+                uploads: uploads
             )
             showToast("Posted to Team Room")
             return true

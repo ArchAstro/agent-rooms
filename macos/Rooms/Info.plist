@@ -28,5 +28,7 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 ArchAstro Inc.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Rooms records conversations you choose so they can be transcribed locally and shared with your Team Room.</string>
 </dict>
 </plist>

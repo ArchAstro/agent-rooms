@@ -1,0 +1,472 @@
+import Foundation
+import Testing
+import ArchAstroPlatform
+import FluidAudio
+@testable import Rooms
+
+@Suite struct ConversationTranscriptWorkflowTests {
+    @Test @MainActor
+    func recorded_conversation_is_transcribed_reviewed_and_attached_to_the_selected_team_room() async throws {
+        // Set up an app-owned recording directory and deterministic local boundaries so
+        // the user-visible scenario remains readable without microphone or model downloads.
+        let recordingsDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rooms-conversation-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: recordingsDirectory) }
+        let recordedAt = Date(timeIntervalSince1970: 1_785_535_200)
+        let recorder = FakeConversationRecorder(duration: 17)
+        let transcriber = FakeConversationTranscriber(
+            transcript: LocalConversationTranscript(
+                segments: [
+                    ConversationTranscriptSegment(
+                        id: "segment-1",
+                        speakerID: "S1",
+                        startTime: 0,
+                        endTime: 4.2,
+                        text: "We should ship the local transcript flow."
+                    ),
+                    ConversationTranscriptSegment(
+                        id: "segment-2",
+                        speakerID: "S2",
+                        startTime: 4.4,
+                        endTime: 8.7,
+                        text: "I will verify the attachment boundary."
+                    ),
+                ],
+                usedSpeakerDiarization: true
+            )
+        )
+        let workflow = ConversationTranscriptWorkflow(
+            recorder: recorder,
+            transcriber: transcriber,
+            recordingsDirectory: recordingsDirectory,
+            now: { recordedAt },
+            makeIdentifier: { "canonical-e2e" }
+        )
+        let target = ConversationTarget(
+            networkName: "ArchAstro",
+            threadName: "Team Room",
+            threadID: "thread-captured-at-start"
+        )
+
+        // Exercise the production workflow ports with deterministic recording and model
+        // adapters; physical microphone/model execution is verified separately on hardware.
+        await workflow.startRecording(target: target)
+        #expect(workflow.phase == .recording(startedAt: recordedAt))
+        let recordingURL = try #require(recorder.recordingURL)
+        #expect(FileManager.default.fileExists(atPath: recordingURL.path))
+        await workflow.stopAndTranscribe()
+        #expect(workflow.phase == .review)
+        let receivedRecordingURL = await transcriber.receivedRecordingURL
+        #expect(receivedRecordingURL == recordingURL)
+
+        // Apply the reviewer's global speaker names and a transcript correction before
+        // anything crosses the Team Room attachment boundary.
+        workflow.renameSpeaker("S1", to: "Calvin")
+        workflow.renameSpeaker("S2", to: "Bruno")
+        workflow.addSpeaker()
+        workflow.renameSpeaker("manual-1", to: "Ada")
+        workflow.assignSegment("segment-2", to: "manual-1")
+        workflow.updateSegmentText(
+            "segment-2",
+            text: "I verified the Markdown attachment boundary."
+        )
+        let exportedURL = recordingsDirectory.appendingPathComponent("reviewed-transcript.md")
+        try workflow.saveMarkdown(to: exportedURL)
+
+        var postedContent: String?
+        var postedThreadID: String?
+        var postedAttachment: ConversationTranscriptAttachment?
+        await workflow.attach { content, threadID, attachment in
+            postedContent = content
+            postedThreadID = threadID
+            postedAttachment = attachment
+            return true
+        }
+
+        // Verify externally observable output: the originally selected room receives a
+        // Markdown file containing reviewed names/text, and retained source audio is gone.
+        #expect(postedContent == "Conversation transcript recorded ArchAstro / Team Room")
+        #expect(postedThreadID == "thread-captured-at-start")
+        let attachment = try #require(postedAttachment)
+        #expect(attachment.filename == "conversation-transcript-2026-07-31-220000.md")
+        let markdown = try #require(String(data: attachment.data, encoding: .utf8))
+        let exportedData = try Data(contentsOf: exportedURL)
+        #expect(exportedData == attachment.data)
+        #expect(markdown.contains("**[00:00] Calvin**"))
+        #expect(markdown.contains("**[00:04] Ada**"))
+        #expect(markdown.contains("I verified the Markdown attachment boundary."))
+        #expect(workflow.phase == .attached(filename: attachment.filename))
+        #expect(!FileManager.default.fileExists(atPath: recordingURL.path))
+    }
+
+    @Test @MainActor
+    func failed_attachment_keeps_the_review_and_audio_for_retry() async throws {
+        let recordingsDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rooms-conversation-retry-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: recordingsDirectory) }
+        let recorder = FakeConversationRecorder(duration: 3)
+        let transcriber = FakeConversationTranscriber(
+            transcript: LocalConversationTranscript(
+                segments: [
+                    ConversationTranscriptSegment(
+                        id: "segment-1",
+                        speakerID: "S1",
+                        startTime: 0,
+                        endTime: 2,
+                        text: "Keep this review for retry."
+                    )
+                ],
+                usedSpeakerDiarization: false
+            )
+        )
+        let workflow = ConversationTranscriptWorkflow(
+            recorder: recorder,
+            transcriber: transcriber,
+            recordingsDirectory: recordingsDirectory
+        )
+        let target = ConversationTarget(
+            networkName: "ArchAstro",
+            threadName: "Team Room",
+            threadID: "thread-retry"
+        )
+
+        await workflow.startRecording(target: target)
+        let recordingURL = try #require(recorder.recordingURL)
+        await workflow.stopAndTranscribe()
+        await workflow.attach { _, _, _ in false }
+
+        #expect(workflow.phase == .review)
+        #expect(workflow.uploadError != nil)
+        #expect(workflow.draft?.segments.first?.text == "Keep this review for retry.")
+        #expect(FileManager.default.fileExists(atPath: recordingURL.path))
+    }
+
+    @Test @MainActor
+    func adding_speakers_updates_the_review_without_overlapping_draft_access() async throws {
+        let recordingsDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rooms-speaker-regression-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: recordingsDirectory) }
+        let workflow = ConversationTranscriptWorkflow(
+            recorder: FakeConversationRecorder(duration: 2),
+            transcriber: FakeConversationTranscriber(
+                transcript: LocalConversationTranscript(
+                    segments: [
+                        ConversationTranscriptSegment(
+                            id: "segment-1",
+                            speakerID: "S1",
+                            startTime: 0,
+                            endTime: 1,
+                            text: "Initial speaker."
+                        )
+                    ],
+                    usedSpeakerDiarization: true
+                )
+            ),
+            recordingsDirectory: recordingsDirectory
+        )
+        let target = ConversationTarget(
+            networkName: "ArchAstro",
+            threadName: "Team Room",
+            threadID: "thread-speaker-regression"
+        )
+
+        await workflow.startRecording(target: target)
+        await workflow.stopAndTranscribe()
+        workflow.addSpeaker()
+        workflow.addSpeaker()
+
+        #expect(workflow.draft?.speakerNames["manual-1"] == "Speaker 2")
+        #expect(workflow.draft?.speakerNames["manual-2"] == "Speaker 3")
+        #expect(workflow.draft?.orderedSpeakerIDs == ["S1", "manual-1", "manual-2"])
+    }
+
+    @Test @MainActor
+    func failed_transcription_retains_audio_and_retry_reaches_review() async throws {
+        let recordingsDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rooms-transcription-retry-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: recordingsDirectory) }
+        let recorder = FakeConversationRecorder(duration: 4)
+        let transcriber = FailOnceConversationTranscriber(
+            transcript: LocalConversationTranscript(
+                segments: [
+                    ConversationTranscriptSegment(
+                        id: "segment-1",
+                        speakerID: "S1",
+                        startTime: 0,
+                        endTime: 3,
+                        text: "The retry used the retained recording."
+                    )
+                ],
+                usedSpeakerDiarization: false,
+                speakerSeparationFallback: .insufficientSpeech
+            )
+        )
+        let workflow = ConversationTranscriptWorkflow(
+            recorder: recorder,
+            transcriber: transcriber,
+            recordingsDirectory: recordingsDirectory
+        )
+        let target = ConversationTarget(
+            networkName: "ArchAstro",
+            threadName: "Team Room",
+            threadID: "thread-transcription-retry"
+        )
+
+        await workflow.startRecording(target: target)
+        let recordingURL = try #require(recorder.recordingURL)
+        await workflow.stopAndTranscribe()
+
+        guard case .failed(let message) = workflow.phase else {
+            Issue.record("Expected the first transcription attempt to fail")
+            return
+        }
+        #expect(message == TestTranscriptionError.firstAttempt.localizedDescription)
+        #expect(workflow.canRetryTranscription)
+        #expect(FileManager.default.fileExists(atPath: recordingURL.path))
+
+        await workflow.retryTranscription()
+
+        #expect(workflow.phase == .review)
+        #expect(workflow.draft?.segments.first?.text == "The retry used the retained recording.")
+        let receivedRecordingURLs = await transcriber.receivedRecordingURLs
+        #expect(receivedRecordingURLs == [recordingURL, recordingURL])
+
+        workflow.discard()
+        #expect(workflow.phase == .idle)
+        #expect(!FileManager.default.fileExists(atPath: recordingURL.path))
+    }
+
+    @Test func multi_component_model_progress_does_not_reach_100_percent_early() {
+        var tracker = ModelPreparationProgressTracker()
+        let reported = [
+            DownloadProgress(
+                fractionCompleted: 0.8,
+                phase: .downloading(completedFiles: 4, totalFiles: 5)
+            ),
+            DownloadProgress(
+                fractionCompleted: 1,
+                phase: .compiling(modelName: "")
+            ),
+            DownloadProgress(
+                fractionCompleted: 0.1,
+                phase: .downloading(completedFiles: 1, totalFiles: 10)
+            ),
+            DownloadProgress(
+                fractionCompleted: 0.65,
+                phase: .downloading(completedFiles: 6, totalFiles: 10)
+            ),
+        ]
+
+        let displayed = reported.map { tracker.displayedFraction(for: $0) }
+
+        #expect(displayed == [0.8, 0.99, 0.1, 0.65])
+        #expect(displayed.allSatisfy { $0 < 1 })
+        #expect(tracker.operationIndex == 2)
+    }
+
+    @Test func model_download_progress_is_exposed_for_speech_and_speaker_models() {
+        let speechProgress = DownloadProgress(
+            fractionCompleted: 0.42,
+            phase: .downloading(completedFiles: 2, totalFiles: 5)
+        )
+        let speechPreparation = FluidConversationTranscriber.speechModelPreparation(
+            progress: speechProgress,
+            displayedFraction: speechProgress.fractionCompleted
+        )
+        let speechStage = LocalTranscriptionStage.preparingModel(speechPreparation)
+        let speakerProgress = DownloadProgress(
+            fractionCompleted: 0.75,
+            phase: .compiling(modelName: "speaker-embedding.mlmodelc")
+        )
+        let speakerPreparation = FluidConversationTranscriber.speakerModelPreparation(
+            progress: speakerProgress,
+            displayedFraction: speakerProgress.fractionCompleted
+        )
+        let speakerStage = LocalTranscriptionStage.preparingModel(speakerPreparation)
+
+        #expect(speechStage.fractionCompleted == 0.42)
+        #expect(speechStage.label == "Preparing local speech recognition model")
+        #expect(speechStage.detail == "Downloading local speech model files 2 of 5.")
+        #expect(speakerStage.fractionCompleted == 0.75)
+        #expect(speakerStage.label == "Preparing local speaker separation model")
+        #expect(speakerStage.detail == "Compiling speaker-embedding.mlmodelc for this Mac.")
+    }
+
+    @Test func word_timings_are_grouped_by_the_diarized_speaker() {
+        let words = [
+            WordTiming(word: "Hello", startTime: 0, endTime: 0.4),
+            WordTiming(word: "there.", startTime: 0.5, endTime: 0.9),
+            WordTiming(word: "Welcome", startTime: 1, endTime: 1.4),
+            WordTiming(word: "back.", startTime: 1.5, endTime: 1.9),
+        ]
+        let diarization = [
+            TimedSpeakerSegment(
+                speakerId: "speaker-a",
+                embedding: [],
+                startTimeSeconds: 0,
+                endTimeSeconds: 0.95,
+                qualityScore: 1
+            ),
+            TimedSpeakerSegment(
+                speakerId: "speaker-b",
+                embedding: [],
+                startTimeSeconds: 0.95,
+                endTimeSeconds: 2,
+                qualityScore: 1
+            ),
+        ]
+
+        let segments = FluidConversationTranscriber.buildSegments(
+            words: words,
+            diarizationSegments: diarization
+        )
+
+        #expect(segments.map(\.speakerID) == ["speaker-a", "speaker-b"])
+        #expect(segments.map(\.text) == ["Hello there.", "Welcome back."])
+    }
+
+    @Test func missing_diarization_falls_back_to_one_reviewable_speaker() {
+        let segments = FluidConversationTranscriber.buildSegments(
+            words: [
+                WordTiming(word: "One", startTime: 0, endTime: 0.3),
+                WordTiming(word: "speaker.", startTime: 0.4, endTime: 0.8),
+            ],
+            diarizationSegments: []
+        )
+
+        #expect(segments.count == 1)
+        #expect(segments.first?.speakerID == "S1")
+        #expect(segments.first?.text == "One speaker.")
+    }
+
+    @Test func diarization_failure_preserves_transcript_with_a_specific_fallback_reason() {
+        let words = [
+            WordTiming(word: "Keep", startTime: 0, endTime: 0.3),
+            WordTiming(word: "the", startTime: 0.4, endTime: 0.6),
+            WordTiming(word: "transcript.", startTime: 0.7, endTime: 1.1),
+        ]
+
+        let insufficientSpeech = FluidConversationTranscriber.buildTranscript(
+            words: words,
+            diarizationSegments: [],
+            diarizationError: OfflineDiarizationError.noSpeechDetected
+        )
+        let unavailableModel = FluidConversationTranscriber.buildTranscript(
+            words: words,
+            diarizationSegments: [],
+            diarizationError: OfflineDiarizationError.modelNotLoaded("speaker-embedding")
+        )
+
+        #expect(insufficientSpeech.segments.map(\.text) == ["Keep the transcript."])
+        #expect(unavailableModel.segments == insufficientSpeech.segments)
+        #expect(!insufficientSpeech.usedSpeakerDiarization)
+        #expect(!unavailableModel.usedSpeakerDiarization)
+        #expect(insufficientSpeech.speakerSeparationFallback == .insufficientSpeech)
+        #expect(unavailableModel.speakerSeparationFallback == .modelUnavailable)
+        #expect(
+            insufficientSpeech.speakerSeparationFallback?.reviewMessage
+                != unavailableModel.speakerSeparationFallback?.reviewMessage
+        )
+    }
+
+    @Test func message_upload_encodes_the_channel_attachment_contract() throws {
+        let upload = MessageUpload(
+            name: "conversation.md",
+            mimeType: "text/markdown",
+            data: Data("# Conversation\n".utf8)
+        )
+
+        #expect(upload.channelPayload["name"]?.stringValue == "conversation.md")
+        #expect(upload.channelPayload["mime_type"]?.stringValue == "text/markdown")
+        #expect(
+            upload.channelPayload["content"]?.stringValue
+                == Data("# Conversation\n".utf8).base64EncodedString()
+        )
+    }
+}
+
+@MainActor
+private final class FakeConversationRecorder: ConversationAudioCapturing {
+    private let duration: TimeInterval
+    private var recordedAt: Date?
+    private(set) var recordingURL: URL?
+
+    init(duration: TimeInterval) {
+        self.duration = duration
+    }
+
+    func startRecording(to fileURL: URL, recordedAt: Date) async throws {
+        try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data(repeating: 1, count: 128).write(to: fileURL)
+        recordingURL = fileURL
+        self.recordedAt = recordedAt
+    }
+
+    func stopRecording() throws -> RecordedConversationAudio {
+        RecordedConversationAudio(
+            fileURL: try #require(recordingURL),
+            duration: duration,
+            recordedAt: try #require(recordedAt)
+        )
+    }
+
+    func cancelRecording() {
+        if let recordingURL {
+            try? FileManager.default.removeItem(at: recordingURL)
+        }
+        recordingURL = nil
+        recordedAt = nil
+    }
+}
+
+private actor FakeConversationTranscriber: ConversationTranscribing {
+    let transcript: LocalConversationTranscript
+    private(set) var receivedRecordingURL: URL?
+
+    init(transcript: LocalConversationTranscript) {
+        self.transcript = transcript
+    }
+
+    func transcribe(
+        _ recording: RecordedConversationAudio,
+        onStage: @escaping @Sendable (LocalTranscriptionStage) async -> Void
+    ) async throws -> LocalConversationTranscript {
+        receivedRecordingURL = recording.fileURL
+        await onStage(.transcribing)
+        await onStage(.separatingSpeakers)
+        await onStage(.buildingTranscript)
+        return transcript
+    }
+}
+
+private enum TestTranscriptionError: LocalizedError {
+    case firstAttempt
+
+    var errorDescription: String? {
+        "The first local transcription attempt failed."
+    }
+}
+
+private actor FailOnceConversationTranscriber: ConversationTranscribing {
+    let transcript: LocalConversationTranscript
+    private(set) var receivedRecordingURLs: [URL] = []
+
+    init(transcript: LocalConversationTranscript) {
+        self.transcript = transcript
+    }
+
+    func transcribe(
+        _ recording: RecordedConversationAudio,
+        onStage: @escaping @Sendable (LocalTranscriptionStage) async -> Void
+    ) async throws -> LocalConversationTranscript {
+        receivedRecordingURLs.append(recording.fileURL)
+        guard receivedRecordingURLs.count > 1 else {
+            throw TestTranscriptionError.firstAttempt
+        }
+        await onStage(.buildingTranscript)
+        return transcript
+    }
+}

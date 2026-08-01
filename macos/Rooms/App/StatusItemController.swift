@@ -7,10 +7,12 @@ import SwiftUI
 final class StatusItemController: NSObject {
     private let appState: AppState
     private let overlayController = EventOverlayController()
+    private let conversationWorkflow = ConversationTranscriptWorkflow()
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
     private var pinnedWindow: NSWindow?
     private var settingsWindow: NSWindow?
+    private var conversationWindow: NSWindow?
     private var contextMenu: NSMenu?
     private var observationTask: Task<Void, Never>?
 
@@ -40,6 +42,7 @@ final class StatusItemController: NSObject {
 
         let menu = NSMenu()
         addMenuItem("Open Rooms", action: #selector(openFromMenu(_:)), to: menu)
+        addMenuItem("Record Conversation…", action: #selector(openConversation(_:)), to: menu)
         addMenuItem("Settings…", action: #selector(openSettings(_:)), to: menu)
         menu.addItem(.separator())
         addMenuItem("Quit Rooms", action: #selector(quit(_:)), keyEquivalent: "q", to: menu)
@@ -71,6 +74,8 @@ final class StatusItemController: NSObject {
         closePopover()
         pinnedWindow?.orderOut(nil)
         settingsWindow?.orderOut(nil)
+        conversationWindow?.orderOut(nil)
+        conversationWorkflow.cancelActiveRecordingForTermination()
         if let item = statusItem {
             NSStatusBar.system.removeStatusItem(item)
         }
@@ -78,6 +83,7 @@ final class StatusItemController: NSObject {
         popover = nil
         pinnedWindow = nil
         settingsWindow = nil
+        conversationWindow = nil
         contextMenu = nil
     }
 
@@ -106,6 +112,10 @@ final class StatusItemController: NSObject {
 
     @objc private func openSettings(_ sender: Any?) {
         showSettingsWindow()
+    }
+
+    @objc private func openConversation(_ sender: Any?) {
+        showConversationWindow()
     }
 
     @objc private func quit(_ sender: Any?) {
@@ -152,7 +162,8 @@ final class StatusItemController: NSObject {
         TrayChrome(
             close: { [weak self] in self?.closePopover() },
             openPinned: { [weak self] in self?.showPinnedWindow() },
-            openSettings: { [weak self] in self?.showSettingsWindow() }
+            openSettings: { [weak self] in self?.showSettingsWindow() },
+            openConversation: { [weak self] in self?.showConversationWindow() }
         )
     }
 
@@ -193,8 +204,34 @@ final class StatusItemController: NSObject {
         TrayChrome(
             close: { [weak self] in self?.pinnedWindow?.orderOut(nil) },
             openPinned: { [weak self] in self?.showPinnedWindow() },
-            openSettings: { [weak self] in self?.showSettingsWindow() }
+            openSettings: { [weak self] in self?.showSettingsWindow() },
+            openConversation: { [weak self] in self?.showConversationWindow() }
         )
+    }
+
+    func showConversationWindow() {
+        closePopover()
+        if conversationWindow == nil {
+            let root = ConversationReviewView(
+                workflow: conversationWorkflow,
+                close: { [weak self] in self?.conversationWindow?.orderOut(nil) }
+            )
+            .environment(appState)
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 820, height: 680),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "Conversation Transcript"
+            window.isReleasedWhenClosed = false
+            window.minSize = NSSize(width: 700, height: 560)
+            window.contentViewController = NSHostingController(rootView: root)
+            window.center()
+            conversationWindow = window
+        }
+        conversationWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     func showSettingsWindow() {
@@ -245,6 +282,7 @@ final class StatusItemController: NSObject {
                         _ = self.appState.isSignedIn
                         _ = self.appState.totalUnreadCount
                         _ = self.appState.overlayEnabled
+                        _ = self.conversationWorkflow.phase
                     } onChange: {
                         continuation.resume()
                     }
@@ -259,6 +297,14 @@ final class StatusItemController: NSObject {
         image?.isTemplate = true
         image?.accessibilityDescription = "Rooms"
         button.image = image
+        if case .recording = conversationWorkflow.phase {
+            button.contentTintColor = .systemRed
+            button.title = " ●"
+            button.toolTip = "Rooms — Recording conversation"
+            return
+        }
+        button.contentTintColor = nil
+        button.toolTip = "Rooms"
         button.title = appState.isSignedIn && appState.totalUnreadCount > 0
             ? " \(appState.totalUnreadCount)"
             : ""
@@ -279,6 +325,7 @@ struct TrayChrome: Sendable {
     var close: @MainActor @Sendable () -> Void = {}
     var openPinned: @MainActor @Sendable () -> Void = {}
     var openSettings: @MainActor @Sendable () -> Void = {}
+    var openConversation: @MainActor @Sendable () -> Void = {}
 }
 
 private enum TrayChromeKey: EnvironmentKey {

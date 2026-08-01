@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 
 struct ChatView: View {
     @Environment(AppState.self) private var appState
+    @Environment(\.trayChrome) private var trayChrome
     @State private var draft = ""
     @State private var showingThreads = false
     @State private var showingInspector = false
@@ -82,6 +83,14 @@ struct ChatView: View {
             }
 
             HStack(spacing: 7) {
+                Button { trayChrome.openConversation() } label: {
+                    Image(systemName: "waveform.badge.mic")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.green)
+                }
+                .buttonStyle(.plain)
+                .help("Record and transcribe a conversation")
+                .accessibilityLabel("Record conversation")
                 Button { showingImporter = true } label: {
                     Image(systemName: "paperclip").font(.system(size: 12)).foregroundStyle(Theme.muted)
                 }.buttonStyle(.plain)
@@ -101,7 +110,7 @@ struct ChatView: View {
         }
         .fileImporter(isPresented: $showingImporter, allowedContentTypes: [.data]) { result in
             if case .success(let url) = result {
-                Task { await appState.sendMessage("", attachmentName: url.lastPathComponent) }
+                appState.showToast("Open the web app to attach \(url.lastPathComponent)")
             }
         }
     }
