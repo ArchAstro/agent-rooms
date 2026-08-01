@@ -229,6 +229,7 @@ final class AppState {
     func sendMessage(
         _ body: String,
         to threadID: String? = nil,
+        idempotencyKey: String? = nil,
         uploads: [MessageUpload] = []
     ) async -> Bool {
         let destinationThreadID = threadID ?? selectedThread.id
@@ -255,6 +256,7 @@ final class AppState {
             try await channel.postMessage(
                 threadID: destinationThreadID,
                 content: trimmed.isEmpty ? " " : trimmed,
+                idempotencyKey: idempotencyKey,
                 uploads: uploads
             )
             showToast("Posted to Team Room")

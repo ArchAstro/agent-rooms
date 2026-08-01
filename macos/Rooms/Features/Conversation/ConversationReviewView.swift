@@ -7,8 +7,6 @@ struct ConversationReviewView: View {
     @Bindable var workflow: ConversationTranscriptWorkflow
     var close: @MainActor () -> Void
 
-    @State private var consentConfirmed = false
-
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -104,7 +102,13 @@ struct ConversationReviewView: View {
                     .foregroundStyle(Theme.badgeRed)
             }
 
-            Toggle("Everyone knows this conversation is being recorded.", isOn: $consentConfirmed)
+            Toggle(
+                "Everyone knows this conversation is being recorded.",
+                isOn: Binding(
+                    get: { workflow.consentConfirmed },
+                    set: { workflow.setConsentConfirmed($0) }
+                )
+            )
                 .toggleStyle(.checkbox)
                 .font(.system(size: 12, weight: .medium))
 
@@ -121,7 +125,7 @@ struct ConversationReviewView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(Theme.green)
                 .disabled(
-                    !consentConfirmed
+                    !workflow.consentConfirmed
                         || !appState.isSignedIn
                         || appState.selectedThread.id.isEmpty
                 )
@@ -313,10 +317,11 @@ struct ConversationReviewView: View {
                 Spacer()
                 Button("Attach to Team Room") {
                     Task {
-                        await workflow.attach { content, threadID, attachment in
+                        await workflow.attach { content, threadID, attachment, idempotencyKey in
                             await appState.sendMessage(
                                 content,
                                 to: threadID,
+                                idempotencyKey: idempotencyKey,
                                 uploads: [
                                     MessageUpload(
                                         name: attachment.filename,
@@ -353,7 +358,6 @@ struct ConversationReviewView: View {
             HStack {
                 Button("Done", action: close).buttonStyle(.bordered)
                 Button("Record another") {
-                    consentConfirmed = false
                     workflow.discard()
                 }
                 .buttonStyle(.borderedProminent)
@@ -388,6 +392,11 @@ struct ConversationReviewView: View {
                     .tint(Theme.green)
                 }
             }
+            if workflow.canRetryTranscription {
+                Text("The source recording remains available until you discard this conversation or quit Rooms.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.muted2)
+            }
             Spacer()
         }
         .padding(32)
@@ -410,7 +419,6 @@ struct ConversationReviewView: View {
     }
 
     private func discardConversation() {
-        consentConfirmed = false
         workflow.discard()
     }
 }

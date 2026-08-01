@@ -3,7 +3,7 @@ import Foundation
 
 @MainActor
 protocol ConversationAudioCapturing: AnyObject {
-    func startRecording(to fileURL: URL, recordedAt: Date) async throws
+    func startRecording(to fileURL: URL) async throws -> Date
     func stopRecording() throws -> RecordedConversationAudio
     func cancelRecording()
 }
@@ -37,7 +37,7 @@ final class MicrophoneConversationRecorder: ConversationAudioCapturing {
     private var recordingURL: URL?
     private var recordingStartedAt: Date?
 
-    func startRecording(to fileURL: URL, recordedAt: Date) async throws {
+    func startRecording(to fileURL: URL) async throws -> Date {
         guard recorder == nil else { throw ConversationAudioCaptureError.alreadyRecording }
 
         let permissionGranted = await AVAudioApplication.requestRecordPermission()
@@ -65,9 +65,11 @@ final class MicrophoneConversationRecorder: ConversationAudioCapturing {
             throw ConversationAudioCaptureError.recordingDidNotStart
         }
 
+        let recordedAt = Date()
         self.recorder = recorder
         recordingURL = fileURL
         recordingStartedAt = recordedAt
+        return recordedAt
     }
 
     func stopRecording() throws -> RecordedConversationAudio {
