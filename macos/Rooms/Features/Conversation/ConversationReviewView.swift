@@ -57,7 +57,8 @@ struct ConversationReviewView: View {
             progressView(
                 title: stage.label,
                 detail: stage.detail,
-                fractionCompleted: stage.fractionCompleted
+                fractionCompleted: stage.fractionCompleted,
+                progressLabel: stage.progressLabel
             )
         case .review:
             reviewView
@@ -171,7 +172,8 @@ struct ConversationReviewView: View {
     private func progressView(
         title: String,
         detail: String,
-        fractionCompleted: Double? = nil
+        fractionCompleted: Double? = nil,
+        progressLabel: String? = nil
     ) -> some View {
         VStack(spacing: 16) {
             Spacer()
@@ -179,7 +181,7 @@ struct ConversationReviewView: View {
                 ProgressView(value: fractionCompleted)
                     .progressViewStyle(.linear)
                     .frame(width: 300)
-                Text("\(Int((fractionCompleted * 100).rounded()))%")
+                Text(progressLabel ?? "\(Int((fractionCompleted * 100).rounded()))%")
                     .font(.system(size: 12, weight: .semibold, design: .monospaced))
                     .foregroundStyle(Theme.muted)
             } else {

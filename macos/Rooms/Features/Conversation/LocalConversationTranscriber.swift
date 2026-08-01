@@ -36,7 +36,7 @@ protocol ConversationModelServing: Sendable {
     func transcribeSpeech(_ fileURL: URL) async throws -> RecognizedConversationSpeech
     func prepareSpeakerModel(
         progressHandler: @escaping ProgressHandler,
-        onRepair: @escaping @Sendable () async -> Void
+        onRepair: @escaping @Sendable () -> Void
     ) async throws
     func separateSpeakers(_ fileURL: URL) async throws -> [TimedSpeakerSegment]
 }
@@ -60,6 +60,11 @@ struct ModelPreparationProgressTracker: Sendable {
         // the only truthful overall-completion signal.
         return min(reportedFraction, 0.99)
     }
+}
+
+private enum ModelPreparationEvent: Sendable {
+    case progress(DownloadProgress)
+    case repairing(LocalModelPreparation)
 }
 
 /// Batch transcription is deliberate: the microphone is stopped before model
@@ -98,7 +103,7 @@ actor FluidConversationModelServer: ConversationModelServing {
 
     func prepareSpeakerModel(
         progressHandler: @escaping ProgressHandler,
-        onRepair: @escaping @Sendable () async -> Void
+        onRepair: @escaping @Sendable () -> Void
     ) async throws {
         guard diarizer == nil else { return }
         let manager = OfflineDiarizerManager(config: .default)
@@ -109,7 +114,7 @@ actor FluidConversationModelServer: ConversationModelServing {
             manager.initialize(models: models)
         } catch {
             // FluidAudio's repair path purges an invalid cache before retrying.
-            await onRepair()
+            onRepair()
             try await manager.prepareModels()
         }
         diarizer = manager
@@ -138,7 +143,7 @@ actor FluidConversationTranscriber: ConversationTranscribing {
         try await relayModelPreparation(
             onStage: onStage,
             preparation: Self.speechModelPreparation
-        ) { [modelServer] progressHandler in
+        ) { [modelServer] progressHandler, _ in
             try await modelServer.prepareSpeechModel(progressHandler: progressHandler)
         }
 
@@ -171,21 +176,16 @@ actor FluidConversationTranscriber: ConversationTranscribing {
             await onStage(.preparingModel(.speakerStarting))
             try await relayModelPreparation(
                 onStage: onStage,
-                preparation: Self.speakerModelPreparation
-            ) { [modelServer] progressHandler in
+                preparation: Self.speakerModelPreparation,
+                repairPreparation: LocalModelPreparation(
+                    modelName: "speaker separation model",
+                    fractionCompleted: nil,
+                    detail: "Repairing the local speaker model cache."
+                )
+            ) { [modelServer] progressHandler, repairHandler in
                 try await modelServer.prepareSpeakerModel(
                     progressHandler: progressHandler,
-                    onRepair: {
-                        await onStage(
-                            .preparingModel(
-                                LocalModelPreparation(
-                                    modelName: "speaker separation model",
-                                    fractionCompleted: nil,
-                                    detail: "Repairing the local speaker model cache."
-                                )
-                            )
-                        )
-                    }
+                    onRepair: repairHandler
                 )
             }
             await onStage(.separatingSpeakers)
@@ -209,34 +209,49 @@ actor FluidConversationTranscriber: ConversationTranscribing {
     private func relayModelPreparation(
         onStage: @escaping @Sendable (LocalTranscriptionStage) async -> Void,
         preparation: @escaping @Sendable (DownloadProgress, Double) -> LocalModelPreparation,
+        repairPreparation: LocalModelPreparation? = nil,
         operation: @escaping @Sendable (
-            _ progressHandler: @escaping ProgressHandler
+            _ progressHandler: @escaping ProgressHandler,
+            _ repairHandler: @escaping @Sendable () -> Void
         ) async throws -> Void
     ) async throws {
-        let (progressStream, progressContinuation) = AsyncStream<DownloadProgress>.makeStream(
+        let (eventStream, eventContinuation) = AsyncStream<ModelPreparationEvent>.makeStream(
             bufferingPolicy: .bufferingNewest(1)
         )
         let progressTask = Task {
             var tracker = ModelPreparationProgressTracker()
-            for await progress in progressStream {
-                await onStage(
-                    .preparingModel(
-                        preparation(progress, tracker.displayedFraction(for: progress))
+            for await event in eventStream {
+                switch event {
+                case .progress(let progress):
+                    let displayedFraction = tracker.displayedFraction(for: progress)
+                    var update = preparation(progress, displayedFraction)
+                    update.operationIndex = tracker.operationIndex
+                    await onStage(.preparingModel(update))
+                case .repairing(let repairPreparation):
+                    await onStage(
+                        .preparingModel(repairPreparation)
                     )
-                )
+                }
             }
         }
 
         do {
-            try await operation { progress in
-                progressContinuation.yield(progress)
-            }
+            try await operation(
+                { progress in
+                    eventContinuation.yield(.progress(progress))
+                },
+                {
+                    if let repairPreparation {
+                        eventContinuation.yield(.repairing(repairPreparation))
+                    }
+                }
+            )
         } catch {
-            progressContinuation.finish()
+            eventContinuation.finish()
             await progressTask.value
             throw error
         }
-        progressContinuation.finish()
+        eventContinuation.finish()
         await progressTask.value
     }
 
