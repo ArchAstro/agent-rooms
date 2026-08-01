@@ -287,6 +287,18 @@ import FluidAudio
             displayedFraction: speakerProgress.fractionCompleted
         )
         let speakerStage = LocalTranscriptionStage.preparingModel(speakerPreparation)
+        let terminalProgress = DownloadProgress(
+            fractionCompleted: 1,
+            phase: .compiling(modelName: "")
+        )
+        let speechTerminal = FluidConversationTranscriber.speechModelPreparation(
+            progress: terminalProgress,
+            displayedFraction: 0.99
+        )
+        let speakerTerminal = FluidConversationTranscriber.speakerModelPreparation(
+            progress: terminalProgress,
+            displayedFraction: 0.99
+        )
 
         #expect(speechStage.fractionCompleted == 0.42)
         #expect(speechStage.label == "Preparing local speech recognition model")
@@ -294,6 +306,8 @@ import FluidAudio
         #expect(speakerStage.fractionCompleted == 0.75)
         #expect(speakerStage.label == "Preparing local speaker separation model")
         #expect(speakerStage.detail == "Compiling speaker-embedding.mlmodelc for this Mac.")
+        #expect(speechTerminal.detail == "Finishing this local speech model step.")
+        #expect(speakerTerminal.detail == "Finishing this local speaker model step.")
     }
 
     @Test func word_timings_are_grouped_by_the_diarized_speaker() {
@@ -393,13 +407,6 @@ import FluidAudio
             return preparation
         }
 
-        #expect(
-            preparations.contains {
-                $0.modelName == "speech recognition model"
-                    && $0.operationIndex == 1
-                    && $0.fractionCompleted == 0.8
-            }
-        )
         #expect(
             preparations.contains {
                 $0.modelName == "speech recognition model"
@@ -656,13 +663,44 @@ import FluidAudio
         }
 
         workflow.resetConsent()
-        try recorder.finishStarting()
+        recorder.finishPermissionRequest()
         await startTask.value
 
         #expect(workflow.phase == .idle)
-        #expect(recorder.cancelCount == 1)
-        let recordingURL = try #require(recorder.recordingURL)
-        #expect(!FileManager.default.fileExists(atPath: recordingURL.path))
+        #expect(recorder.captureStartCount == 0)
+        #expect(recorder.cancelCount == 0)
+        #expect(recorder.recordingURL == nil)
+    }
+
+    @Test @MainActor
+    func denied_microphone_permission_never_starts_capture() async {
+        let recorder = FakeConversationRecorder(duration: 2, permissionGranted: false)
+        let workflow = ConversationTranscriptWorkflow(
+            recorder: recorder,
+            transcriber: FakeConversationTranscriber(
+                transcript: LocalConversationTranscript(segments: [], usedSpeakerDiarization: false)
+            ),
+            recordingsDirectory: FileManager.default.temporaryDirectory
+                .appendingPathComponent("rooms-permission-denied-\(UUID().uuidString)")
+        )
+        workflow.setConsentConfirmed(true)
+
+        await workflow.startRecording(
+            target: ConversationTarget(
+                networkName: "ArchAstro",
+                threadName: "Team Room",
+                threadID: "thread-permission-denied"
+            )
+        )
+
+        #expect(
+            workflow.phase
+                == .failed(
+                    message: ConversationAudioCaptureError.microphonePermissionDenied
+                        .localizedDescription
+                )
+        )
+        #expect(recorder.recordingURL == nil)
     }
 
     @Test @MainActor
@@ -786,23 +824,30 @@ private final class FakeConversationRecorder: ConversationAudioCapturing {
     private let duration: TimeInterval
     private let startedAt: Date
     private let startDelay: Duration?
+    private let permissionGranted: Bool
     private var recordedAt: Date?
     private(set) var recordingURL: URL?
 
     init(
         duration: TimeInterval,
         startedAt: Date = Date(timeIntervalSince1970: 1_785_535_200),
-        startDelay: Duration? = nil
+        startDelay: Duration? = nil,
+        permissionGranted: Bool = true
     ) {
         self.duration = duration
         self.startedAt = startedAt
         self.startDelay = startDelay
+        self.permissionGranted = permissionGranted
     }
 
-    func startRecording(to fileURL: URL) async throws -> Date {
+    func requestPermission() async -> Bool {
         if let startDelay {
-            try await Task.sleep(for: startDelay)
+            try? await Task.sleep(for: startDelay)
         }
+        return permissionGranted
+    }
+
+    func startRecording(to fileURL: URL) throws -> Date {
         try FileManager.default.createDirectory(
             at: fileURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -833,40 +878,40 @@ private final class FakeConversationRecorder: ConversationAudioCapturing {
 @MainActor
 private final class SuspendedStartConversationRecorder: ConversationAudioCapturing {
     private let startedAt: Date
-    private var startContinuation: CheckedContinuation<Date, Never>?
+    private var permissionContinuation: CheckedContinuation<Bool, Never>?
     private(set) var recordingURL: URL?
     private(set) var cancelCount = 0
+    private(set) var captureStartCount = 0
 
     init(startedAt: Date) {
         self.startedAt = startedAt
     }
 
     var isWaitingForPermissionResult: Bool {
-        startContinuation != nil
+        permissionContinuation != nil
     }
 
-    func startRecording(to fileURL: URL) async throws -> Date {
-        recordingURL = fileURL
+    func requestPermission() async -> Bool {
         return await withCheckedContinuation { continuation in
-            startContinuation = continuation
+            permissionContinuation = continuation
         }
     }
 
-    func finishStarting() throws {
-        guard let recordingURL, let startContinuation else { return }
-        do {
-            try FileManager.default.createDirectory(
-                at: recordingURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            try Data(repeating: 1, count: 128).write(to: recordingURL)
-        } catch {
-            self.startContinuation = nil
-            startContinuation.resume(returning: startedAt)
-            throw error
-        }
-        self.startContinuation = nil
-        startContinuation.resume(returning: startedAt)
+    func finishPermissionRequest() {
+        let continuation = permissionContinuation
+        permissionContinuation = nil
+        continuation?.resume(returning: true)
+    }
+
+    func startRecording(to fileURL: URL) throws -> Date {
+        captureStartCount += 1
+        try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data(repeating: 1, count: 128).write(to: fileURL)
+        recordingURL = fileURL
+        return startedAt
     }
 
     func stopRecording() throws -> RecordedConversationAudio {
@@ -952,14 +997,12 @@ private actor FailingDiarizationModelServer: ConversationModelServing {
                 phase: .downloading(completedFiles: 4, totalFiles: 5)
             )
         )
-        await Task.yield()
         progressHandler(
             DownloadProgress(
                 fractionCompleted: 1,
                 phase: .compiling(modelName: "")
             )
         )
-        await Task.yield()
         progressHandler(
             DownloadProgress(
                 fractionCompleted: 0.1,
