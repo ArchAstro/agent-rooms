@@ -95,16 +95,22 @@ final class ConversationTranscriptWorkflow {
         let fileURL = recordingsDirectory
             .appendingPathComponent("conversation-\(makeIdentifier())")
             .appendingPathExtension("wav")
+        let permissionGranted = await recorder.requestPermission()
+        guard phase == .requestingPermission,
+              consentConfirmed,
+              consentGeneration == confirmedConsentGeneration
+        else {
+            phase = .idle
+            return
+        }
+        guard permissionGranted else {
+            phase = .failed(
+                message: ConversationAudioCaptureError.microphonePermissionDenied.localizedDescription
+            )
+            return
+        }
         do {
-            let startedAt = try await recorder.startRecording(to: fileURL)
-            guard phase == .requestingPermission,
-                  consentConfirmed,
-                  consentGeneration == confirmedConsentGeneration
-            else {
-                recorder.cancelRecording()
-                phase = .idle
-                return
-            }
+            let startedAt = try recorder.startRecording(to: fileURL)
             phase = .recording(startedAt: startedAt)
         } catch {
             phase = .failed(message: error.localizedDescription)

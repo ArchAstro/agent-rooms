@@ -62,8 +62,27 @@ struct ModelPreparationProgressTracker: Sendable {
     }
 }
 
+private struct ModelPreparationProgressSnapshot: Sendable {
+    var displayedFraction: Double
+    var operationIndex: Int
+}
+
+private final class LockedModelPreparationProgressTracker: @unchecked Sendable {
+    private let lock = NSLock()
+    private var tracker = ModelPreparationProgressTracker()
+
+    func snapshot(for progress: DownloadProgress) -> ModelPreparationProgressSnapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return ModelPreparationProgressSnapshot(
+            displayedFraction: tracker.displayedFraction(for: progress),
+            operationIndex: tracker.operationIndex
+        )
+    }
+}
+
 private enum ModelPreparationEvent: Sendable {
-    case progress(DownloadProgress)
+    case progress(DownloadProgress, ModelPreparationProgressSnapshot)
     case repairing(LocalModelPreparation)
 }
 
@@ -218,14 +237,13 @@ actor FluidConversationTranscriber: ConversationTranscribing {
         let (eventStream, eventContinuation) = AsyncStream<ModelPreparationEvent>.makeStream(
             bufferingPolicy: .bufferingNewest(1)
         )
+        let progressTracker = LockedModelPreparationProgressTracker()
         let progressTask = Task {
-            var tracker = ModelPreparationProgressTracker()
             for await event in eventStream {
                 switch event {
-                case .progress(let progress):
-                    let displayedFraction = tracker.displayedFraction(for: progress)
-                    var update = preparation(progress, displayedFraction)
-                    update.operationIndex = tracker.operationIndex
+                case .progress(let progress, let snapshot):
+                    var update = preparation(progress, snapshot.displayedFraction)
+                    update.operationIndex = snapshot.operationIndex
                     await onStage(.preparingModel(update))
                 case .repairing(let repairPreparation):
                     await onStage(
@@ -238,7 +256,9 @@ actor FluidConversationTranscriber: ConversationTranscribing {
         do {
             try await operation(
                 { progress in
-                    eventContinuation.yield(.progress(progress))
+                    eventContinuation.yield(
+                        .progress(progress, progressTracker.snapshot(for: progress))
+                    )
                 },
                 {
                     if let repairPreparation {
@@ -271,7 +291,7 @@ actor FluidConversationTranscriber: ConversationTranscribing {
             }
         case .compiling(let modelName):
             detail = modelName.isEmpty
-                ? "Local speech model is ready."
+                ? "Finishing this local speech model step."
                 : "Compiling \(modelName) for this Mac."
         }
         return LocalModelPreparation(
@@ -297,7 +317,7 @@ actor FluidConversationTranscriber: ConversationTranscribing {
             }
         case .compiling(let modelName):
             detail = modelName.isEmpty
-                ? "Local speaker model is ready."
+                ? "Finishing this local speaker model step."
                 : "Compiling \(modelName) for this Mac."
         }
         return LocalModelPreparation(
