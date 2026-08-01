@@ -39,7 +39,7 @@ import FluidAudio
             recorder: recorder,
             transcriber: transcriber,
             recordingsDirectory: recordingsDirectory,
-            makeIdentifier: { "canonical-e2e" }
+            makeIdentifier: { "workflow-integration" }
         )
         let target = ConversationTarget(
             networkName: "ArchAstro",
@@ -47,8 +47,9 @@ import FluidAudio
             threadID: "thread-captured-at-start"
         )
 
-        // Exercise the production workflow ports with deterministic recording and model
-        // adapters; physical microphone/model execution is verified separately on hardware.
+        // Exercise production workflow coordination with deterministic recording/model
+        // adapters. The opt-in live account smoke covers the real Team Room network boundary;
+        // microphone and Core ML execution still require a manual hardware run.
         workflow.setConsentConfirmed(true)
         await workflow.startRecording(target: target)
         #expect(workflow.phase == .recording(startedAt: recordedAt))
@@ -394,13 +395,37 @@ import FluidAudio
 
         #expect(
             preparations.contains {
-                $0.modelName == "speech recognition model" && $0.fractionCompleted == 0.42
+                $0.modelName == "speech recognition model"
+                    && $0.operationIndex == 1
+                    && $0.fractionCompleted == 0.8
+            }
+        )
+        #expect(
+            preparations.contains {
+                $0.modelName == "speech recognition model"
+                    && $0.operationIndex == 2
+                    && $0.fractionCompleted == 0.1
             }
         )
         #expect(
             preparations.contains {
                 $0.modelName == "speaker separation model" && $0.fractionCompleted == 0.75
             }
+        )
+        let finalSpeakerPreparation = preparations.last {
+            $0.modelName == "speaker separation model"
+        }
+        #expect(finalSpeakerPreparation?.fractionCompleted == nil)
+        #expect(finalSpeakerPreparation?.detail == "Repairing the local speaker model cache.")
+        #expect(
+            LocalTranscriptionStage.preparingModel(
+                LocalModelPreparation(
+                    modelName: "speech recognition model",
+                    fractionCompleted: 0.1,
+                    detail: "Downloading another model component.",
+                    operationIndex: 2
+                )
+            ).progressLabel == "Model step 2 · 10%"
         )
         #expect(emittedStages.contains(.separatingSpeakers))
         #expect(emittedStages.last == .buildingTranscript)
@@ -575,6 +600,171 @@ import FluidAudio
         #expect(!workflow.consentConfirmed)
     }
 
+    @Test @MainActor
+    func stale_app_owned_recordings_are_removed_when_the_next_session_starts() throws {
+        let recordingsDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rooms-stale-recording-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: recordingsDirectory) }
+        try FileManager.default.createDirectory(
+            at: recordingsDirectory,
+            withIntermediateDirectories: true
+        )
+        let staleRecording = recordingsDirectory.appendingPathComponent("conversation-crashed.wav")
+        let unrelatedRecording = recordingsDirectory.appendingPathComponent("interview.wav")
+        try Data(repeating: 1, count: 128).write(to: staleRecording)
+        try Data(repeating: 1, count: 128).write(to: unrelatedRecording)
+
+        _ = ConversationTranscriptWorkflow(
+            recorder: FakeConversationRecorder(duration: 2),
+            transcriber: FakeConversationTranscriber(
+                transcript: LocalConversationTranscript(segments: [], usedSpeakerDiarization: false)
+            ),
+            recordingsDirectory: recordingsDirectory
+        )
+
+        #expect(!FileManager.default.fileExists(atPath: staleRecording.path))
+        #expect(FileManager.default.fileExists(atPath: unrelatedRecording.path))
+    }
+
+    @Test @MainActor
+    func consent_revoked_while_permission_is_pending_prevents_hidden_recording() async throws {
+        let recordingsDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rooms-pending-consent-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: recordingsDirectory) }
+        let recorder = SuspendedStartConversationRecorder(
+            startedAt: Date(timeIntervalSince1970: 1_785_535_260)
+        )
+        let workflow = ConversationTranscriptWorkflow(
+            recorder: recorder,
+            transcriber: FakeConversationTranscriber(
+                transcript: LocalConversationTranscript(segments: [], usedSpeakerDiarization: false)
+            ),
+            recordingsDirectory: recordingsDirectory
+        )
+        workflow.setConsentConfirmed(true)
+        let startTask = Task {
+            await workflow.startRecording(
+                target: ConversationTarget(
+                    networkName: "ArchAstro",
+                    threadName: "Team Room",
+                    threadID: "thread-pending-consent"
+                )
+            )
+        }
+        while !recorder.isWaitingForPermissionResult {
+            await Task.yield()
+        }
+
+        workflow.resetConsent()
+        try recorder.finishStarting()
+        await startTask.value
+
+        #expect(workflow.phase == .idle)
+        #expect(recorder.cancelCount == 1)
+        let recordingURL = try #require(recorder.recordingURL)
+        #expect(!FileManager.default.fileExists(atPath: recordingURL.path))
+    }
+
+    @Test @MainActor
+    func attachment_post_is_single_flight_while_the_first_result_is_pending() async throws {
+        let recordingsDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rooms-attachment-single-flight-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: recordingsDirectory) }
+        let workflow = ConversationTranscriptWorkflow(
+            recorder: FakeConversationRecorder(duration: 2),
+            transcriber: FakeConversationTranscriber(
+                transcript: LocalConversationTranscript(
+                    segments: [
+                        ConversationTranscriptSegment(
+                            id: "segment-1",
+                            speakerID: "S1",
+                            startTime: 0,
+                            endTime: 1,
+                            text: "Post once."
+                        )
+                    ],
+                    usedSpeakerDiarization: false
+                )
+            ),
+            recordingsDirectory: recordingsDirectory
+        )
+        workflow.setConsentConfirmed(true)
+        await workflow.startRecording(
+            target: ConversationTarget(
+                networkName: "ArchAstro",
+                threadName: "Team Room",
+                threadID: "thread-single-flight"
+            )
+        )
+        await workflow.stopAndTranscribe()
+        let poster = SuspendedAttachmentPoster()
+
+        let firstAttach = Task {
+            await workflow.attach { _, _, _, key in
+                await poster.post(idempotencyKey: key)
+            }
+        }
+        while await poster.callCount == 0 {
+            await Task.yield()
+        }
+        let secondAttach = Task {
+            await workflow.attach { _, _, _, key in
+                await poster.post(idempotencyKey: key)
+            }
+        }
+        await Task.yield()
+
+        let callsWhilePending = await poster.callCount
+        #expect(callsWhilePending == 1)
+        await poster.resolve(true)
+        await firstAttach.value
+        await secondAttach.value
+        guard case .attached = workflow.phase else {
+            Issue.record("Expected the first successful attachment to remain final")
+            return
+        }
+    }
+
+    @Test @MainActor
+    func transcription_retry_is_single_flight_while_model_work_is_pending() async throws {
+        let recordingsDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rooms-retry-single-flight-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: recordingsDirectory) }
+        let transcriber = SuspendedRetryConversationTranscriber()
+        let workflow = ConversationTranscriptWorkflow(
+            recorder: FakeConversationRecorder(duration: 2),
+            transcriber: transcriber,
+            recordingsDirectory: recordingsDirectory
+        )
+        workflow.setConsentConfirmed(true)
+        await workflow.startRecording(
+            target: ConversationTarget(
+                networkName: "ArchAstro",
+                threadName: "Team Room",
+                threadID: "thread-retry-single-flight"
+            )
+        )
+        await workflow.stopAndTranscribe()
+        guard case .failed = workflow.phase else {
+            Issue.record("Expected the first transcription to fail")
+            return
+        }
+
+        let firstRetry = Task { await workflow.retryTranscription() }
+        while await transcriber.callCount < 2 {
+            await Task.yield()
+        }
+        let secondRetry = Task { await workflow.retryTranscription() }
+        await Task.yield()
+
+        let callsWhilePending = await transcriber.callCount
+        #expect(callsWhilePending == 2)
+        await transcriber.resolveRetry()
+        await firstRetry.value
+        await secondRetry.value
+        #expect(workflow.phase == .review)
+    }
+
     @Test func message_upload_encodes_the_channel_attachment_contract() throws {
         let upload = MessageUpload(
             name: "conversation.md",
@@ -640,6 +830,112 @@ private final class FakeConversationRecorder: ConversationAudioCapturing {
     }
 }
 
+@MainActor
+private final class SuspendedStartConversationRecorder: ConversationAudioCapturing {
+    private let startedAt: Date
+    private var startContinuation: CheckedContinuation<Date, Never>?
+    private(set) var recordingURL: URL?
+    private(set) var cancelCount = 0
+
+    init(startedAt: Date) {
+        self.startedAt = startedAt
+    }
+
+    var isWaitingForPermissionResult: Bool {
+        startContinuation != nil
+    }
+
+    func startRecording(to fileURL: URL) async throws -> Date {
+        recordingURL = fileURL
+        return await withCheckedContinuation { continuation in
+            startContinuation = continuation
+        }
+    }
+
+    func finishStarting() throws {
+        guard let recordingURL, let startContinuation else { return }
+        do {
+            try FileManager.default.createDirectory(
+                at: recordingURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try Data(repeating: 1, count: 128).write(to: recordingURL)
+        } catch {
+            self.startContinuation = nil
+            startContinuation.resume(returning: startedAt)
+            throw error
+        }
+        self.startContinuation = nil
+        startContinuation.resume(returning: startedAt)
+    }
+
+    func stopRecording() throws -> RecordedConversationAudio {
+        throw ConversationAudioCaptureError.notRecording
+    }
+
+    func cancelRecording() {
+        cancelCount += 1
+        if let recordingURL {
+            try? FileManager.default.removeItem(at: recordingURL)
+        }
+    }
+}
+
+private actor SuspendedAttachmentPoster {
+    private var continuations: [CheckedContinuation<Bool, Never>] = []
+    private(set) var callCount = 0
+
+    func post(idempotencyKey: String) async -> Bool {
+        callCount += 1
+        return await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+        }
+    }
+
+    func resolve(_ result: Bool) {
+        let pending = continuations
+        continuations = []
+        pending.forEach { $0.resume(returning: result) }
+    }
+}
+
+private actor SuspendedRetryConversationTranscriber: ConversationTranscribing {
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+    private(set) var callCount = 0
+
+    func transcribe(
+        _ recording: RecordedConversationAudio,
+        onStage: @escaping @Sendable (LocalTranscriptionStage) async -> Void
+    ) async throws -> LocalConversationTranscript {
+        callCount += 1
+        guard callCount > 1 else {
+            throw TestTranscriptionError.firstAttempt
+        }
+        await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+        }
+        await onStage(.buildingTranscript)
+        return LocalConversationTranscript(
+            segments: [
+                ConversationTranscriptSegment(
+                    id: "segment-1",
+                    speakerID: "S1",
+                    startTime: 0,
+                    endTime: 1,
+                    text: "Only one retry completed."
+                )
+            ],
+            usedSpeakerDiarization: false
+        )
+    }
+
+    func resolveRetry() {
+        let pending = continuations
+        continuations = []
+        pending.forEach { $0.resume() }
+    }
+}
+
 private actor TranscriptionStageRecorder {
     private(set) var stages: [LocalTranscriptionStage] = []
 
@@ -652,8 +948,22 @@ private actor FailingDiarizationModelServer: ConversationModelServing {
     func prepareSpeechModel(progressHandler: @escaping ProgressHandler) async throws {
         progressHandler(
             DownloadProgress(
-                fractionCompleted: 0.42,
-                phase: .downloading(completedFiles: 2, totalFiles: 5)
+                fractionCompleted: 0.8,
+                phase: .downloading(completedFiles: 4, totalFiles: 5)
+            )
+        )
+        await Task.yield()
+        progressHandler(
+            DownloadProgress(
+                fractionCompleted: 1,
+                phase: .compiling(modelName: "")
+            )
+        )
+        await Task.yield()
+        progressHandler(
+            DownloadProgress(
+                fractionCompleted: 0.1,
+                phase: .downloading(completedFiles: 1, totalFiles: 10)
             )
         )
     }
@@ -672,7 +982,7 @@ private actor FailingDiarizationModelServer: ConversationModelServing {
 
     func prepareSpeakerModel(
         progressHandler: @escaping ProgressHandler,
-        onRepair: @escaping @Sendable () async -> Void
+        onRepair: @escaping @Sendable () -> Void
     ) async throws {
         progressHandler(
             DownloadProgress(
@@ -680,6 +990,8 @@ private actor FailingDiarizationModelServer: ConversationModelServing {
                 phase: .compiling(modelName: "speaker-embedding.mlmodelc")
             )
         )
+        await Task.yield()
+        onRepair()
     }
 
     func separateSpeakers(_ fileURL: URL) async throws -> [TimedSpeakerSegment] {

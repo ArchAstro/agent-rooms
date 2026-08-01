@@ -67,6 +67,7 @@ struct LocalModelPreparation: Equatable, Sendable {
     var modelName: String
     var fractionCompleted: Double?
     var detail: String
+    var operationIndex: Int? = nil
 
     static let speechStarting = LocalModelPreparation(
         modelName: "speech recognition model",
@@ -116,6 +117,19 @@ enum LocalTranscriptionStage: Equatable, Sendable {
     var fractionCompleted: Double? {
         guard case .preparingModel(let preparation) = self else { return nil }
         return preparation.fractionCompleted
+    }
+
+    var progressLabel: String? {
+        guard case .preparingModel(let preparation) = self,
+              let fractionCompleted = preparation.fractionCompleted
+        else {
+            return nil
+        }
+        let percentage = Int((fractionCompleted * 100).rounded())
+        if let operationIndex = preparation.operationIndex {
+            return "Model step \(operationIndex) · \(percentage)%"
+        }
+        return "\(percentage)%"
     }
 }
 

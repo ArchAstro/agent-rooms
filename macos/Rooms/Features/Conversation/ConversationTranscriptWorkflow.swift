@@ -45,6 +45,7 @@ final class ConversationTranscriptWorkflow {
     private let recordingsDirectory: URL
     private let makeIdentifier: @MainActor () -> String
     private var pendingAttachmentAttempt: PendingAttachmentAttempt?
+    private var consentGeneration = 0
 
     init(
         recorder: any ConversationAudioCapturing = MicrophoneConversationRecorder(),
@@ -56,6 +57,7 @@ final class ConversationTranscriptWorkflow {
         self.transcriber = transcriber
         self.recordingsDirectory = recordingsDirectory ?? Self.defaultRecordingsDirectory
         self.makeIdentifier = makeIdentifier
+        Self.removeStaleRecordings(in: self.recordingsDirectory)
     }
 
     var canRetryTranscription: Bool {
@@ -81,6 +83,7 @@ final class ConversationTranscriptWorkflow {
             return
         }
         guard phase == .idle || isFinished else { return }
+        let confirmedConsentGeneration = consentGeneration
 
         discardSavedRecording()
         draft = nil
@@ -94,6 +97,14 @@ final class ConversationTranscriptWorkflow {
             .appendingPathExtension("wav")
         do {
             let startedAt = try await recorder.startRecording(to: fileURL)
+            guard phase == .requestingPermission,
+                  consentConfirmed,
+                  consentGeneration == confirmedConsentGeneration
+            else {
+                recorder.cancelRecording()
+                phase = .idle
+                return
+            }
             phase = .recording(startedAt: startedAt)
         } catch {
             phase = .failed(message: error.localizedDescription)
@@ -112,16 +123,18 @@ final class ConversationTranscriptWorkflow {
     }
 
     func retryTranscription() async {
-        guard let recording else { return }
+        guard case .failed = phase, let recording else { return }
         await transcribeSavedRecording(recording)
     }
 
     func setConsentConfirmed(_ confirmed: Bool) {
+        guard consentConfirmed != confirmed else { return }
         consentConfirmed = confirmed
+        consentGeneration += 1
     }
 
     func resetConsent() {
-        consentConfirmed = false
+        setConsentConfirmed(false)
     }
 
     func renameSpeaker(_ speakerID: String, to name: String) {
@@ -167,7 +180,12 @@ final class ConversationTranscriptWorkflow {
     }
 
     func attach(using poster: AttachmentPoster) async {
-        guard let target, let attachment = markdownAttachment() else { return }
+        guard phase == .review,
+              let target,
+              let attachment = markdownAttachment()
+        else {
+            return
+        }
         guard draft?.segments.contains(where: {
             !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }) == true else {
@@ -215,7 +233,7 @@ final class ConversationTranscriptWorkflow {
         draft = nil
         uploadError = nil
         pendingAttachmentAttempt = nil
-        consentConfirmed = false
+        resetConsent()
         phase = .idle
     }
 
@@ -223,7 +241,7 @@ final class ConversationTranscriptWorkflow {
         recorder.cancelRecording()
         discardSavedRecording()
         pendingAttachmentAttempt = nil
-        consentConfirmed = false
+        resetConsent()
     }
 
     private var isFinished: Bool {
@@ -271,6 +289,21 @@ final class ConversationTranscriptWorkflow {
             try? FileManager.default.removeItem(at: recording.fileURL)
         }
         recording = nil
+    }
+
+    private static func removeStaleRecordings(in directory: URL) {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+        for file in files where file.lastPathComponent.hasPrefix("conversation-")
+            && file.pathExtension.lowercased() == "wav"
+        {
+            try? FileManager.default.removeItem(at: file)
+        }
     }
 
     private static var defaultRecordingsDirectory: URL {

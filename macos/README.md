@@ -127,8 +127,9 @@ is deleted after a successful attachment or when the reviewer discards it, and
 is retained after a transcription or upload failure so the operation can be
 retried during the current app session. Quitting Rooms deletes the session's
 source recording; the app does not leave an unrecoverable audio file behind.
-If diarization fails, Rooms keeps the local transcript as one speaker and
-exposes manual speaker assignment in the review window.
+On the next launch, Rooms also removes app-owned conversation WAV files left by
+a crash or force-quit. If diarization fails, Rooms keeps the local transcript
+as one speaker and exposes manual speaker assignment in the review window.
 
 This first version records microphone input only; it does not capture system
 audio. It requires macOS microphone permission and is intended for Apple
