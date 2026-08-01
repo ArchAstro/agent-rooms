@@ -74,6 +74,36 @@ import ArchAstroPlatform
         #expect(!sent)
     }
 
+    @Test @MainActor func attachment_limits_are_rejected_before_posting() async {
+        let state = AppState()
+        let tooManyUploads = (0...MessageUpload.maximumCount).map { index in
+            MessageUpload(
+                name: "attachment-\(index).md",
+                mimeType: "text/markdown",
+                data: Data("small".utf8)
+            )
+        }
+
+        let tooManySent = await state.sendMessage("Too many", uploads: tooManyUploads)
+        #expect(!tooManySent)
+        #expect(state.toast == "A message can include at most 10 files")
+        #expect(!state.isSendingMessage)
+
+        let oversizedSent = await state.sendMessage(
+            "Too large",
+            uploads: [
+                MessageUpload(
+                    name: "oversized.md",
+                    mimeType: "text/markdown",
+                    data: Data(repeating: 0, count: MessageUpload.maximumBytes + 1)
+                )
+            ]
+        )
+        #expect(!oversizedSent)
+        #expect(state.toast == "Each attachment must be smaller than 5 MB")
+        #expect(!state.isSendingMessage)
+    }
+
     @Test @MainActor func activity_marks_new_until_activity_is_left() {
         let state = AppState()
         let initialCount = state.events.count
@@ -346,9 +376,21 @@ import ArchAstroPlatform
         )
         defer { Task { await channel.disconnect() } }
 
-        let marker = "Rooms macOS live smoke \(UUID().uuidString)"
+        let marker = "Rooms macOS live attachment smoke \(UUID().uuidString)"
+        let attachmentName = "rooms-live-smoke.md"
+        let attachmentData = Data("# Rooms live smoke\n\n\(marker)\n".utf8)
         let thread = try #require(allThreads.first)
-        try await channel.postMessage(threadID: thread.id, content: marker)
+        try await channel.postMessage(
+            threadID: thread.id,
+            content: marker,
+            uploads: [
+                MessageUpload(
+                    name: attachmentName,
+                    mimeType: "text/markdown",
+                    data: attachmentData
+                )
+            ]
+        )
         try await Task.sleep(for: .milliseconds(250))
         let updated = try await TeamRoomAPI.loadMessagePage(
             client: client,
@@ -359,6 +401,10 @@ import ArchAstroPlatform
         let smokeMessage = try #require(
             updated.messages.first(where: { $0.body == marker })
         )
+        let uploadedMarkdown = try #require(
+            smokeMessage.attachments.first(where: { $0.filename == attachmentName })
+        )
+        #expect(uploadedMarkdown.contentType == "text/markdown")
         try await channel.deleteMessage(
             threadID: thread.id,
             messageID: smokeMessage.id

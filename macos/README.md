@@ -54,6 +54,7 @@ Rooms/
     Auth/                 ArchAgents browser handoff + loopback listener
   Features/Overlay/       Clickable, auto-dismissing incoming-event panels
   Features/
+    Conversation/         Microphone capture, local transcription, review, Markdown export
     Tray/                 Connection, Members, Chat, Activity, network/thread pickers
     Auth/SignInView.swift Credential sheet → PlatformClient.withCredentials
   Settings/               Standard Settings window
@@ -67,8 +68,9 @@ room, **Members** shows its people and agents, **Chat** reads and posts to the
 live Team Room thread, and **Activity** classifies those same posts using the
 Team Room grammar. Generated `ApiChatChannel` subscriptions deliver new and
 updated messages, typing, unread counts, posting, deletion, and mark-read in
-real time; there is no recurring room poll. File uploads and permissioned
-management hand off to the full web app.
+real time; there is no recurring room poll. Conversation transcripts use that
+same joined channel for their Markdown attachment. Other file uploads and
+permissioned management hand off to the full web app.
 
 Chat renders the same rich message grammar as the web room: GitHub-Flavored
 Markdown, protocol event bylines, images, files/media, link previews, tasks,
@@ -104,6 +106,31 @@ Keychain).
 Sessions saved by builds before live-room support can still read rooms. Signing
 in once with the current build refreshes the app/user identifiers required for
 posting.
+
+## Conversation transcripts
+
+The waveform button beside the chat composer, or **Record Conversation…** in
+the status-item menu, opens a separate review window. After everyone confirms
+they know the conversation is being recorded, Rooms captures the active
+microphone to a mono WAV file. Stopping the recording runs batch transcription
+and speaker diarization locally, lets the reviewer rename speakers, reassign
+segments, and correct text, then renders and attaches a Markdown transcript to
+the Team Room that was selected when recording started. The draft can also be
+saved locally as Markdown.
+
+Local speech processing uses
+[`FluidAudio`](https://github.com/FluidInference/FluidAudio) with Parakeet TDT
+v3 int8 transcription and its offline diarization pipeline. The first
+transcription downloads roughly 520 MB of Core ML model data; later runs reuse
+the local cache. Audio is not uploaded for transcription. The source recording
+is deleted after a successful attachment or when the reviewer discards it, and
+is retained after a transcription or upload failure so the operation can be
+retried. If diarization fails, Rooms keeps the local transcript as one speaker
+and exposes manual speaker assignment in the review window.
+
+This first version records microphone input only; it does not capture system
+audio. It requires macOS microphone permission and is intended for Apple
+Silicon Macs supported by FluidAudio.
 
 Room discovery checks joined teams concurrently. Each Team Room initially
 loads only its newest 20 messages, displayed newest-first. Reaching the bottom

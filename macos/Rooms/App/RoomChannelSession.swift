@@ -130,14 +130,19 @@ final class RoomChannelSession: @unchecked Sendable {
         }
     }
 
-    func postMessage(threadID: String, content: String) async throws {
+    func postMessage(
+        threadID: String,
+        content: String,
+        uploads: [MessageUpload] = []
+    ) async throws {
         guard let channel = channelsByThreadID[threadID], channel.channel.isJoined else {
             throw RoomChannelSessionError.unavailable(threadID)
         }
         let reply = try await channel.apiChatPostMessage(
             payload: ApiChatPostMessageInput(
                 content: content,
-                idempotencyKey: UUID().uuidString
+                idempotencyKey: UUID().uuidString,
+                uploads: uploads.isEmpty ? nil : uploads.map(\.channelPayload)
             )
         )
         try Self.requireSuccess(reply)
