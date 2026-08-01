@@ -125,8 +125,10 @@ transcription downloads roughly 520 MB of Core ML model data; later runs reuse
 the local cache. Audio is not uploaded for transcription. The source recording
 is deleted after a successful attachment or when the reviewer discards it, and
 is retained after a transcription or upload failure so the operation can be
-retried. If diarization fails, Rooms keeps the local transcript as one speaker
-and exposes manual speaker assignment in the review window.
+retried during the current app session. Quitting Rooms deletes the session's
+source recording; the app does not leave an unrecoverable audio file behind.
+If diarization fails, Rooms keeps the local transcript as one speaker and
+exposes manual speaker assignment in the review window.
 
 This first version records microphone input only; it does not capture system
 audio. It requires macOS microphone permission and is intended for Apple

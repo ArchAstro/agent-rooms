@@ -18,32 +18,43 @@ final class ConversationTranscriptWorkflow {
     typealias AttachmentPoster = @MainActor (
         _ content: String,
         _ threadID: String,
-        _ attachment: ConversationTranscriptAttachment
+        _ attachment: ConversationTranscriptAttachment,
+        _ idempotencyKey: String
     ) async -> Bool
+
+    private struct AttachmentRequest: Equatable {
+        var content: String
+        var threadID: String
+        var attachment: ConversationTranscriptAttachment
+    }
+
+    private struct PendingAttachmentAttempt {
+        var request: AttachmentRequest
+        var idempotencyKey: String
+    }
 
     private(set) var phase: Phase = .idle
     private(set) var target: ConversationTarget?
     private(set) var draft: ConversationTranscriptDraft?
     private(set) var recording: RecordedConversationAudio?
     private(set) var uploadError: String?
+    private(set) var consentConfirmed = false
 
     private let recorder: any ConversationAudioCapturing
     private let transcriber: any ConversationTranscribing
     private let recordingsDirectory: URL
-    private let now: @MainActor () -> Date
     private let makeIdentifier: @MainActor () -> String
+    private var pendingAttachmentAttempt: PendingAttachmentAttempt?
 
     init(
         recorder: any ConversationAudioCapturing = MicrophoneConversationRecorder(),
         transcriber: any ConversationTranscribing = FluidConversationTranscriber(),
         recordingsDirectory: URL? = nil,
-        now: @escaping @MainActor () -> Date = Date.init,
         makeIdentifier: @escaping @MainActor () -> String = { UUID().uuidString }
     ) {
         self.recorder = recorder
         self.transcriber = transcriber
         self.recordingsDirectory = recordingsDirectory ?? Self.defaultRecordingsDirectory
-        self.now = now
         self.makeIdentifier = makeIdentifier
     }
 
@@ -65,20 +76,24 @@ final class ConversationTranscriptWorkflow {
             phase = .failed(message: "Select a Team Room before recording.")
             return
         }
+        guard consentConfirmed else {
+            phase = .failed(message: "Confirm that everyone knows the conversation is being recorded.")
+            return
+        }
         guard phase == .idle || isFinished else { return }
 
         discardSavedRecording()
         draft = nil
         uploadError = nil
+        pendingAttachmentAttempt = nil
         self.target = target
         phase = .requestingPermission
 
-        let startedAt = now()
         let fileURL = recordingsDirectory
             .appendingPathComponent("conversation-\(makeIdentifier())")
             .appendingPathExtension("wav")
         do {
-            try await recorder.startRecording(to: fileURL, recordedAt: startedAt)
+            let startedAt = try await recorder.startRecording(to: fileURL)
             phase = .recording(startedAt: startedAt)
         } catch {
             phase = .failed(message: error.localizedDescription)
@@ -99,6 +114,14 @@ final class ConversationTranscriptWorkflow {
     func retryTranscription() async {
         guard let recording else { return }
         await transcribeSavedRecording(recording)
+    }
+
+    func setConsentConfirmed(_ confirmed: Bool) {
+        consentConfirmed = confirmed
+    }
+
+    func resetConsent() {
+        consentConfirmed = false
     }
 
     func renameSpeaker(_ speakerID: String, to name: String) {
@@ -155,11 +178,27 @@ final class ConversationTranscriptWorkflow {
         uploadError = nil
         phase = .uploading
         let content = "Conversation transcript recorded \(target.networkName) / \(target.threadName)"
-        if await poster(content, target.threadID, attachment) {
+        let request = AttachmentRequest(
+            content: content,
+            threadID: target.threadID,
+            attachment: attachment
+        )
+        let idempotencyKey: String
+        if let pendingAttachmentAttempt, pendingAttachmentAttempt.request == request {
+            idempotencyKey = pendingAttachmentAttempt.idempotencyKey
+        } else {
+            idempotencyKey = makeIdentifier()
+            pendingAttachmentAttempt = PendingAttachmentAttempt(
+                request: request,
+                idempotencyKey: idempotencyKey
+            )
+        }
+        if await poster(content, target.threadID, attachment, idempotencyKey) {
             discardSavedRecording()
+            pendingAttachmentAttempt = nil
             phase = .attached(filename: attachment.filename)
         } else {
-            uploadError = "The transcript could not be attached. Your review and recording are still available."
+            uploadError = "The transcript could not be attached. Your review and recording remain available until you discard this conversation or quit Rooms."
             phase = .review
         }
     }
@@ -175,12 +214,16 @@ final class ConversationTranscriptWorkflow {
         target = nil
         draft = nil
         uploadError = nil
+        pendingAttachmentAttempt = nil
+        consentConfirmed = false
         phase = .idle
     }
 
-    func cancelActiveRecordingForTermination() {
+    func endSessionForTermination() {
         recorder.cancelRecording()
         discardSavedRecording()
+        pendingAttachmentAttempt = nil
+        consentConfirmed = false
     }
 
     private var isFinished: Bool {

@@ -75,7 +75,7 @@ final class StatusItemController: NSObject {
         pinnedWindow?.orderOut(nil)
         settingsWindow?.orderOut(nil)
         conversationWindow?.orderOut(nil)
-        conversationWorkflow.cancelActiveRecordingForTermination()
+        conversationWorkflow.endSessionForTermination()
         if let item = statusItem {
             NSStatusBar.system.removeStatusItem(item)
         }
@@ -214,7 +214,7 @@ final class StatusItemController: NSObject {
         if conversationWindow == nil {
             let root = ConversationReviewView(
                 workflow: conversationWorkflow,
-                close: { [weak self] in self?.conversationWindow?.orderOut(nil) }
+                close: { [weak self] in self?.closeConversationWindow() }
             )
             .environment(appState)
             let window = NSWindow(
@@ -226,12 +226,18 @@ final class StatusItemController: NSObject {
             window.title = "Conversation Transcript"
             window.isReleasedWhenClosed = false
             window.minSize = NSSize(width: 700, height: 560)
+            window.delegate = self
             window.contentViewController = NSHostingController(rootView: root)
             window.center()
             conversationWindow = window
         }
         conversationWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func closeConversationWindow() {
+        conversationWorkflow.resetConsent()
+        conversationWindow?.close()
     }
 
     func showSettingsWindow() {
@@ -316,6 +322,17 @@ extension StatusItemController: NSPopoverDelegate {
         Task { @MainActor in
             self.statusItem?.button?.highlight(false)
         }
+    }
+}
+
+extension StatusItemController: NSWindowDelegate {
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              window === conversationWindow
+        else {
+            return
+        }
+        conversationWorkflow.resetConsent()
     }
 }
 

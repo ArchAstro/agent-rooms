@@ -133,6 +133,7 @@ final class RoomChannelSession: @unchecked Sendable {
     func postMessage(
         threadID: String,
         content: String,
+        idempotencyKey: String? = nil,
         uploads: [MessageUpload] = []
     ) async throws {
         guard let channel = channelsByThreadID[threadID], channel.channel.isJoined else {
@@ -141,7 +142,7 @@ final class RoomChannelSession: @unchecked Sendable {
         let reply = try await channel.apiChatPostMessage(
             payload: ApiChatPostMessageInput(
                 content: content,
-                idempotencyKey: UUID().uuidString,
+                idempotencyKey: idempotencyKey ?? UUID().uuidString,
                 uploads: uploads.isEmpty ? nil : uploads.map(\.channelPayload)
             )
         )

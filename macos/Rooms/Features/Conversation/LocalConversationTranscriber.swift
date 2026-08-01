@@ -14,13 +14,31 @@ protocol ConversationTranscribing: Sendable {
 
 enum LocalConversationTranscriptionError: LocalizedError {
     case emptyTranscript
+    case modelNotPrepared
 
     var errorDescription: String? {
         switch self {
         case .emptyTranscript:
             "The local model did not detect any speech in this recording."
+        case .modelNotPrepared:
+            "The local transcription model was not prepared."
         }
     }
+}
+
+struct RecognizedConversationSpeech: Sendable {
+    var text: String
+    var words: [WordTiming]
+}
+
+protocol ConversationModelServing: Sendable {
+    func prepareSpeechModel(progressHandler: @escaping ProgressHandler) async throws
+    func transcribeSpeech(_ fileURL: URL) async throws -> RecognizedConversationSpeech
+    func prepareSpeakerModel(
+        progressHandler: @escaping ProgressHandler,
+        onRepair: @escaping @Sendable () async -> Void
+    ) async throws
+    func separateSpeakers(_ fileURL: URL) async throws -> [TimedSpeakerSegment]
 }
 
 struct ModelPreparationProgressTracker: Sendable {
@@ -47,29 +65,91 @@ struct ModelPreparationProgressTracker: Sendable {
 /// Batch transcription is deliberate: the microphone is stopped before model
 /// inference starts, and the recording never leaves this Mac. FluidAudio keeps
 /// its Core ML models in Application Support after the first download.
-actor FluidConversationTranscriber: ConversationTranscribing {
+actor FluidConversationModelServer: ConversationModelServing {
     private var asrManager: AsrManager?
     private var diarizer: OfflineDiarizerManager?
+
+    func prepareSpeechModel(progressHandler: @escaping ProgressHandler) async throws {
+        guard asrManager == nil else { return }
+        let models = try await AsrModels.downloadAndLoad(
+            version: .v3,
+            encoderPrecision: .int8,
+            progressHandler: progressHandler
+        )
+
+        // v3 is multilingual; FluidAudio recommends disabling mel context for
+        // long-form v3 audio to avoid wrong-language drift at chunk seams.
+        let manager = AsrManager(config: ASRConfig(melChunkContext: false))
+        try await manager.loadModels(models)
+        asrManager = manager
+    }
+
+    func transcribeSpeech(_ fileURL: URL) async throws -> RecognizedConversationSpeech {
+        guard let asr = asrManager else {
+            throw LocalConversationTranscriptionError.modelNotPrepared
+        }
+        var decoderState = TdtDecoderState.make(decoderLayers: await asr.decoderLayerCount)
+        let result = try await asr.transcribe(fileURL, decoderState: &decoderState)
+        return RecognizedConversationSpeech(
+            text: result.text,
+            words: result.tokenTimings.map { buildWordTimings(from: $0) } ?? []
+        )
+    }
+
+    func prepareSpeakerModel(
+        progressHandler: @escaping ProgressHandler,
+        onRepair: @escaping @Sendable () async -> Void
+    ) async throws {
+        guard diarizer == nil else { return }
+        let manager = OfflineDiarizerManager(config: .default)
+        do {
+            let models = try await OfflineDiarizerModels.load(
+                progressHandler: progressHandler
+            )
+            manager.initialize(models: models)
+        } catch {
+            // FluidAudio's repair path purges an invalid cache before retrying.
+            await onRepair()
+            try await manager.prepareModels()
+        }
+        diarizer = manager
+    }
+
+    func separateSpeakers(_ fileURL: URL) async throws -> [TimedSpeakerSegment] {
+        guard let diarizer else {
+            throw OfflineDiarizationError.modelNotLoaded("offline-diarizer")
+        }
+        return try await diarizer.process(fileURL).segments
+    }
+}
+
+actor FluidConversationTranscriber: ConversationTranscribing {
+    private let modelServer: any ConversationModelServing
+
+    init(modelServer: any ConversationModelServing = FluidConversationModelServer()) {
+        self.modelServer = modelServer
+    }
 
     func transcribe(
         _ recording: RecordedConversationAudio,
         onStage: @escaping @Sendable (LocalTranscriptionStage) async -> Void
     ) async throws -> LocalConversationTranscript {
-        let asr = try await preparedASRManager(onStage: onStage)
+        await onStage(.preparingModel(.speechStarting))
+        try await relayModelPreparation(
+            onStage: onStage,
+            preparation: Self.speechModelPreparation
+        ) { [modelServer] progressHandler in
+            try await modelServer.prepareSpeechModel(progressHandler: progressHandler)
+        }
 
         await onStage(.transcribing)
-        var decoderState = TdtDecoderState.make(decoderLayers: await asr.decoderLayerCount)
-        let result = try await asr.transcribe(
-            recording.fileURL,
-            decoderState: &decoderState
-        )
-        let transcriptText = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let speech = try await modelServer.transcribeSpeech(recording.fileURL)
+        let transcriptText = speech.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !transcriptText.isEmpty else {
             throw LocalConversationTranscriptionError.emptyTranscript
         }
 
-        let words = result.tokenTimings.map { buildWordTimings(from: $0) } ?? []
-        guard !words.isEmpty else {
+        guard !speech.words.isEmpty else {
             return LocalConversationTranscript(
                 segments: [
                     ConversationTranscriptSegment(
@@ -88,9 +168,28 @@ actor FluidConversationTranscriber: ConversationTranscribing {
         let diarizationSegments: [TimedSpeakerSegment]
         let diarizationError: (any Error)?
         do {
-            let diarizer = try await preparedDiarizer(onStage: onStage)
+            await onStage(.preparingModel(.speakerStarting))
+            try await relayModelPreparation(
+                onStage: onStage,
+                preparation: Self.speakerModelPreparation
+            ) { [modelServer] progressHandler in
+                try await modelServer.prepareSpeakerModel(
+                    progressHandler: progressHandler,
+                    onRepair: {
+                        await onStage(
+                            .preparingModel(
+                                LocalModelPreparation(
+                                    modelName: "speaker separation model",
+                                    fractionCompleted: nil,
+                                    detail: "Repairing the local speaker model cache."
+                                )
+                            )
+                        )
+                    }
+                )
+            }
             await onStage(.separatingSpeakers)
-            diarizationSegments = try await diarizer.process(recording.fileURL).segments
+            diarizationSegments = try await modelServer.separateSpeakers(recording.fileURL)
             diarizationError = nil
         } catch {
             // Diarization is additive. Preserve a useful local transcript and
@@ -101,18 +200,19 @@ actor FluidConversationTranscriber: ConversationTranscribing {
 
         await onStage(.buildingTranscript)
         return Self.buildTranscript(
-            words: words,
+            words: speech.words,
             diarizationSegments: diarizationSegments,
             diarizationError: diarizationError
         )
     }
 
-    private func preparedASRManager(
-        onStage: @escaping @Sendable (LocalTranscriptionStage) async -> Void
-    ) async throws -> AsrManager {
-        if let asrManager { return asrManager }
-        await onStage(.preparingModel(.speechStarting))
-
+    private func relayModelPreparation(
+        onStage: @escaping @Sendable (LocalTranscriptionStage) async -> Void,
+        preparation: @escaping @Sendable (DownloadProgress, Double) -> LocalModelPreparation,
+        operation: @escaping @Sendable (
+            _ progressHandler: @escaping ProgressHandler
+        ) async throws -> Void
+    ) async throws {
         let (progressStream, progressContinuation) = AsyncStream<DownloadProgress>.makeStream(
             bufferingPolicy: .bufferingNewest(1)
         )
@@ -121,24 +221,16 @@ actor FluidConversationTranscriber: ConversationTranscribing {
             for await progress in progressStream {
                 await onStage(
                     .preparingModel(
-                        Self.speechModelPreparation(
-                            progress: progress,
-                            displayedFraction: tracker.displayedFraction(for: progress)
-                        )
+                        preparation(progress, tracker.displayedFraction(for: progress))
                     )
                 )
             }
         }
 
-        let models: AsrModels
         do {
-            models = try await AsrModels.downloadAndLoad(
-                version: .v3,
-                encoderPrecision: .int8,
-                progressHandler: { progress in
-                    progressContinuation.yield(progress)
-                }
-            )
+            try await operation { progress in
+                progressContinuation.yield(progress)
+            }
         } catch {
             progressContinuation.finish()
             await progressTask.value
@@ -146,68 +238,6 @@ actor FluidConversationTranscriber: ConversationTranscribing {
         }
         progressContinuation.finish()
         await progressTask.value
-
-        // v3 is multilingual; FluidAudio recommends disabling mel context for
-        // long-form v3 audio to avoid wrong-language drift at chunk seams.
-        let manager = AsrManager(config: ASRConfig(melChunkContext: false))
-        try await manager.loadModels(models)
-        asrManager = manager
-        return manager
-    }
-
-    private func preparedDiarizer(
-        onStage: @escaping @Sendable (LocalTranscriptionStage) async -> Void
-    ) async throws -> OfflineDiarizerManager {
-        if let diarizer { return diarizer }
-        await onStage(.preparingModel(.speakerStarting))
-        let manager = OfflineDiarizerManager(config: .default)
-
-        let (progressStream, progressContinuation) = AsyncStream<DownloadProgress>.makeStream(
-            bufferingPolicy: .bufferingNewest(1)
-        )
-        let progressTask = Task {
-            var tracker = ModelPreparationProgressTracker()
-            for await progress in progressStream {
-                await onStage(
-                    .preparingModel(
-                        Self.speakerModelPreparation(
-                            progress: progress,
-                            displayedFraction: tracker.displayedFraction(for: progress)
-                        )
-                    )
-                )
-            }
-        }
-
-        let models: OfflineDiarizerModels
-        do {
-            models = try await OfflineDiarizerModels.load(
-                progressHandler: { progress in
-                    progressContinuation.yield(progress)
-                }
-            )
-        } catch {
-            progressContinuation.finish()
-            await progressTask.value
-            await onStage(
-                .preparingModel(
-                    LocalModelPreparation(
-                        modelName: "speaker separation model",
-                        fractionCompleted: nil,
-                        detail: "Repairing the local speaker model cache."
-                    )
-                )
-            )
-            try await manager.prepareModels()
-            diarizer = manager
-            return manager
-        }
-        progressContinuation.finish()
-        await progressTask.value
-
-        manager.initialize(models: models)
-        diarizer = manager
-        return manager
     }
 
     static func speechModelPreparation(
