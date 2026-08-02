@@ -56,6 +56,7 @@ import mimetypes
 import os
 import ssl
 import stat
+import unicodedata
 import subprocess
 import sys
 import tempfile
@@ -699,7 +700,7 @@ def _guard_config_origin(kind: str, value: str, trusted: set):
 # TEAM_ROOM_TRUST_SERVER exists for test harnesses pointing at fakes; setting
 # it in a real environment removes every configured-origin exfiltration guard.
 _guard_config_origin("server", PRODUCTION_SERVER, _trusted_servers())
-KIT_VERSION = "2026.07.25"
+KIT_VERSION = "2026.08.02"
 CLIENT_SOURCE = "rooms-skill"
 ROOM_APP_NAME = "ArchAgents"
 
@@ -1158,6 +1159,87 @@ def session_nudge(areas=None) -> str:
 _EXHAUST_TOKEN = None
 
 
+def _leading_token(subject: str) -> str | None:
+    """The first word of a commit subject: the first run of letters.
+
+    `str.isalpha` is true for every alphabet — Latin, Cyrillic, Greek, CJK —
+    so this needs no character tables and no script special cases. Callers
+    normalise to NFC first so accented spellings compare equal. Combining
+    marks end the run; measured irrelevant here (0 of 17,808 commits), so
+    do not add script tables without real data. See PR #9229 review thread.
+    """
+    i = 0
+    while i < len(subject) and not subject[i].isalpha():
+        i += 1
+    if i >= len(subject):
+        return None
+    j = i
+    while j < len(subject) and subject[j].isalpha():
+        j += 1
+    return subject[i:j].lower()
+
+
+def subject_shape(subjects) -> dict:
+    """The shape of a team's work, in the team's OWN words.
+
+    Returns `{token: count}`: the leading word of each commit subject,
+    lowercased. Present on EVERY repo with no convention required, which is
+    the whole point: `fix(rooms): ...` reduces to `fix`, `Bump version to
+    22.4.0` reduces to `bump`. Measured over 400 real commits each, this
+    explains 100% of history on our repo AND on Stripe, Rails and React,
+    where a conventional-commit prefix explains 0-2%.
+
+    One fixed parser. An earlier version let a team declare arbitrary
+    capture patterns in a JSON overlay; that engine needed a wall-clock
+    guard, a shape check, length caps and declaration validation, and
+    review still defeated it (an ambiguous alternation ran unbounded in
+    every teammate's session). The capability was not worth the blast
+    radius.
+
+    The only interpretation baked in is a FACT: the deliberate `[skip ci]`
+    marker buckets as `automated` (deploy bots). Everything else is the
+    literal leading word; what a word MEANS is decided at read time.
+    """
+    counts: dict = {}
+    for subject in subjects:
+        # NFC first, so composed and decomposed spellings of the same word
+        # ("Añadir" either way) land in the same bucket.
+        s = unicodedata.normalize("NFC", (subject or "").strip())
+        if not s:
+            continue
+        if "[skip ci]" in s.lower():
+            key = "automated"
+        else:
+            key = _leading_token(s) or "other"
+        if len(key) > 64:
+            key = key[:64]
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+def shape_buckets(pairs_text: str) -> dict:
+    """Group commits by their subject's leading token: `{token: [shas]}`.
+
+    Input is `git log --pretty=%h\t%s` output. The SHA is `%h` (never
+    contains a tab), so splitting on the FIRST tab is safe even when a
+    subject itself contains tabs. `[skip ci]` commits land under
+    `automated` like everywhere else, so their SHAs still participate in
+    reader-side dedup. This is the fact the spine's exactness guarantee
+    rests on: a reader derives counts as `len(bucket)` and de-duplicates
+    by SHA set membership, so counts and SHAs can never disagree.
+    """
+    buckets: dict = {}
+    for row in pairs_text.splitlines():
+        sha, _, subject = row.partition("\t")
+        if not sha:
+            continue
+        # An empty subject (git commit --allow-empty-message) is still a
+        # commit: it buckets under `other` so counts, buckets and the flat
+        # SHA list can never disagree (review find).
+        token = next(iter(subject_shape([subject])), None) or "other"
+        buckets.setdefault(token, []).append(sha)
+    return buckets
+
+
 def _git_exhaust(budget_seconds: float = 3.0) -> dict:
     """Git facts for this post, from the local checkout only: repo identity,
     and the posting author's commits since this worktree's last post.
@@ -1244,11 +1326,45 @@ def _git_exhaust(budget_seconds: float = 3.0) -> dict:
                       "--max-count=200", f"{base}..HEAD", timeout=budget())
     if rc != 0:
         return exhaust  # no window, so no diff either: omit over guess
-    sha_list = [s.strip()[:9] for s in shas.splitlines() if s.strip()]
+    # 12-char to match work_shape_commits: consumers dedup by exact
+    # string (room-signals routine), so the two paths must agree.
+    sha_list = [s.strip()[:12] for s in shas.splitlines() if s.strip()]
     exhaust["commits"] = len(sha_list)
     if not sha_list:
         return exhaust  # zero commits: a zero-filled diff would be filler
-    exhaust["commit_shas"] = sha_list[:50]
+    # Work shape: the leading word of each commit in the window, with the
+    # SHAs each bucket counted. Deterministic, local, no model. The SHA
+    # sets are the single source: `work_shape` is derived as bucket sizes,
+    # and `commit_shas` (the legacy flat list, capped) is derived from the
+    # same buckets, so the two can never disagree. Unlike a conventional-
+    # commit prefix (0-2% coverage on repos that do not use it), the
+    # leading token exists on every commit; what a word MEANS is the
+    # reader's job, never guessed here.
+    if not out_of_time():
+        # --abbrev is pinned so the same commit yields the same string
+        # regardless of a machine's core.abbrev.
+        rc, pairs = git_rc(
+            "log", "--first-parent", f"--author={email}", "--abbrev=12",
+            "--max-count=200", "--pretty=%h\t%s", f"{base}..HEAD",
+            timeout=budget()
+        )
+        if rc == 0 and pairs.strip():
+            buckets = shape_buckets(pairs)
+            if buckets:
+                exhaust["work_shape"] = {t: len(v) for t, v in buckets.items()}
+                exhaust["work_shape_commits"] = buckets
+                # The legacy flat list comes from the SAME call, so the two
+                # lists share one abbreviation and can be cross-referenced;
+                # log order is preserved (buckets group, this does not).
+                exhaust["commit_shas"] = [
+                    row.partition("\t")[0]
+                    for row in pairs.splitlines()
+                    if row.partition("\t")[0]
+                ][:50]
+    if "commit_shas" not in exhaust:
+        # Shape derivation skipped (deadline): the earlier window scan
+        # still identifies the commits, at its own abbreviation.
+        exhaust["commit_shas"] = sha_list[:50]
     if out_of_time():
         return exhaust
 
@@ -1335,6 +1451,12 @@ def build_metadata(post_type, refs, addressee=None, answers=None) -> dict:
         "worktree": worktree_short(),
         "branch": git("branch", "--show-current"),
         "head": git("rev-parse", "--short", "HEAD"),
+        # The producing kit version, stamped on the post itself (not only
+        # the request header) so any value derived at the edge , work_shape
+        # today , carries the version that computed it. Kit versions drift
+        # across a large fleet; a reader must be able to tell an old
+        # stamp's shape from a new one.
+        "kit_version": KIT_VERSION,
     }
     if refs:
         meta["refs"] = refs[:10]
@@ -3200,6 +3322,40 @@ def _pr_publish_args(argv):
     return result
 
 
+def _trajectory_line(summary: dict) -> str:
+    """The trajectory post's plain-text face: one readable sentence for
+    surfaces that render no card (Slack mirror, plain clients). The stream
+    card renders from metadata; this line just has to stand alone."""
+    pr = summary.get("pr")
+    parts = []
+    if summary.get("tool_calls") is not None:
+        piece = f"{summary['tool_calls']} tool calls"
+        if summary.get("minutes"):
+            piece += f" over {summary['minutes']} min"
+        parts.append(piece)
+    prompts = summary.get("prompts")
+    if prompts is not None:
+        parts.append(f"{prompts} human prompt{'' if prompts == 1 else 's'}")
+    diff = summary.get("diff") or {}
+    if diff:
+        parts.append(f"+{diff.get('added', 0)} −{diff.get('deleted', 0)} "
+                     f"across {diff.get('files', 0)} files")
+    tail = ", ".join(parts) if parts else "summary attached"
+    subject = f"PR #{pr}" if pr else "this change"
+    return (f"✓ {identity_tag()}: published how {subject} was built: {tail}.")
+
+
+def _post_once_bounded(session: dict, message: str, metadata: dict | None):
+    """One post attempt with a short deadline, for exhaust inside larger
+    workflows where post()'s retry ladder would be a real delay."""
+    url = (
+        f"{PRODUCTION_SERVER}/protected/api/v1/developer/apps/"
+        f"{session['appId']}/threads/{THREAD_ID}/messages"
+    )
+    body = {"content": message, "user": session["userId"], "metadata": metadata or {}}
+    return http_json(url, body, token=session["accessToken"], timeout=8)
+
+
 def publish_pr(argv):
     """Publish local-only evidence; any room failure is deliberately non-blocking."""
     automatic = _automatic_pr_inputs(argv)[0]
@@ -3316,6 +3472,64 @@ def publish_pr(argv):
             args["replace_head_from"], args["from_artifact_version"], False)
         publisher = Publisher(client, state_path, policy, ancestor=lambda old, new: is_ancestor(cwd, old, new))
         result = publisher.publish(request)
+        if result.status in ("published", "updated"):
+            is_update = result.status == "updated"
+            # The stream's trajectory card reads a few hundred bytes of raw
+            # counts, never the 2MB artifact. Fold them here where the bundle
+            # is already in memory, and post; a posting failure never blocks
+            # the publish (exhaust, not a gate). "updated" posts too: a PR
+            # republished after more work has a NEW story to tell.
+            try:
+                from evidence.policy import restrict_payload
+                from evidence.summary import trajectory_summary
+                # Summarise the POLICY-APPLIED payload, never the raw bundle.
+                # `--mode local-review` strips prompts and trajectory events
+                # from the artifact; deriving counts from `content` here would
+                # publish exactly what the mode removed, straight past the
+                # omission boundary the caller chose (review find).
+                restricted = restrict_payload(content, policy)
+                summary = trajectory_summary(restricted)
+                # Withheld is ABSENT, never zero: local-review strips the
+                # events, and publishing "0 tool calls" for a session full
+                # of real activity is a false statement, not a redaction
+                # (review find). Same rule as the summary itself: absent
+                # means omitted, never guessed.
+                if not policy.allow_trajectory:
+                    for k in ("tool_calls", "agent_messages", "minutes"):
+                        summary.pop(k, None)
+                if not policy.allow_prompts:
+                    summary.pop("prompts", None)
+                if policy.mode != "review_capsule":
+                    summary["capture"] = policy.mode
+                if is_update:
+                    # The stored artifact merges chapters across sessions;
+                    # this summary covers ONE session's request. Say so
+                    # rather than letting the card imply the whole story
+                    # (review find).
+                    summary["covers"] = "session"
+                line = _trajectory_line(summary)
+                if is_update:
+                    line = line.replace("published how", "updated how", 1)
+                # ONE bounded attempt, not the interactive retry ladder:
+                # publish_pr runs inside PR-creation workflows, and post()'s
+                # default 30s timeout (times its fallback retries) would
+                # meaningfully delay a successful PR on a stalled endpoint
+                # (review find). Failure health-logs; the artifact stands.
+                _post_once_bounded(authenticated, line, metadata={
+                    "post_type": "trajectory",
+                    "human": human_name(),
+                    "worktree": worktree_short(),
+                    "trajectory": summary,
+                    "artifact": {"name": request.artifact_name,
+                                 "id": result.artifact_id},
+                    "kit_version": KIT_VERSION,
+                })
+            except (Exception, SystemExit) as post_exc:  # noqa: BLE001
+                # post() reports HTTP failures via SystemExit; letting that
+                # escape would print "pr evidence withheld" for an artifact
+                # that actually published (review find).
+                health_event("pr-evidence",
+                             f"summary post failed: {str(post_exc)[:120]}")
         if not automatic:
             print(result.status)
     except (Exception, SystemExit) as exc:
