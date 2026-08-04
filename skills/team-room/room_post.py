@@ -553,6 +553,10 @@ def _local_cli_preflight(argv: list[str]):
             except OSError as exc:
                 local_error = f"can't read attachment '{path}': {exc}"
                 break
+    elif cmd == "mirror-flush":
+        # Internal: the detached delivery worker mirror_fanout spawns.
+        # No local shape to validate.
+        pass
     else:
         usage_key = "top"
         invalid = True
@@ -700,7 +704,7 @@ def _guard_config_origin(kind: str, value: str, trusted: set):
 # TEAM_ROOM_TRUST_SERVER exists for test harnesses pointing at fakes; setting
 # it in a real environment removes every configured-origin exfiltration guard.
 _guard_config_origin("server", PRODUCTION_SERVER, _trusted_servers())
-KIT_VERSION = "2026.08.02"
+KIT_VERSION = "2026.08.03"
 CLIENT_SOURCE = "rooms-skill"
 ROOM_APP_NAME = "ArchAgents"
 
@@ -778,7 +782,17 @@ for _mirror in MIRRORS:
         _trusted_portals(),
     )
 MIRRORS_DIR = os.path.expanduser("~/.config/team-room/mirrors")
-MIRROR_FANOUT_BUDGET_SECONDS = 1.0
+# Mirror copies deliver from a queue drained by a DETACHED worker, not
+# inline at post time. The old inline fan-out had a 1-second budget shared
+# across mirrors; one slow TLS handshake or token refresh lost the whole
+# second, which starved every mirror for days while posts looked fine
+# (health log: 34 straight TimeoutErrors). The queue keeps posts fast, the
+# worker gets a real budget, and a failed spawn self-heals because the
+# next post's worker drains whatever is queued.
+MIRROR_QUEUE_PATH = os.path.expanduser("~/.config/team-room/mirror-queue.jsonl")
+MIRROR_QUEUE_MAX_AGE_SECONDS = 7 * 86400
+MIRROR_FLUSH_REQUEST_TIMEOUT = 20.0
+MIRROR_FLUSH_TOTAL_BUDGET_SECONDS = 120.0
 
 
 
@@ -2775,38 +2789,253 @@ def _mirror_session(m: dict, timeout: float) -> dict | None:
     return session
 
 
+def _spawn_mirror_worker():
+    """Start one detached delivery worker unless one is already running.
+    The probe-then-spawn order pairs with the worker's drain-then-recheck
+    loop to close the lost-wakeup race: if the probe finds the lock held,
+    the holder is guaranteed to re-read the queue AFTER we appended (it
+    re-checks after releasing); if the probe acquires it, no worker was
+    alive and we spawn one. Also stops process storms — a burst of posts
+    spawns at most one interpreter per idle moment, not one per post."""
+    import fcntl
+
+    try:
+        probe = open(MIRROR_QUEUE_PATH + ".lock", "w")
+        try:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(probe, fcntl.LOCK_UN)
+        except OSError:
+            return  # an active worker will re-check the queue when done
+        finally:
+            probe.close()
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "mirror-flush"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except (Exception, SystemExit) as e:
+        health_event("mirrors", type(e).__name__)
+
+
 def mirror_fanout(message: str, metadata: dict | None, uploads: list | None = None):
-    """Best-effort copy of a post to each configured mirror tier. The
-    prod post already succeeded; nothing here may fail the command, so
-    every problem becomes one quiet line and we move on."""
-    deadline = time.monotonic() + MIRROR_FANOUT_BUDGET_SECONDS
-    for m in MIRRORS:
+    """Queue a copy of the post for the mirror tiers and hand delivery to a
+    detached worker. The prod post already succeeded; nothing here may fail
+    the command or slow it down, so this only appends one line and (maybe)
+    spawns — every problem becomes one quiet health line and we move on.
+
+    Each entry records its OWN targets and a stable idempotency key. The
+    queue file is machine-global, but a worker started from a different
+    repo or room config must deliver to the destinations that were
+    configured when the post happened — never to wherever its own config
+    points (review find: cross-room leakage)."""
+    if not MIRRORS:
+        return
+    import fcntl
+
+    try:
+        targets = [
+            {
+                "name": m["name"],
+                "server": m["server"],
+                "thread_id": m["thread_id"],
+            }
+            for m in MIRRORS
+            if m.get("thread_id")
+        ]
+        if not targets:
+            return
+        entry = {
+            "at": time.time(),
+            "key": os.urandom(16).hex(),
+            "message": message,
+            "metadata": metadata or None,
+            "uploads": uploads or None,
+            "targets": targets,
+            "done": [],
+        }
+        os.makedirs(os.path.dirname(MIRROR_QUEUE_PATH), exist_ok=True)
+        fd = os.open(
+            MIRROR_QUEUE_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600
+        )
+        with os.fdopen(fd, "a") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            f.write(json.dumps(entry) + "\n")
+            fcntl.flock(f, fcntl.LOCK_UN)
+        _spawn_mirror_worker()
+    except (Exception, SystemExit) as e:
+        health_event("mirrors", type(e).__name__)
+
+
+def _mirror_queue_read() -> list[str]:
+    try:
+        with open(MIRROR_QUEUE_PATH) as f:
+            return [l for l in f.read().splitlines() if l.strip()]
+    except OSError:
+        return []
+
+
+def _mirror_queue_rewrite(consumed_line: str, replacement: str | None):
+    """Replace (or drop) ONE line by exact content, keeping everything else —
+    including lines other posters appended while we were on the network.
+    Callers hold no lock during delivery, so this re-reads under the append
+    lock and swaps the file ATOMICALLY (temp + rename): a crash mid-rewrite
+    must never lose the whole queue (review find)."""
+    import fcntl
+    import tempfile
+
+    fd = os.open(MIRROR_QUEUE_PATH, os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "r+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        lines = [l for l in f.read().splitlines() if l.strip()]
+        out, replaced = [], False
+        for l in lines:
+            if not replaced and l == consumed_line:
+                replaced = True
+                if replacement is not None:
+                    out.append(replacement)
+                continue
+            out.append(l)
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            dir=os.path.dirname(MIRROR_QUEUE_PATH)
+        )
+        try:
+            with os.fdopen(tmp_fd, "w") as tmp:
+                if out:
+                    tmp.write("\n".join(out) + "\n")
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, MIRROR_QUEUE_PATH)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path)
+            raise
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def _deliver_to_target(target: dict, entry: dict, sessions: dict, remaining: float) -> bool:
+    """One mirror copy, bounded by the caller's remaining budget. The
+    idempotency key makes a retry after an ambiguous outcome (message
+    committed, response lost) an upsert instead of a duplicate."""
+    name = target["name"]
+    server = target["server"]
+    if server not in _trusted_servers():
+        health_event(f"mirror:{name}", "untrusted target server")
+        return False
+    if name not in sessions:
+        sessions[name] = _mirror_session(
+            {"name": name, "server": server},
+            min(MIRROR_FLUSH_REQUEST_TIMEOUT, remaining),
+        )
+    session = sessions[name]
+    if not session:
+        health_event(f"mirror:{name}", "credentials unavailable")
+        return False
+    body = {
+        "content": entry["message"],
+        "user": session["userId"],
+        "idempotency_key": f"mirror-{entry['key']}-{name}",
+    }
+    if entry.get("metadata"):
+        body["metadata"] = entry["metadata"]
+    if entry.get("uploads"):
+        body["uploads"] = entry["uploads"]
+    http_json(
+        f"{server}/protected/api/v1/developer/apps/"
+        f"{session['appId']}/threads/{target['thread_id']}/messages",
+        body,
+        token=session["accessToken"],
+        timeout=max(0.01, min(MIRROR_FLUSH_REQUEST_TIMEOUT, remaining)),
+    )
+    return True
+
+
+def mirror_flush():
+    """The detached delivery worker: drain the mirror queue with a real
+    budget. One flusher at a time (non-blocking lock — a second spawn just
+    exits, because _spawn_mirror_worker guarantees the holder re-checks the
+    queue after finishing). Entries deliver to THEIR OWN recorded targets
+    in order: a target that fails stops receiving for this run so a tier
+    never sees posts out of sequence, while other targets keep draining.
+    Entries a week old expire with a health line instead of shadow-retrying
+    forever."""
+    import fcntl
+
+    os.makedirs(os.path.dirname(MIRROR_QUEUE_PATH), exist_ok=True)
+    lock = open(MIRROR_QUEUE_PATH + ".lock", "w")
+    deadline = time.monotonic() + MIRROR_FLUSH_TOTAL_BUDGET_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return
+        try:
+            made_progress = _mirror_drain_pass(deadline)
+        finally:
+            with contextlib.suppress(Exception):
+                fcntl.flock(lock, fcntl.LOCK_UN)
+        # Re-check AFTER releasing: a poster who appended while we drained
+        # saw the lock held and skipped its spawn, counting on this.
+        if not made_progress or not _mirror_queue_read():
+            return
+
+
+def _mirror_drain_pass(deadline: float) -> bool:
+    """One pass over the queue. Returns whether anything changed — the
+    caller loops while progress continues and the budget allows."""
+    bad: set[str] = set()
+    sessions: dict[str, dict | None] = {}
+    progressed = False
+    for line in _mirror_queue_read():
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            health_event("mirrors", "shared deadline exhausted")
             break
         try:
-            if not m.get("thread_id"):
-                health_event(f"mirror:{m['name']}", "room not provisioned")
+            entry = json.loads(line)
+        except Exception:
+            _mirror_queue_rewrite(line, None)
+            progressed = True
+            continue
+        if time.time() - (entry.get("at") or 0) > MIRROR_QUEUE_MAX_AGE_SECONDS:
+            health_event("mirror-queue", "expired undelivered")
+            _mirror_queue_rewrite(line, None)
+            progressed = True
+            continue
+        targets = entry.get("targets") or []
+        if not isinstance(targets, list) or not entry.get("key"):
+            _mirror_queue_rewrite(line, None)
+            progressed = True
+            continue
+        done = set(entry.get("done") or [])
+        for target in targets:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            name = target.get("name")
+            if not name or name in done or name in bad:
                 continue
-            session = _mirror_session(m, remaining)
-            if not session:
-                health_event(f"mirror:{m['name']}", "credentials unavailable")
-                continue
-            body = {"content": message, "user": session["userId"]}
-            if metadata:
-                body["metadata"] = metadata
-            if uploads:
-                body["uploads"] = uploads
-            http_json(
-                f"{m['server']}/protected/api/v1/developer/apps/"
-                f"{session['appId']}/threads/{m['thread_id']}/messages",
-                body,
-                token=session["accessToken"],
-                timeout=max(0.01, deadline - time.monotonic()),
-            )
-        except (Exception, SystemExit) as e:
-            health_event(f"mirror:{m['name']}", type(e).__name__)
+            try:
+                if _deliver_to_target(target, entry, sessions, remaining):
+                    done.add(name)
+                else:
+                    bad.add(name)
+            except (Exception, SystemExit) as e:
+                health_event(f"mirror:{name}", type(e).__name__)
+                bad.add(name)
+        pending = [t.get("name") for t in targets if t.get("name") not in done]
+        if not pending:
+            _mirror_queue_rewrite(line, None)
+            progressed = True
+        elif done != set(entry.get("done") or []):
+            entry["done"] = sorted(done)
+            _mirror_queue_rewrite(line, json.dumps(entry))
+            progressed = True
+        # No early exit here: a tier in `bad` is already skipped per target,
+        # and breaking would also stop LATER entries for the healthy tiers
+        # (the same bug the first draft had — the test that caught it then
+        # catches it now).
+    return progressed
 
 
 def login_page_html(ok: bool) -> str:
@@ -3556,6 +3785,19 @@ def publish_pr(argv):
 
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "mirror-flush":
+        # Internal: the detached mirror-delivery worker mirror_fanout spawns.
+        mirror_flush()
+        return
+    # Opportunistic continuation: a backlog stranded by a failed tier or an
+    # exhausted budget drains on the NEXT kit invocation of any kind — every
+    # session starts with a read, so "no continuation without another post"
+    # never holds for long (review find).
+    try:
+        if os.path.getsize(MIRROR_QUEUE_PATH) > 0:
+            _spawn_mirror_worker()
+    except OSError:
+        pass
     if cmd == "init":
         cfg = None
         rest = sys.argv[2:]
