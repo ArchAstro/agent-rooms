@@ -39,11 +39,17 @@ def test_repeated_health_event_increments_one_logical_row():
     return "ok"
 
 
-def test_optional_mirrors_share_one_quiet_deadline():
+def test_optional_mirrors_never_block_the_post():
+    """The old contract was a shared 1-second inline deadline; the new one
+    is stronger: posting performs NO mirror network work at all. It appends
+    one self-describing line to the queue and spawns a detached worker —
+    even a mirror that would hang forever cannot slow a post."""
+    import tempfile as _tempfile
+
     real_mirrors = rp.MIRRORS
-    real_budget = rp.MIRROR_FANOUT_BUDGET_SECONDS
-    real_session = rp._mirror_session
+    real_queue = rp.MIRROR_QUEUE_PATH
     real_http = rp.http_json
+    real_popen = rp.subprocess.Popen
     try:
         rp.MIRRORS = [
             {
@@ -55,18 +61,16 @@ def test_optional_mirrors_share_one_quiet_deadline():
             }
             for index in range(3)
         ]
-        rp.MIRROR_FANOUT_BUDGET_SECONDS = 0.05
-        rp._mirror_session = lambda _mirror, timeout: {
-            "accessToken": "token",
-            "appId": "app",
-            "userId": "user",
-        }
+        rp.MIRROR_QUEUE_PATH = os.path.join(
+            _tempfile.mkdtemp(), "mirror-queue.jsonl"
+        )
 
-        def slow_http(*_args, timeout, **_kwargs):
-            time.sleep(timeout)
-            raise TimeoutError
+        def hang_forever(*_args, **_kwargs):
+            raise AssertionError("posting must never touch a mirror inline")
 
-        rp.http_json = slow_http
+        rp.http_json = hang_forever
+        spawned = []
+        rp.subprocess.Popen = lambda *a, **k: spawned.append(a[0]) or None
         output = io.StringIO()
         started = time.monotonic()
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
@@ -74,11 +78,19 @@ def test_optional_mirrors_share_one_quiet_deadline():
         elapsed = time.monotonic() - started
         assert elapsed < 0.15, elapsed
         assert output.getvalue() == "", output.getvalue()
+        with open(rp.MIRROR_QUEUE_PATH) as handle:
+            lines = [l for l in handle.read().splitlines() if l.strip()]
+        assert len(lines) == 1, lines
+        entry = json.loads(lines[0])
+        assert {t["name"] for t in entry["targets"]} == {
+            "slow-0", "slow-1", "slow-2"
+        }
+        assert len(spawned) == 1 and spawned[0][-1] == "mirror-flush"
     finally:
         rp.MIRRORS = real_mirrors
-        rp.MIRROR_FANOUT_BUDGET_SECONDS = real_budget
-        rp._mirror_session = real_session
+        rp.MIRROR_QUEUE_PATH = real_queue
         rp.http_json = real_http
+        rp.subprocess.Popen = real_popen
     return "ok"
 
 
