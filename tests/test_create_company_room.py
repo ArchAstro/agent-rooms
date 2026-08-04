@@ -46,6 +46,7 @@ class Stub(http.server.BaseHTTPRequestHandler):
     threads = []        # POST /teams/:id/threads bodies
     schemas = []        # POST /config bodies
     team_post_status = None
+    thread_post_status = None
     schema_status = None
 
     def log_message(self, *a):
@@ -91,7 +92,17 @@ class Stub(http.server.BaseHTTPRequestHandler):
             Stub.created.append(body)
             self._json(200, {"id": "tem_new"})
         elif self.path.endswith("/threads"):
+            if Stub.thread_post_status:
+                self._json(Stub.thread_post_status, {"error": "nope"})
+                return
             Stub.threads.append({"path": self.path, "body": body})
+            # A team that was half-made now has its conversation, so a
+            # re-run finds a complete room.
+            tid = self.path.split("/api/v1/teams/")[1].split("/threads")[0]
+            for t in Stub.teams:
+                if t["id"] == tid:
+                    t.setdefault("threads", []).append(
+                        {"id": "thr_new", "title": "team room"})
             self._json(200, {"id": "thr_new"})
         elif self.path == "/api/v1/config":
             if Stub.schema_status:
@@ -132,6 +143,7 @@ def reset(teams=None):
     Stub.teams = list(teams or [])
     Stub.created, Stub.threads, Stub.schemas = [], [], []
     Stub.team_post_status = None
+    Stub.thread_post_status = None
     Stub.schema_status = None
     CALLS.clear()
 
@@ -228,6 +240,61 @@ def main():
                   r.stderr.strip())
             check("still saves the room", (room_json(home) or {}).get("team_id")
                   == "tem_new")
+        # ── a run that died mid-way is finished, not duplicated ─────────
+        # This is the state that used to wedge the kit completely: the team
+        # exists and is labelled, so discovery finds it, but it has no
+        # conversation, so discovery RAISED — and every later create,
+        # discover and login failed with it.
+        print("a half-made room is finished, not abandoned")
+        partial = {"id": "tem_half", "name": "Northwind", "org": MY_ORG,
+                   "created_at": "2026-01-01T00:00:00Z",
+                   "metadata": {"system_role": ROOM_LABEL,
+                                "room_org_id": MY_ORG},
+                   "threads": []}
+        reset(teams=[partial])
+        with tempfile.TemporaryDirectory() as home:
+            r = run_kit(["create", "Northwind"], home, server)
+            check("succeeds instead of wedging", r.returncode == 0,
+                  (r.stdout + r.stderr).strip())
+            check("reuses the half-made team, makes no second one",
+                  not Stub.created, f"created={Stub.created}")
+            check("gives it the conversation it was missing",
+                  len(Stub.threads) == 1
+                  and "tem_half" in Stub.threads[0]["path"], str(Stub.threads))
+            cfg = room_json(home) or {}
+            check("saves the repaired room", cfg.get("team_id") == "tem_half",
+                  str(cfg))
+
+        # ── adopting an existing room still asserts its schemas ──────────
+        # A room made before a schema existed, or one whose schema call
+        # failed, is repaired by running this again rather than staying
+        # subtly broken.
+        print("adopting a room repairs its schemas")
+        reset(teams=[{"id": "tem_real", "name": "Northwind", "org": MY_ORG,
+                      "created_at": "2026-01-01T00:00:00Z",
+                      "metadata": {"system_role": ROOM_LABEL,
+                                   "room_org_id": MY_ORG},
+                      "threads": [{"id": "thr_real", "title": "team room"}]}])
+        with tempfile.TemporaryDirectory() as home:
+            r = run_kit(["create", "Northwind"], home, server)
+            keys = sorted(s.get("lookup_key") for s in Stub.schemas)
+            check("re-asserts all three schemas on adopt",
+                  keys == ["room-pin", "team-presence", "team-record"], str(keys))
+            check("still creates no second room", not Stub.created)
+
+        # ── a thread failure leaves nothing saved locally ────────────────
+        print("a thread failure does not save a broken room")
+        reset(teams=[])
+        Stub.thread_post_status = 500
+        with tempfile.TemporaryDirectory() as home:
+            r = run_kit(["create", "Northwind"], home, server)
+            check("reports the failure", r.returncode != 0,
+                  (r.stdout + r.stderr).strip())
+            check("saves nothing", room_json(home) is None)
+            check("says how to finish it",
+                  "room-post create" in (r.stdout + r.stderr),
+                  (r.stdout + r.stderr).strip())
+
     finally:
         httpd.shutdown()
 
