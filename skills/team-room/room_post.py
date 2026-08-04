@@ -2542,6 +2542,62 @@ search_fields: [human, worktree, intent]
 )
 
 
+def _labelled_rooms(call, org: str) -> list:
+    """Every team labelled as this company's room, whether or not it has its
+    conversation yet. Deliberately not `discover_rooms`, which raises on a
+    room whose thread is missing — the exact state this has to repair."""
+    room_filter = {
+        "operator": "and",
+        "clauses": [
+            {"operator": "eq", "path": ["system_role"], "value": ROOM_LABEL},
+            {"operator": "eq", "path": ["room_org_id"], "value": org},
+        ],
+    }
+    rows, seen = [], set()
+    for membership in ("joined", "joinable"):
+        page = 1
+        while True:
+            d = call(
+                f"/api/v1/teams?membership={membership}&page_size=100&page={page}"
+                f"&metadata={urllib.parse.quote(json.dumps(room_filter))}"
+            )
+            for t in d.get("data") or []:
+                # `org` is set by the platform from whoever created the team
+                # and cannot be written by a caller; the label can. Trust only
+                # the former, or a stranger's team stamped with this company's
+                # id gets adopted as its room.
+                if t.get("org") == org and t.get("id") not in seen:
+                    seen.add(t["id"])
+                    rows.append(t)
+            if d.get("has_next") is not True:
+                break
+            page += 1
+    # Oldest first, so two callers who each made a room still converge on the
+    # same one rather than each keeping their own.
+    rows.sort(key=lambda t: (t.get("created_at") or "", t.get("id") or ""))
+    return rows
+
+
+def _ensure_schemas(call, team_id: str):
+    """Assert the room's schemas. Safe to repeat: already-there is success,
+    which is what lets a half-made room be finished rather than abandoned."""
+    for key, yaml_body in ROOM_SCHEMAS:
+        try:
+            call("/api/v1/config", method="POST", body={
+                "kind": "CustomObjectSchema",
+                "lookup_key": key,
+                "raw_content": yaml_body,
+                "mime_type": "application/yaml",
+                "team": team_id,
+            })
+        except urllib.error.HTTPError as e:
+            # Anything other than already-present is not success: a room
+            # missing these looks fine and then silently drops records, pins
+            # and the presence strip.
+            if e.code not in (409, 422):
+                raise
+
+
 def create_room(token: str, name: str | None = None) -> bool:
     """Make this company's room, and save it locally.
 
@@ -2554,6 +2610,11 @@ def create_room(token: str, name: str | None = None) -> bool:
     performs. The team carries a read grant for the company and a label
     saying it is that company's room, which together are what let everyone
     afterwards find it and join themselves.
+
+    Written to be run twice. Creating a room is four calls, and a failure
+    after the first leaves a labelled team with no conversation — a state
+    that makes discovery raise, which wedges every later command including
+    this one. So it resumes a half-made room rather than starting another.
     """
     server = os.environ.get("ROOM_SERVER") or PRODUCTION_SERVER or DEFAULT_SERVER
     pub_key = (os.environ.get("ROOM_PUBLISHABLE_KEY")
@@ -2561,57 +2622,85 @@ def create_room(token: str, name: str | None = None) -> bool:
     call = _room_api(server, token, pub_key)
     org = _my_org(call)
 
-    # Ask before creating. Two colleagues running this within a minute of
-    # each other must not leave the company with two rooms, and a failed
-    # lookup is not an empty company — it raises, and we stop.
-    existing = discover_rooms(server, token, pub_key)
-    if existing:
-        found_name, tid, thid = existing[0]
-        _write_room_json(tid, thid, server, pub_key)
-        print(f"your company already had a room — you're in it: {found_name}")
-        return True
+    # Look before creating. A lookup that FAILED raises out of here rather
+    # than being read as a company with no room, which is how duplicates got
+    # made before.
+    existing = _labelled_rooms(call, org)
 
-    team = call("/api/v1/teams", method="POST", body={
-        "name": (name or "").strip() or "Team Room",
-        # Without the grant the room is invisible to colleagues and only an
-        # admin can let anyone in; without the label nobody can tell it from
-        # any other team. The website sets both, so this must too.
-        "acl": {"grants": [{"principal_type": "org",
-                            "principal": org,
-                            "actions": ["read"]}]},
-        "metadata": {"system_role": ROOM_LABEL, "room_org_id": org},
-    })
-    team_id = team.get("id") or (team.get("data") or {}).get("id")
-    if not team_id:
-        raise RuntimeError("the server accepted the room but returned no id")
+    team_id, thread_id, verb = None, None, "created"
+    for t in existing:
+        got = _room_thread(call, t["id"])
+        if got:
+            team_id, thread_id, verb = t["id"], got[1], "already had"
+            name = got[0]
+            break
+    if team_id is None and existing:
+        # Labelled, owned by this company, but no conversation: a previous
+        # run died between the two calls. Finish that room instead of adding
+        # a second one.
+        team_id, verb = existing[0]["id"], "finished setting up"
+        name = existing[0].get("name") or name
 
-    thread = call(f"/api/v1/teams/{team_id}/threads", method="POST", body={
-        "thread": {"title": ROOM_THREAD_TITLE},
-        "skip_welcome_message": True,
-    })
-    thread_id = thread.get("id") or (thread.get("data") or {}).get("id")
-    if not thread_id:
-        raise RuntimeError("the room was made but its conversation was not")
+    if team_id is None:
+        team = call("/api/v1/teams", method="POST", body={
+            "name": (name or "").strip() or "Team Room",
+            # Without the grant the room is invisible to colleagues and only
+            # an admin can let anyone in; without the label nobody can tell
+            # it from any other team. The website sets both, so this must.
+            "acl": {"grants": [{"principal_type": "org",
+                                "principal": org,
+                                "actions": ["read"]}]},
+            "metadata": {"system_role": ROOM_LABEL, "room_org_id": org},
+        })
+        team_id = team.get("id") or (team.get("data") or {}).get("id")
+        if not team_id:
+            raise RuntimeError("the server accepted the room but returned no id")
 
-    for key, yaml_body in ROOM_SCHEMAS:
+    if thread_id is None:
+        # The team now exists and is labelled. If this call fails the room is
+        # half-made, so say how to finish it — otherwise the error reads like
+        # "start again", and starting again is what makes a second room.
         try:
-            call("/api/v1/config", method="POST", body={
-                "kind": "CustomObjectSchema",
-                "lookup_key": key,
-                "raw_content": yaml_body,
-                "mime_type": "application/yaml",
-                "team": team_id,
+            thread = call(f"/api/v1/teams/{team_id}/threads", method="POST", body={
+                "thread": {"title": ROOM_THREAD_TITLE},
+                "skip_welcome_message": True,
             })
-        except urllib.error.HTTPError as e:
-            # Already there is success. Anything else is not: a room missing
-            # these looks fine and then silently drops records, pins and the
-            # presence strip.
-            if e.code not in (409, 422):
-                raise
+        except Exception as e:
+            raise RuntimeError(
+                f"the room was made but its conversation was not ({e}). "
+                "Re-run `room-post create` to finish it — it picks up where "
+                "this stopped rather than making a second room."
+            ) from e
+        thread_id = thread.get("id") or (thread.get("data") or {}).get("id")
+        if not thread_id:
+            raise RuntimeError(
+                "the room was made but its conversation was not. "
+                "Re-run `room-post create` to finish it."
+            )
 
+    # Always, including when adopting: a room that was half-made, or made
+    # before a schema was added, is repaired by running this again.
+    _ensure_schemas(call, team_id)
     _write_room_json(team_id, thread_id, server, pub_key)
-    print(f"created your company's room: {name or 'Team Room'}")
+    print(f"{verb} your company's room: {name or 'Team Room'}")
     print("teammates get in by running: room-post login")
+
+    # Two people running this at the same moment can both pass the check
+    # above before either writes, and no client-side check can prevent that
+    # — only the server could. Say so plainly rather than let a company
+    # quietly end up split across two rooms nobody can see the other in.
+    try:
+        now = _labelled_rooms(call, org)
+    except Exception:
+        return True
+    if len(now) > 1:
+        print(
+            f"\nheads up: your company now has {len(now)} rooms, which means "
+            "someone created one at the same moment as you.\n"
+            "Everyone should use the oldest one:"
+        )
+        for t in now:
+            print(f"  room-post discover --team {t['id']}   # {t.get('name')}")
     return True
 
 
