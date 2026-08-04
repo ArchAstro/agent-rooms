@@ -34,6 +34,8 @@ Read:
   room-post inbox                 requests addressed to you
 
 Setup:
+  room-post create [name]         make your company's room (first person only;
+                                  everyone after is joined automatically)
   room-post login                 one browser click: signs you in AND finds
                                   your team room automatically. Once per machine.
   room-post login <mirror>        connect a mirror tier listed in room.json
@@ -322,10 +324,11 @@ DEFAULT_PUBLISHABLE_KEY = "pk_dap_032Tk6YGrHp2cnyxwABnMS_Q6M9BsvOr8HKuIkLZNRWVTC
 
 _COMMAND_USAGE = {
     "top": (
-        "usage: room-post <read|search|brief|records|inbox|doctor|pr|"
+        "usage: room-post <create|read|search|brief|records|inbox|doctor|pr|"
         "start|done|lesson|handoff|question|abandoned|notify|approve|accept> ..."
     ),
     "init": "usage: room-post init --config <room.json>",
+    "create": "usage: room-post create [name]",
     "discover": "usage: room-post discover [--team <team-id>]",
     "login": "usage: room-post login [mirror]",
     "read": "usage: room-post read [1-100]",
@@ -419,6 +422,9 @@ def _local_cli_preflight(argv: list[str]):
     local_error = None
     if cmd == "init":
         invalid = len(rest) != 2 or rest[0] != "--config" or not rest[1]
+    elif cmd == "create":
+        # An optional name, which may be several words. Flags are not.
+        invalid = any(a.startswith("-") for a in rest)
     elif cmd == "discover":
         invalid = bool(rest) and (
             len(rest) != 2 or rest[0] != "--team" or not rest[1]
@@ -582,7 +588,7 @@ if __name__ == "__main__":
 # load config if it happens to exist (e.g. `login <mirror>` needs the
 # mirror list) but never fail when it's absent. Every other command loads
 # config eagerly and fails loud if it's missing.
-_SOFT_CONFIG_CMDS = {"init", "login", "discover", "--help", "-h", "help"}
+_SOFT_CONFIG_CMDS = {"init", "create", "login", "discover", "--help", "-h", "help"}
 _soft = len(sys.argv) > 1 and sys.argv[1] in _SOFT_CONFIG_CMDS
 _AMBIENT_PR_PUBLISH = sys.argv[1:3] == ["pr", "publish"]
 _AUTOMATIC_PR_PUBLISH = (
@@ -2470,6 +2476,145 @@ def _write_room_json(team_id: str, thread_id: str, server: str, pub_key: str):
     os.chmod(ROOM_CONFIG_PATH, 0o600)
 
 
+# The room thread's title, and the three team-scoped schemas a room needs to
+# be useful the moment it exists. These mirror what the website provisions
+# (services/agent_network/lib/actions/room-actions.ts); a room made by either
+# route has to come out identical, or a room's records, pins and presence
+# depend on which door it was created through. team-record is also shipped
+# beside this file as team-record-schema.yaml for reference.
+ROOM_THREAD_TITLE = "team room"
+
+ROOM_SCHEMAS = (
+    ("team-record", """kind: CustomObjectSchema
+name: team-record
+description: Durable team knowledge distilled from the room stream
+json_schema:
+  type: object
+  properties:
+    record_id: {type: string}
+    title: {type: string}
+    body: {type: string}
+    kind: {type: string}
+    status: {type: string}
+    evidence: {type: array}
+  required: [record_id, title]
+row_key: [record_id]
+search_fields: [title, body, kind]
+"""),
+    ("room-pin", """kind: CustomObjectSchema
+name: room-pin
+description: Pinned questions the room keeps fresh
+json_schema:
+  type: object
+  properties:
+    pin_id: {type: string}
+    question: {type: string}
+    answer: {type: string}
+    answer_at: {type: string}
+    changed_at: {type: string}
+    audience: {type: string}
+    pinned_by: {type: string}
+    maintainer: {type: string}
+    power: {type: string}
+    kind: {type: string}
+    status: {type: string}
+    evidence: {type: array}
+  required: [pin_id, question]
+row_key: [pin_id]
+search_fields: [question, answer]
+"""),
+    ("team-presence", """kind: CustomObjectSchema
+name: team-presence
+description: One living row per person and worktree, refreshed by every post
+json_schema:
+  type: object
+  properties:
+    scope_id: {type: string}
+    human: {type: string}
+    worktree: {type: string}
+    branch: {type: string}
+    intent: {type: string}
+    last_post_type: {type: string}
+  required: [scope_id, human, worktree]
+row_key: [scope_id]
+search_fields: [human, worktree, intent]
+"""),
+)
+
+
+def create_room(token: str, name: str | None = None) -> bool:
+    """Make this company's room, and save it locally.
+
+    The first person at a company had nowhere to get a room from: `init`
+    only writes a config somebody hands you, and `discover` only finds a
+    room that already exists. So person one asked us for three ids over
+    Slack, which is not a product.
+
+    Nothing new on the server — this is the same sequence the website
+    performs. The team carries a read grant for the company and a label
+    saying it is that company's room, which together are what let everyone
+    afterwards find it and join themselves.
+    """
+    server = os.environ.get("ROOM_SERVER") or PRODUCTION_SERVER or DEFAULT_SERVER
+    pub_key = (os.environ.get("ROOM_PUBLISHABLE_KEY")
+               or _ROOM_CFG.get("publishable_key") or DEFAULT_PUBLISHABLE_KEY)
+    call = _room_api(server, token, pub_key)
+    org = _my_org(call)
+
+    # Ask before creating. Two colleagues running this within a minute of
+    # each other must not leave the company with two rooms, and a failed
+    # lookup is not an empty company — it raises, and we stop.
+    existing = discover_rooms(server, token, pub_key)
+    if existing:
+        found_name, tid, thid = existing[0]
+        _write_room_json(tid, thid, server, pub_key)
+        print(f"your company already had a room — you're in it: {found_name}")
+        return True
+
+    team = call("/api/v1/teams", method="POST", body={
+        "name": (name or "").strip() or "Team Room",
+        # Without the grant the room is invisible to colleagues and only an
+        # admin can let anyone in; without the label nobody can tell it from
+        # any other team. The website sets both, so this must too.
+        "acl": {"grants": [{"principal_type": "org",
+                            "principal": org,
+                            "actions": ["read"]}]},
+        "metadata": {"system_role": ROOM_LABEL, "room_org_id": org},
+    })
+    team_id = team.get("id") or (team.get("data") or {}).get("id")
+    if not team_id:
+        raise RuntimeError("the server accepted the room but returned no id")
+
+    thread = call(f"/api/v1/teams/{team_id}/threads", method="POST", body={
+        "thread": {"title": ROOM_THREAD_TITLE},
+        "skip_welcome_message": True,
+    })
+    thread_id = thread.get("id") or (thread.get("data") or {}).get("id")
+    if not thread_id:
+        raise RuntimeError("the room was made but its conversation was not")
+
+    for key, yaml_body in ROOM_SCHEMAS:
+        try:
+            call("/api/v1/config", method="POST", body={
+                "kind": "CustomObjectSchema",
+                "lookup_key": key,
+                "raw_content": yaml_body,
+                "mime_type": "application/yaml",
+                "team": team_id,
+            })
+        except urllib.error.HTTPError as e:
+            # Already there is success. Anything else is not: a room missing
+            # these looks fine and then silently drops records, pins and the
+            # presence strip.
+            if e.code not in (409, 422):
+                raise
+
+    _write_room_json(team_id, thread_id, server, pub_key)
+    print(f"created your company's room: {name or 'Team Room'}")
+    print("teammates get in by running: room-post login")
+    return True
+
+
 def discover_and_configure(token: str, chosen_team: str | None = None):
     """Find and persist the caller's team room. Zero-config for the common
     single-room case; prints choices when there are several. A room.json
@@ -2499,8 +2644,9 @@ def discover_and_configure(token: str, chosen_team: str | None = None):
     if chosen_team:
         rooms = [r for r in rooms if r[1] == chosen_team]
     if not rooms:
-        print("your company doesn't have a team room yet. "
-              f"Create one at {DEFAULT_PORTAL} and re-run this.")
+        print("your company doesn't have a team room yet.\n"
+              "  room-post create           # make it, and everyone after you "
+              "is joined automatically")
         return False
     if len(rooms) == 1:
         name, tid, thid = rooms[0]
@@ -3806,6 +3952,20 @@ def main():
         if not cfg:
             die("usage: room-post init --config <room.json>")
         init_room(cfg)
+        return
+    if cmd == "create":
+        rest = sys.argv[2:]
+        name = " ".join(a for a in rest if not a.startswith("-")).strip() or None
+        tok = _bootstrap_token()
+        if not tok:
+            die("sign in first: room-post login", 3)
+        try:
+            if not create_room(tok, name):
+                die("could not create the room", 3)
+        except Exception as e:
+            # Say what went wrong. "could not create" sends someone to ask us,
+            # which is the thing this verb exists to stop.
+            die(f"could not create the room: {e}", 3)
         return
     if cmd == "discover":
         rest = sys.argv[2:]

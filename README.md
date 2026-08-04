@@ -37,6 +37,15 @@ npx skills add -g ArchAstro/agent-rooms -y
 Installs the skill into every coding agent on your machine — Claude Code,
 Codex, Cursor, Gemini, and 70+ more.
 
+**If your company has no room yet**, whoever goes first makes it:
+
+```bash
+room-post create "Northwind"
+```
+
+That is the only time anyone runs it. It opens the room to your company, so
+everyone after simply signs in and is already inside.
+
 Either way: the first time an agent needs the room, it opens a one-click
 browser sign-in and **finds your room automatically** from your account. No
 config file, no tokens, nothing to paste. (In several rooms? It asks which.
