@@ -14,6 +14,14 @@ from ..model import Chapter, Detection, EvidenceEvent, ExecutionSpan, SessionSou
 class Adapter(ABC):
     capture_fidelity = "exact"
     MAX_RECORD_BYTES = 1_048_576
+    # Real transcripts routinely carry single records past MAX_RECORD_BYTES
+    # (a pasted image, a huge tool result). Hard-failing at 1MB silently
+    # killed six publishes on one machine in five days — the biggest
+    # sessions, exactly the trajectories worth keeping. Records up to this
+    # ceiling are read whole and flow into the bundler's sanitize/degrade
+    # tiers, which bound what actually ships; only a pathological line
+    # (runaway writer, corrupt file) still aborts.
+    HARD_RECORD_CEILING = 32 * 1_048_576
     @abstractmethod
     def detect(self, env: Mapping[str, str], cwd: Path) -> Detection | None: ...
 
@@ -62,8 +70,22 @@ class Adapter(ABC):
                 line = handle.readline(self.MAX_RECORD_BYTES + 1)
                 if not line:
                     break
-                if len(line) > self.MAX_RECORD_BYTES:
-                    raise ValueError(f"transcript JSONL record exceeds {self.MAX_RECORD_BYTES} byte limit")
+                if len(line) > self.MAX_RECORD_BYTES and not line.endswith(b"\n"):
+                    # Oversized record: keep reading it under the hard ceiling
+                    # instead of failing the whole publish.
+                    chunks = [line]
+                    total = len(line)
+                    while not chunks[-1].endswith(b"\n"):
+                        more = handle.readline(self.HARD_RECORD_CEILING + 1)
+                        if not more:
+                            break
+                        total += len(more)
+                        if total > self.HARD_RECORD_CEILING:
+                            raise ValueError(
+                                f"transcript JSONL record exceeds {self.HARD_RECORD_CEILING} byte hard ceiling"
+                            )
+                        chunks.append(more)
+                    line = b"".join(chunks)
                 if not line.endswith(b"\n"):
                     break  # a writer may still be appending this JSONL record
                 try:
