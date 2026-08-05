@@ -413,6 +413,47 @@ def build_bundle(subject: Subject, chapters: Iterable[Chapter], git_evidence: Gi
         payload["omissions"] = [{"category": item.category, "reason": item.reason} for item in omissions]
         payload["rendered_markdown"] = _render(safe_subject, payload["chapters"], safe_patch, safe_tests, omissions)
         data = _encode(payload)
+    if len(data) > maximum:
+        # Third tier: a session so large that even excerpt-stripped metadata
+        # outgrows the cap (a 14k-event build session is megabytes of ids and
+        # timestamps alone). Keep the arc — the first and last `window` events
+        # of each chapter — and replace the middle with one explicit omission
+        # carrying exact per-type counts; each chapter also gains truthful
+        # `event_counts` totals over the FULL event list so downstream
+        # summaries never understate the session. Halving the window
+        # converges to a skeleton that always fits: a big session may
+        # degrade, but it can never fail to publish.
+        pristine = [list(chapter["events"]) for chapter in payload["chapters"]]
+        window = 512
+        while len(data) > maximum:
+            attempt_omissions = list(omissions)
+            for chapter, events in zip(payload["chapters"], pristine):
+                counts: dict[str, int] = {}
+                for event in events:
+                    counts[event["type"]] = counts.get(event["type"], 0) + 1
+                chapter["event_counts"] = counts
+                if len(events) <= 2 * window:
+                    chapter["events"] = list(events)
+                    continue
+                kept = events[:window] + events[len(events) - window :] if window else []
+                dropped = events[window : len(events) - window] if window else events
+                dropped_counts: dict[str, int] = {}
+                for event in dropped:
+                    dropped_counts[event["type"]] = dropped_counts.get(event["type"], 0) + 1
+                detail = ", ".join(f"{count} {kind}" for kind, count in sorted(dropped_counts.items()))
+                attempt_omissions.append(Omission(
+                    "event_window",
+                    f"{len(dropped)} events omitted to satisfy artifact size policy ({detail}); "
+                    f"first and last {window} kept; event_counts holds full totals",
+                ))
+                chapter["events"] = kept
+            payload["current"]["complete"] = False
+            payload["omissions"] = [{"category": item.category, "reason": item.reason} for item in attempt_omissions]
+            payload["rendered_markdown"] = _render(safe_subject, payload["chapters"], safe_patch, safe_tests, attempt_omissions)
+            data = _encode(payload)
+            if window == 0:
+                break
+            window //= 2
     # One final full-object pass covers policy-derived fields and the rendering
     # immediately before bytes are written.
     payload, final_redactions = sanitize(payload)
