@@ -106,7 +106,15 @@ def handoff(path: str) -> dict[str, Any]:
         "model",
         "capture_path",
     }
-    if not isinstance(data, dict) or set(data) - allowed or any(not isinstance(value, str) or len(value) > 512 for value in data.values()): raise ValueError("PR evidence handoff fields are invalid")
+    if not isinstance(data, dict):
+        raise ValueError("PR evidence handoff fields are invalid")
+    # Tolerant reader on keys: an extra key a harness invented (a real 2026-08
+    # failure sent pr_number) must not silently kill the whole publish — only
+    # the allowed keys are ever consumed, so unknown ones are dropped. Values
+    # of consumed keys stay strict.
+    data = {key: value for key, value in data.items() if key in allowed}
+    if any(not isinstance(value, str) or len(value) > 512 for value in data.values()):
+        raise ValueError("PR evidence handoff fields are invalid")
     current = candidate.lstat()
     if (before.st_dev, before.st_ino) != (current.st_dev, current.st_ino):
         raise ValueError("PR evidence handoff changed before consumption")

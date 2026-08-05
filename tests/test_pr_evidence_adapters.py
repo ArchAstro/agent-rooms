@@ -364,6 +364,102 @@ def test_claude_requires_authoritative_session_metadata_and_codex_effort_field()
         print("PASS  test_claude_requires_authoritative_session_metadata_and_codex_effort_field")
 
 
+def test_oversized_transcript_record_publishes_instead_of_killing_the_run():
+    # Real Claude transcripts carry single records past 1MB (pasted images,
+    # huge tool results) — the old hard fail at MAX_RECORD_BYTES silently
+    # killed six publishes on one machine in five days. An oversized record
+    # must now read whole, produce its events, and keep the checkpoint
+    # digest exact; only the pathological hard ceiling still aborts.
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        session_id = "0198c0de-5678-7abc-8def-0123456789ab"
+        path = root / "projects" / f"{session_id}.jsonl"
+        big_text = "y" * (2 * 1_048_576)  # one 2MB record, over MAX, under ceiling
+        write(
+            path,
+            [
+                {"sessionId": session_id, "type": "user", "message": {"content": "hi"}},
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": big_text}]},
+                },
+                {"type": "user", "message": {"content": "and after the big one?"}},
+            ],
+        )
+        adapter = ClaudeAdapter()
+        detection = Detection("claude", session_id, str(root))
+        source = adapter.resolve_session(detection, session_id)
+        events, checkpoint = adapter.read_events(source, None)
+        kinds = [event.type for event in events]
+        assert kinds == ["human_prompt", "agent_message", "human_prompt"], kinds
+        assert len(events[1].summary) == len(big_text)
+        # The checkpoint consumed the full file, oversized bytes included.
+        assert checkpoint.offset == path.stat().st_size
+        print("PASS  test_oversized_transcript_record_publishes_instead_of_killing_the_run")
+
+
+def test_pathological_transcript_record_still_fails_at_the_hard_ceiling():
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        session_id = "0198c0de-9999-7abc-8def-0123456789ab"
+        path = root / "projects" / f"{session_id}.jsonl"
+        monster = "z" * (ClaudeAdapter.HARD_RECORD_CEILING + 1024)
+        write(
+            path,
+            [
+                {"sessionId": session_id, "type": "user", "message": {"content": "hi"}},
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": monster}]},
+                },
+            ],
+        )
+        adapter = ClaudeAdapter()
+        source = adapter.resolve_session(Detection("claude", session_id, str(root)), session_id)
+        try:
+            adapter.read_events(source, None)
+        except ValueError as exc:
+            assert "hard ceiling" in str(exc)
+        else:
+            raise AssertionError("a record past the hard ceiling must abort the publish")
+        print("PASS  test_pathological_transcript_record_still_fails_at_the_hard_ceiling")
+
+
+def test_handoff_ignores_unknown_keys_but_keeps_value_strictness():
+    # A harness that invents one extra key (a real 2026-08 failure sent
+    # pr_number) must not lose the whole publish; consumed values stay strict.
+    from evidence.git_pr import handoff
+
+    with tempfile.TemporaryDirectory() as raw:
+        payload = {
+            "pr_url": "https://github.com/o/r/pull/1",
+            "base_ref": "main",
+            "base_sha": "a" * 40,
+            "head_sha": "b" * 40,
+            "harness": "claude",
+            "pr_number": "1",
+            "made_up_field": "whatever",
+        }
+        path = Path(raw) / "handoff.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        os.chmod(path, 0o600)
+        data = handoff(str(path))
+        assert data["pr_url"] == payload["pr_url"] and data["head_sha"] == payload["head_sha"]
+        assert "pr_number" not in data and "made_up_field" not in data
+        assert not path.exists(), "a consumed handoff must be deleted"
+
+        bad = Path(raw) / "bad.json"
+        bad.write_text(json.dumps({"pr_url": 123}), encoding="utf-8")
+        os.chmod(bad, 0o600)
+        try:
+            handoff(str(bad))
+        except ValueError as exc:
+            assert "fields are invalid" in str(exc)
+        else:
+            raise AssertionError("non-string values in consumed keys must still fail")
+        print("PASS  test_handoff_ignores_unknown_keys_but_keeps_value_strictness")
+
+
 if __name__ == "__main__":
     test_explicit_native_sessions_never_choose_the_newest_transcript()
     test_native_and_explicit_session_identity_conflict_fails_closed()
@@ -378,3 +474,6 @@ if __name__ == "__main__":
     test_incremental_checkpoint_rebuilds_complete_chapter_and_ignores_partial_lines()
     test_checkpoint_never_persists_raw_transcript_and_accepts_bounded_large_records()
     test_claude_requires_authoritative_session_metadata_and_codex_effort_field()
+    test_oversized_transcript_record_publishes_instead_of_killing_the_run()
+    test_pathological_transcript_record_still_fails_at_the_hard_ceiling()
+    test_handoff_ignores_unknown_keys_but_keeps_value_strictness()
