@@ -263,10 +263,44 @@ def test_large_exact_evidence_stays_structured_while_the_human_preview_is_bounde
         print("PASS  large exact evidence stays structured while the human preview is bounded")
 
 
+def test_event_flood_windows_to_the_arc_instead_of_failing_the_publish():
+    # A very long session (14k+ events) outgrows the size cap on event
+    # metadata alone; the old ladder gave up with "artifact exceeds the
+    # configured size policy after safe degradation" and the publish was
+    # silently lost. The third tier must keep the first/last window, stamp
+    # truthful full-session event_counts, record an explicit omission with
+    # the dropped counts, and always fit.
+    with tempfile.TemporaryDirectory() as raw:
+        temp = Path(raw)
+        subject = Subject("github.com/acme/evidence", 21, None, "main", "a" * 40, "a" * 40, "b" * 40)
+        flood = []
+        for index in range(20_000):
+            kind = ("human_prompt", "tool_action", "tool_result", "agent_message")[index % 4]
+            flood.append(EvidenceEvent(f"event-{index}", index + 1, kind, f"event number {index} " + "detail " * 20, {}, None, f"2026-08-04T0{index % 10}:00:00Z"))
+        chapter = Chapter.from_events("flood-session", flood, [ExecutionSpan("flood-session")])
+        evidence = GitEvidence(Patch("diff --git a/a b/a\n", 1, 1, 0), "a" * 40, "a" * 40, "b" * 40)
+        result = build_bundle(subject, [chapter], evidence, {"output_dir": temp / "artifact"})
+        payload = json.loads(Path(result.path).read_text())
+        assert len(Path(result.path).read_bytes()) <= 3 * 1024 * 1024
+        [rendered] = payload["chapters"]
+        assert 0 < len(rendered["events"]) < 20_000
+        counts = rendered["event_counts"]
+        assert counts["human_prompt"] == 5_000 and counts["tool_action"] == 5_000
+        assert counts["tool_result"] == 5_000 and counts["agent_message"] == 5_000
+        window_omissions = [item for item in payload["omissions"] if item["category"] == "event_window"]
+        assert window_omissions and "kept" in window_omissions[-1]["reason"]
+        # The kept window preserves the session's real endpoints.
+        assert rendered["events"][0]["event_id"] == "event-0"
+        assert rendered["events"][-1]["event_id"] == "event-19999"
+        print("PASS  test_event_flood_windows_to_the_arc_instead_of_failing_the_publish")
+
+
+
 if __name__ == "__main__":
     test_exact_codex_session_becomes_safe_complete_current_json_artifact()
     test_git_binding_completeness_and_test_outcomes_are_never_fabricated()
     test_size_cap_and_policy_strings_are_sanitized_before_atomic_persistence()
     test_non_test_tools_and_unknown_outcomes_cannot_make_bundle_complete()
+    test_event_flood_windows_to_the_arc_instead_of_failing_the_publish()
     test_only_anchored_native_test_runners_create_test_evidence_and_schema_domains_hold()
     test_large_exact_evidence_stays_structured_while_the_human_preview_is_bounded()
