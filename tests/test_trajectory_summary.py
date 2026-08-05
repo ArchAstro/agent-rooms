@@ -158,6 +158,28 @@ def test_booleans_are_not_counts():
     return check("a boolean never counts as a number", "diff" not in got, f"{got}")
 
 
+def test_windowed_bundles_report_stamped_totals_not_the_surviving_window():
+    # A size-degraded bundle (bundle.py third tier) windows its events but
+    # stamps truthful full-session totals in event_counts. Counting the
+    # surviving window would publish "84 tool calls" for a 5,000-call
+    # session — a false statement. Duration still reads off the surviving
+    # events, whose window keeps the true endpoints.
+    got = trajectory_summary({"chapters": [{
+        "event_counts": {"human_prompt": 583, "agent_message": 2473,
+                         "tool_action": 5517, "tool_result": 5517},
+        "events": [
+            {"type": "human_prompt", "occurred_at": "2026-08-01T00:00:00Z"},
+            {"type": "tool_action", "occurred_at": "2026-08-01T01:00:00Z"},
+        ],
+    }]})
+    return check(
+        "stamped event_counts outrank the surviving window",
+        got.get("tool_calls") == 5517 and got.get("prompts") == 583
+        and got.get("minutes") == 60,
+        f"{got}",
+    )
+
+
 if __name__ == "__main__":
     results = [
         test_counts_are_a_faithful_fold_of_the_events(),
@@ -167,6 +189,7 @@ if __name__ == "__main__":
         test_withheld_counts_are_absent_never_zero(),
         test_mixed_timestamp_awareness_omits_duration_entirely(),
         test_booleans_are_not_counts(),
+        test_windowed_bundles_report_stamped_totals_not_the_surviving_window(),
     ]
     passed = sum(results)
     print(f"\n{passed}/{len(results)} passed")
