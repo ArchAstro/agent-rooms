@@ -33,9 +33,22 @@ def trajectory_summary(content: Mapping[str, Any]) -> dict[str, Any]:
     last: datetime | None = None
     mixed_awareness = False
     for chapter in content.get("chapters") or []:
+        # A size-degraded bundle windows its event list but stamps truthful
+        # full-session totals in `event_counts` (bundle.py third tier).
+        # Counting the surviving window here would publish a false
+        # understatement ("84 tool calls" for a 5,000-call session), so the
+        # stamped totals win whenever they exist. The timestamp scan still
+        # walks the surviving events: the window keeps the session's first
+        # and last events, so the duration endpoints remain the true ones.
+        stamped = chapter.get("event_counts")
+        if isinstance(stamped, Mapping):
+            for kind in counts:
+                value = stamped.get(kind)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    counts[kind] += value
         for event in chapter.get("events") or []:
             kind = event.get("type")
-            if kind in counts:
+            if kind in counts and not isinstance(stamped, Mapping):
                 counts[kind] += 1
             at = _instant(event.get("occurred_at"))
             if at is not None:
