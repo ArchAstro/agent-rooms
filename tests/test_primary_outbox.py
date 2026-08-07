@@ -46,6 +46,12 @@ rp = load_room_post()
 def reset_room_post():
     global rp
     rp = load_room_post()
+    # Keep unit fixtures independent from this machine's installed Room.
+    # CI has no room.json, while a developer laptop usually does; without a
+    # test identity, otherwise-valid queue entries are classified as invalid
+    # before the behavior under test can run.
+    rp.PRODUCTION_SERVER = "https://room.example"
+    rp.THREAD_ID = "thr_test"
 
 
 class AmbiguousServer(http.server.BaseHTTPRequestHandler):
