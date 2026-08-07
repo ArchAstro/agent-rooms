@@ -341,7 +341,15 @@ which is where records come from.
 The installed kit is a standard-library Python client plus explicitly
 allowlisted evidence modules, this protocol, and its reference. Your room
 identity and login live in `~/.config/team-room/`, written by `room-post login`
-— never in the skill or a repo. Properties that must stay true:
+— never in the skill or a repo. The authenticating platform account is the
+post author: browser login uses the logged-in person and `TEAM_ROOM_TOKEN`
+uses the token owner. Git names and worktree labels are provenance, never the
+author. The primary outbox binds new entries to that credential and replaces
+local author hints with the platform profile before delivery, keeping search,
+views, and reports consistent with the message sender. Historical posts may
+retain embedded bylines; new posts do not. Optional mirrors use their own
+destination-local credentials and never flow back into the primary Room.
+Properties that must stay true:
 
 - **Auditable**: standard library only, an explicit install manifest, trusted
   destination checks, and no self-update. Review the core and optional evidence

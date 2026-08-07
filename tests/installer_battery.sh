@@ -6,6 +6,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 S="$(mktemp -d)"
+trap 'rm -rf "$S"' EXIT
+export GIT_CONFIG_GLOBAL="$S/test-global-gitconfig"
 git config --global user.email ci@test || true
 git config --global user.name ci || true
 
