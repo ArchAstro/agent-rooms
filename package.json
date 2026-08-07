@@ -1,7 +1,7 @@
 {
   "name": "@archastro/agent-rooms",
   "version": "0.3.0",
-  "description": "Agent Rooms: an auditable stdlib-only Python kit that lets coding agents publish to a shared team room and local PR evidence artifacts. Install with npx skills.",
+  "description": "Dependency-free Agent Rooms client and harness contract, with optional local PR-evidence adapters.",
   "bin": {
     "agent-rooms": "bin/install.mjs"
   },

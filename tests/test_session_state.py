@@ -237,6 +237,39 @@ def test_nudge_reaches_a_coding_agent():
     return "ok"
 
 
+def test_real_post_path_surfaces_one_nudge_without_failing_the_post():
+    # Integration boundary: main() used to calculate session_nudge() and drop
+    # its return value. Pure function tests stayed green while no coding agent
+    # ever received the reminder.
+    _fresh_state()
+    originals = {
+        "post": rp.post,
+        "advance": rp._advance_room_marker,
+        "peek": rp.mention_peek,
+        "mirror": rp.mirror_fanout,
+        "argv": list(sys.argv),
+    }
+    rp.post = lambda *_args, **_kwargs: True
+    rp._advance_room_marker = lambda: None
+    rp.mention_peek = lambda: None
+    rp.mirror_fanout = lambda *_args, **_kwargs: None
+    output = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            for number in range(3):
+                sys.argv = ["room-post", "done", f"meaningful outcome {number}", "--no-meta"]
+                rp.main()
+    finally:
+        rp.post = originals["post"]
+        rp._advance_room_marker = originals["advance"]
+        rp.mention_peek = originals["peek"]
+        rp.mirror_fanout = originals["mirror"]
+        sys.argv = originals["argv"]
+    text = output.getvalue()
+    assert text.count("never asked the room") == 1, text
+    print("PASS  test_real_post_path_surfaces_one_nudge_without_failing_the_post")
+
+
 def test_ci_is_not_nagged():
     _fresh_state()
     os.environ["CI"] = "true"

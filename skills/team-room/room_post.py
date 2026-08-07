@@ -3,7 +3,8 @@
 
 One stdlib-only command plus bounded evidence package. It talks directly to your team's
 public API over HTTPS: no dependencies, no daemon, nothing to run in the
-background. Room identity and login live in ~/.config/team-room/ (written
+background continuously. Writes wake a short-lived delivery worker. Room
+identity and login live in ~/.config/team-room/ (written
 by `room-post login`); nothing is ever committed to a repo.
 
 Post:
@@ -43,17 +44,19 @@ Setup:
   room-post doctor                check config, auth, and search — each with its fix
   room-post init --config <file>  point at a specific room (self-host / non-prod)
 
-Auth, in order: a TEAM_ROOM_TOKEN env var or ~/.config/team-room/token
-(a static courier token, for CI and scripts), otherwise the browser-login
-session in ~/.config/team-room/credentials.json. Member-scoped reads prefer
+Auth, in order: a TEAM_ROOM_TOKEN env var (an explicit courier token for CI
+and scripts), otherwise the destination-bound browser-login session in
+~/.config/team-room/credentials.json. Member-scoped reads prefer
 the login; refresh is single-flight via a file lock so parallel sessions
 cannot race the rotating refresh token.
 """
 
 import base64
 import contextlib
+import hashlib
 import io
 import json
+import math
 import mimetypes
 import os
 import ssl
@@ -559,8 +562,8 @@ def _local_cli_preflight(argv: list[str]):
             except OSError as exc:
                 local_error = f"can't read attachment '{path}': {exc}"
                 break
-    elif cmd == "mirror-flush":
-        # Internal: the detached delivery worker mirror_fanout spawns.
+    elif cmd in {"mirror-flush", "primary-flush"}:
+        # Internal: detached delivery workers spawned by their queues.
         # No local shape to validate.
         pass
     else:
@@ -608,7 +611,7 @@ _LOCAL_DRY_RUN = (
 # wrapper.
 _NEVER_BLOCK = {"search", "brief", "read", "records", "inbox",
                 "start", "done", "lesson", "handoff", "question", "abandoned",
-                "notify", "approve", "accept", "pr"}
+                "notify", "approve", "accept", "pr", "primary-flush"}
 _AMBIENT_CONFIG = (
     len(sys.argv) > 1
     and sys.argv[1] in _NEVER_BLOCK
@@ -640,7 +643,12 @@ except SystemExit:
                                         "inbox", "discover"}
         health_event(f"cmd:{sys.argv[1]}", "room configuration unavailable")
         if not _is_write:
-            print("room-status: unavailable")
+            status = (
+                "login-required"
+                if _room_config_path() is None
+                else "unavailable"
+            )
+            print(f"room-status: {status}")
         sys.exit(0)
     raise
 THREAD_ID = _ROOM_CFG.get("thread_id", "")
@@ -758,7 +766,12 @@ _guard_config_origin("portal", PORTAL_URL, _trusted_portals())
 ROOM_CREDS_PATH = os.path.expanduser("~/.config/team-room/credentials.json")
 ROOM_TOKEN_PATH = os.path.expanduser("~/.config/team-room/token")
 ROOM_LOCK_PATH = os.path.expanduser("~/.config/team-room/.lock")
-IDENTITY_CACHE_PATH = os.path.expanduser("~/.config/team-room/identity.json")
+_IDENTITY_SCOPE = hashlib.sha256(
+    f"{PRODUCTION_SERVER}\0{THREAD_ID}".encode()
+).hexdigest()[:24]
+IDENTITY_CACHE_PATH = os.path.expanduser(
+    f"~/.config/team-room/identities/{_IDENTITY_SCOPE}.json"
+)
 
 
 # Mirrors: optional extra rooms (other deployment tiers) that receive a
@@ -800,6 +813,34 @@ MIRROR_QUEUE_MAX_AGE_SECONDS = 7 * 86400
 MIRROR_FLUSH_REQUEST_TIMEOUT = 20.0
 MIRROR_FLUSH_TOTAL_BUDGET_SECONDS = 120.0
 
+# Primary writes enqueue before any authentication or network work, then wake a
+# detached one-shot worker. Outboxes are destination-specific: a command run in
+# repo B cannot discover repo A's backlog or apply B's credential to A's URL.
+PRIMARY_OUTBOX_DIR = os.path.expanduser("~/.config/team-room/outbox")
+
+
+def primary_queue_path(server: str, thread_id: str) -> str:
+    identity = hashlib.sha256(f"{server}\0{thread_id}".encode()).hexdigest()[:24]
+    return os.path.join(PRIMARY_OUTBOX_DIR, f"{identity}.jsonl")
+
+
+def _bounded_env_float(name: str, default: float, low: float, high: float) -> float:
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if math.isfinite(value) and low <= value <= high else default
+
+
+PRIMARY_QUEUE_PATH = primary_queue_path(PRODUCTION_SERVER, THREAD_ID)
+PRIMARY_QUEUE_MAX_AGE_SECONDS = 7 * 86400
+PRIMARY_FLUSH_REQUEST_TIMEOUT = _bounded_env_float(
+    "TEAM_ROOM_PRIMARY_REQUEST_TIMEOUT", 20.0, 0.01, 30.0)
+PRIMARY_FLUSH_TOTAL_BUDGET_SECONDS = _bounded_env_float(
+    "TEAM_ROOM_PRIMARY_TOTAL_BUDGET", 120.0, 0.1, 300.0)
+PRIMARY_RETRY_DELAY_SECONDS = _bounded_env_float(
+    "TEAM_ROOM_PRIMARY_RETRY_DELAY", 1.0, 0.01, 30.0)
+
 
 
 def die(msg: str, code: int = 1):
@@ -807,10 +848,10 @@ def die(msg: str, code: int = 1):
     sys.exit(code)
 
 
-def git(*args: str) -> str:
+def git(*args: str, timeout: float = 10) -> str:
     try:
         out = subprocess.run(
-            ["git", *args], capture_output=True, text=True, timeout=10
+            ["git", *args], capture_output=True, text=True, timeout=timeout
         )
         return out.stdout.strip() if out.returncode == 0 else ""
     except Exception:
@@ -1578,18 +1619,31 @@ def http_json(
         return json.load(resp)
 
 
-def authed_session():
+def authed_session(timeout: float = 30):
     """Static token if present; otherwise the browser-login session
     (refreshing single-flight if expired)."""
     tok = static_token()
     if tok:
-        uid = resolve_sender_for_token(tok)
+        deadline = time.monotonic() + timeout
+        uid = resolve_sender_for_token(
+            tok, timeout=max(0.01, deadline - time.monotonic())
+        )
         try:
-            app_id = json.load(open(IDENTITY_CACHE_PATH)).get("app_id")
+            cached = json.load(open(IDENTITY_CACHE_PATH))
+            app_id = (
+                cached.get("app_id")
+                if cached.get("server") == PRODUCTION_SERVER
+                and cached.get("thread_id") == THREAD_ID
+                else None
+            )
         except Exception:
             app_id = None
         if not app_id:
-            me = http_get(f"{PRODUCTION_SERVER}/api/v1/users/me", tok)
+            me = http_get(
+                f"{PRODUCTION_SERVER}/api/v1/users/me",
+                tok,
+                timeout=max(0.01, deadline - time.monotonic()),
+            )
             app_id = me.get("app_id") or me.get("app")
         session = {"accessToken": tok, "appId": app_id, "userId": uid, "static": True}
         return None, None, None, session
@@ -1597,11 +1651,11 @@ def authed_session():
     session = creds["orgSessions"][key]
     expires_at = session.get("expiresAt") or 0
     if expires_at / 1000 < time.time() + EXPIRY_SKEW_SECONDS:
-        session = refresh_session(creds, key, creds_path)
+        session = refresh_session(creds, key, creds_path, timeout=timeout)
     return creds, key, creds_path, session
 
 
-def login_session():
+def login_session(timeout: float = 30):
     """A browser-login session (member-scoped), independent of any static
     token, or None if this machine has no room login. Never dies — callers
     use it to prefer a login for reads that a courier token can't do."""
@@ -1610,10 +1664,12 @@ def login_session():
         key = next(iter(creds["orgSessions"]))
     except Exception:
         return None
+    if creds.get("server") != PRODUCTION_SERVER:
+        die("saved room login belongs to another server; run `room-post login`", 3)
     session = creds["orgSessions"][key]
     expires_at = session.get("expiresAt") or 0
     if expires_at / 1000 < time.time() + EXPIRY_SKEW_SECONDS:
-        session = refresh_session(creds, key, ROOM_CREDS_PATH)
+        session = refresh_session(creds, key, ROOM_CREDS_PATH, timeout=timeout)
     return creds, key, ROOM_CREDS_PATH, session
 
 
@@ -1653,30 +1709,41 @@ def read(limit: int = 30):
 
 
 def static_token():
+    """Return only an explicitly scoped process token.
+
+    The former bare ~/.config/team-room/token file had no issuer or room
+    metadata. After init/login changed the machine room, the old bearer could
+    be sent to the new server. A process environment is an explicit binding to
+    the command being launched; ambiguous legacy files therefore fail closed.
+    """
     tok = os.environ.get("TEAM_ROOM_TOKEN", "").strip()
-    if tok:
-        return tok
-    try:
-        return open(ROOM_TOKEN_PATH).read().strip() or None
-    except Exception:
-        return None
+    return tok or None
 
 
-def resolve_sender_for_token(token: str) -> str:
+def resolve_sender_for_token(token: str, timeout: float = 8) -> str:
     """With a courier token, posts are attributed to the human resolved by
     matching git email against the room's members; falls back to whoever
     the token itself is (the courier), which the membership rule allows."""
+    deadline = time.monotonic() + timeout
+    email = git(
+        "config",
+        "user.email",
+        timeout=max(0.01, min(1.0, deadline - time.monotonic())),
+    ).lower()
     try:
         cached = json.load(open(IDENTITY_CACHE_PATH))
-        if cached.get("email") == git("config", "user.email").lower():
+        if (
+            cached.get("email") == email
+            and cached.get("server") == PRODUCTION_SERVER
+            and cached.get("thread_id") == THREAD_ID
+        ):
             return cached["user_id"]
     except Exception:
         pass
     me = None
-    email = git("config", "user.email").lower()
     url = f"{PRODUCTION_SERVER}/api/v1/users/me"
     try:
-        me = http_get(url, token)
+        me = http_get(url, token, timeout=max(0.01, deadline - time.monotonic()))
     except Exception:
         pass
     # Match a human room member by email via the thread's member list.
@@ -1685,11 +1752,18 @@ def resolve_sender_for_token(token: str) -> str:
         try:
             t = http_get(
                 f"{PRODUCTION_SERVER}/protected/api/v1/developer/apps/"
-                f"{app_id}/threads/{THREAD_ID}", token)
+                f"{app_id}/threads/{THREAD_ID}", token,
+                timeout=max(0.01, deadline - time.monotonic()))
             for m in t.get("members") or []:
                 u = m.get("user") or {}
                 if (u.get("email") or "").lower() == email and u.get("id"):
-                    ident = {"email": email, "user_id": u["id"], "app_id": app_id}
+                    ident = {
+                        "email": email,
+                        "user_id": u["id"],
+                        "app_id": app_id,
+                        "server": PRODUCTION_SERVER,
+                        "thread_id": THREAD_ID,
+                    }
                     os.makedirs(os.path.dirname(IDENTITY_CACHE_PATH), exist_ok=True)
                     json.dump(ident, open(IDENTITY_CACHE_PATH, "w"))
                     return u["id"]
@@ -1708,6 +1782,8 @@ def load_session():
     and has nothing to do with the room."""
     try:
         creds = json.load(open(ROOM_CREDS_PATH))
+        if creds.get("server") != PRODUCTION_SERVER:
+            die("saved room login belongs to another server; run `room-post login`", 3)
         key = next(iter(creds["orgSessions"]))
         return creds, key, ROOM_CREDS_PATH
     except Exception:
@@ -2932,49 +3008,303 @@ def age(updated_at: str) -> str:
     return f"{mins // (24 * 60)}d"
 
 
-def _post_once(session: dict, message: str, metadata: dict | None, uploads: list | None):
+def _post_once(
+    session: dict,
+    message: str,
+    metadata: dict | None,
+    uploads: list | None,
+    *,
+    timeout: float = 30,
+    idempotency_key: str | None = None,
+    server: str | None = None,
+    thread_id: str | None = None,
+):
+    server = server or PRODUCTION_SERVER
+    thread_id = thread_id or THREAD_ID
     url = (
-        f"{PRODUCTION_SERVER}/protected/api/v1/developer/apps/"
-        f"{session['appId']}/threads/{THREAD_ID}/messages"
+        f"{server}/protected/api/v1/developer/apps/"
+        f"{session['appId']}/threads/{thread_id}/messages"
     )
     body = {"content": message, "user": session["userId"]}
+    if idempotency_key:
+        body["idempotency_key"] = idempotency_key
     if metadata:
         body["metadata"] = metadata
     if uploads:
         body["uploads"] = uploads
-    return http_json(url, body, token=session["accessToken"])
+    return http_json(url, body, token=session["accessToken"], timeout=timeout)
 
 
 def post(message: str, metadata: dict | None = None, uploads: list | None = None):
-    creds, key, creds_path, session = authed_session()
+    return _primary_enqueue({
+        "at": time.time(),
+        "key": f"room-post:{os.urandom(16).hex()}",
+        "server": PRODUCTION_SERVER,
+        "thread_id": THREAD_ID,
+        "message": message,
+        "metadata": metadata or None,
+        "uploads": uploads or None,
+    })
+
+
+def _fsync_parent(path: str):
+    try:
+        descriptor = os.open(os.path.dirname(path), os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        pass
+
+
+def _primary_enqueue(entry: dict) -> bool:
+    """Append one exact primary request and wake a detached flusher."""
+    import fcntl
+
+    try:
+        os.makedirs(os.path.dirname(PRIMARY_QUEUE_PATH), exist_ok=True)
+        # Lock a stable inode BEFORE opening the replaceable queue path. A
+        # lock on the queue file itself is unsafe: a waiting appender can hold
+        # the old inode across os.replace and write into an unlinked file.
+        lock_fd = os.open(
+            PRIMARY_QUEUE_PATH + ".data.lock", os.O_RDWR | os.O_CREAT, 0o600
+        )
+        os.fchmod(lock_fd, 0o600)
+        with os.fdopen(lock_fd, "w") as data_lock:
+            fcntl.flock(data_lock, fcntl.LOCK_EX)
+            fd = os.open(
+                PRIMARY_QUEUE_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600
+            )
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            fcntl.flock(data_lock, fcntl.LOCK_UN)
+        _fsync_parent(PRIMARY_QUEUE_PATH)
+        _spawn_primary_worker()
+        return True
+    except (Exception, SystemExit) as exc:
+        health_event("primary-outbox", f"enqueue {type(exc).__name__}")
+        return False
+
+
+def _spawn_primary_worker():
+    """Start at most one detached primary delivery worker."""
+    import fcntl
+
+    try:
+        probe = open(PRIMARY_QUEUE_PATH + ".lock", "w")
+        try:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(probe, fcntl.LOCK_UN)
+        except OSError:
+            return
+        finally:
+            probe.close()
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "primary-flush"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except (Exception, SystemExit) as exc:
+        health_event("primary-outbox", f"spawn {type(exc).__name__}")
+
+
+def _primary_queue_read() -> list[str]:
+    try:
+        with open(PRIMARY_QUEUE_PATH) as f:
+            return [line for line in f.read().splitlines() if line.strip()]
+    except OSError:
+        return []
+
+
+def _primary_queue_rewrite(consumed_line: str, replacement: str | None):
+    """Atomically replace or remove one line without losing new appends."""
+    import fcntl
+    import tempfile
+
+    with open(PRIMARY_QUEUE_PATH + ".data.lock", "w") as data_lock:
+        fcntl.flock(data_lock, fcntl.LOCK_EX)
+        try:
+            with open(PRIMARY_QUEUE_PATH) as queue:
+                lines = [line for line in queue.read().splitlines() if line.strip()]
+        except OSError:
+            lines = []
+        out, replaced = [], False
+        for line in lines:
+            if not replaced and line == consumed_line:
+                replaced = True
+                if replacement is not None:
+                    out.append(replacement)
+                continue
+            out.append(line)
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(PRIMARY_QUEUE_PATH))
+        try:
+            with os.fdopen(tmp_fd, "w") as tmp:
+                if out:
+                    tmp.write("\n".join(out) + "\n")
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, PRIMARY_QUEUE_PATH)
+            _fsync_parent(PRIMARY_QUEUE_PATH)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path)
+            raise
+        finally:
+            fcntl.flock(data_lock, fcntl.LOCK_UN)
+
+
+def _deliver_primary(entry: dict, remaining: float):
+    server = entry["server"]
+    if server != PRODUCTION_SERVER or entry["thread_id"] != THREAD_ID:
+        raise ValueError("primary destination does not match worker context")
+    if not os.environ.get("TEAM_ROOM_TRUST_SERVER") and server not in _trusted_servers():
+        raise ValueError("untrusted primary target server")
+    deadline = time.monotonic() + remaining
+    creds, key, creds_path, session = authed_session(
+        timeout=max(0.01, min(PRIMARY_FLUSH_REQUEST_TIMEOUT, deadline - time.monotonic()))
+    )
     courier_fallback_attempted = False
     refresh_attempted = False
     while True:
+        request_timeout = max(
+            0.01,
+            min(PRIMARY_FLUSH_REQUEST_TIMEOUT, deadline - time.monotonic()),
+        )
         try:
-            msg = _post_once(session, message, metadata, uploads)
-            break
-        except urllib.error.HTTPError as e:
+            return _post_once(
+                session,
+                entry["message"],
+                entry.get("metadata"),
+                entry.get("uploads"),
+                timeout=request_timeout,
+                idempotency_key=entry["key"],
+                server=server,
+                thread_id=entry["thread_id"],
+            )
+        except urllib.error.HTTPError as exc:
             if (
                 session.get("static")
-                and e.code in (401, 403, 404)
+                and exc.code in (401, 403, 404)
                 and not courier_fallback_attempted
             ):
                 courier_fallback_attempted = True
-                human = login_session()
+                human = login_session(
+                    timeout=max(0.01, deadline - time.monotonic())
+                )
                 if human:
                     creds, key, creds_path, session = human
                     continue
-            if e.code == 401 and not session.get("static") and not refresh_attempted:
+            if exc.code == 401 and not session.get("static") and not refresh_attempted:
                 refresh_attempted = True
-                session = refresh_session(creds, key, creds_path)
+                session = refresh_session(
+                    creds,
+                    key,
+                    creds_path,
+                    timeout=max(0.01, deadline - time.monotonic()),
+                )
                 continue
-            if e.code == 401 and session.get("static"):
-                die("your room credential was rejected (revoked or expired). "
-                    "Reconnect with `room-post login`; for a courier token, "
-                    "mint a fresh one.", 3)
-            die(f"post failed ({e.code}): {e.read().decode()[:200]}")
-    print(_posted_line(metadata, msg))
-    return session
+            raise
+
+
+def primary_flush():
+    """Drain primary posts oldest-first within one detached-worker budget."""
+    import fcntl
+
+    os.makedirs(os.path.dirname(PRIMARY_QUEUE_PATH), exist_ok=True)
+    lock = open(PRIMARY_QUEUE_PATH + ".lock", "w")
+    deadline = time.monotonic() + PRIMARY_FLUSH_TOTAL_BUDGET_SECONDS
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock.close()
+        return
+    lock_held = True
+    try:
+        while time.monotonic() < deadline:
+            made_progress = _primary_drain_pass(deadline)
+            if not _primary_queue_read():
+                # Close the classic worker-shutdown lost-wakeup race. Hold the
+                # append lock while checking empty and releasing the worker
+                # lock: an earlier poster is observed here; a later poster can
+                # only append after the worker lock is free and will spawn its
+                # own successor.
+                with open(PRIMARY_QUEUE_PATH + ".data.lock", "w") as data_lock:
+                    fcntl.flock(data_lock, fcntl.LOCK_EX)
+                    if not _primary_queue_read():
+                        fcntl.flock(lock, fcntl.LOCK_UN)
+                        lock_held = False
+                        return
+                continue
+            if not made_progress:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                time.sleep(min(PRIMARY_RETRY_DELAY_SECONDS, remaining))
+            # Re-read while still owning the worker lock. Posters append under
+            # the separate stable data lock, see this worker alive, and skip a
+            # redundant spawn; this loop owns both retry and lost-wakeup repair.
+    finally:
+        if lock_held:
+            with contextlib.suppress(Exception):
+                fcntl.flock(lock, fcntl.LOCK_UN)
+        lock.close()
+
+
+def _primary_drain_pass(deadline: float) -> bool:
+    progressed = False
+    for line in _primary_queue_read():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            entry = json.loads(line)
+        except Exception:
+            health_event("primary-outbox", "corrupt entry")
+            _primary_queue_rewrite(line, None)
+            progressed = True
+            continue
+        required = ("at", "key", "server", "thread_id", "message")
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("at"), (int, float))
+            or any(not isinstance(entry.get(field), str) or not entry.get(field)
+                   for field in required[1:])
+        ):
+            health_event("primary-outbox", "invalid entry")
+            _primary_queue_rewrite(line, None)
+            progressed = True
+            continue
+        if time.time() - (entry.get("at") or 0) > PRIMARY_QUEUE_MAX_AGE_SECONDS:
+            health_event("primary-outbox", "expired undelivered")
+            _primary_queue_rewrite(line, None)
+            progressed = True
+            continue
+        try:
+            _deliver_primary(entry, remaining)
+        except urllib.error.HTTPError as exc:
+            # Payload-size/schema failures are permanent for this exact queued
+            # request. Keeping them at the head would suppress every later
+            # post to the room until expiry; discard with a durable health fact.
+            if exc.code in (400, 413, 422):
+                health_event("primary-outbox", f"discarded HTTP {exc.code}")
+                _primary_queue_rewrite(line, None)
+                progressed = True
+                continue
+            health_event("primary-outbox", f"flush {type(exc).__name__}")
+            break
+        except (Exception, SystemExit) as exc:
+            health_event("primary-outbox", f"flush {type(exc).__name__}")
+            break  # preserve primary ordering across retries
+        _primary_queue_rewrite(line, None)
+        progressed = True
+    return progressed
 
 
 def _mirror_has_creds(m: dict) -> bool:
@@ -3809,17 +4139,6 @@ def _trajectory_line(summary: dict) -> str:
     return (f"✓ {identity_tag()}: published how {subject} was built: {tail}.")
 
 
-def _post_once_bounded(session: dict, message: str, metadata: dict | None):
-    """One post attempt with a short deadline, for exhaust inside larger
-    workflows where post()'s retry ladder would be a real delay."""
-    url = (
-        f"{PRODUCTION_SERVER}/protected/api/v1/developer/apps/"
-        f"{session['appId']}/threads/{THREAD_ID}/messages"
-    )
-    body = {"content": message, "user": session["userId"], "metadata": metadata or {}}
-    return http_json(url, body, token=session["accessToken"], timeout=8)
-
-
 def publish_pr(argv):
     """Publish local-only evidence; any room failure is deliberately non-blocking."""
     automatic = _automatic_pr_inputs(argv)[0]
@@ -3936,64 +4255,6 @@ def publish_pr(argv):
             args["replace_head_from"], args["from_artifact_version"], False)
         publisher = Publisher(client, state_path, policy, ancestor=lambda old, new: is_ancestor(cwd, old, new))
         result = publisher.publish(request)
-        if result.status in ("published", "updated"):
-            is_update = result.status == "updated"
-            # The stream's trajectory card reads a few hundred bytes of raw
-            # counts, never the 2MB artifact. Fold them here where the bundle
-            # is already in memory, and post; a posting failure never blocks
-            # the publish (exhaust, not a gate). "updated" posts too: a PR
-            # republished after more work has a NEW story to tell.
-            try:
-                from evidence.policy import restrict_payload
-                from evidence.summary import trajectory_summary
-                # Summarise the POLICY-APPLIED payload, never the raw bundle.
-                # `--mode local-review` strips prompts and trajectory events
-                # from the artifact; deriving counts from `content` here would
-                # publish exactly what the mode removed, straight past the
-                # omission boundary the caller chose (review find).
-                restricted = restrict_payload(content, policy)
-                summary = trajectory_summary(restricted)
-                # Withheld is ABSENT, never zero: local-review strips the
-                # events, and publishing "0 tool calls" for a session full
-                # of real activity is a false statement, not a redaction
-                # (review find). Same rule as the summary itself: absent
-                # means omitted, never guessed.
-                if not policy.allow_trajectory:
-                    for k in ("tool_calls", "agent_messages", "minutes"):
-                        summary.pop(k, None)
-                if not policy.allow_prompts:
-                    summary.pop("prompts", None)
-                if policy.mode != "review_capsule":
-                    summary["capture"] = policy.mode
-                if is_update:
-                    # The stored artifact merges chapters across sessions;
-                    # this summary covers ONE session's request. Say so
-                    # rather than letting the card imply the whole story
-                    # (review find).
-                    summary["covers"] = "session"
-                line = _trajectory_line(summary)
-                if is_update:
-                    line = line.replace("published how", "updated how", 1)
-                # ONE bounded attempt, not the interactive retry ladder:
-                # publish_pr runs inside PR-creation workflows, and post()'s
-                # default 30s timeout (times its fallback retries) would
-                # meaningfully delay a successful PR on a stalled endpoint
-                # (review find). Failure health-logs; the artifact stands.
-                _post_once_bounded(authenticated, line, metadata={
-                    "post_type": "trajectory",
-                    "human": human_name(),
-                    "worktree": worktree_short(),
-                    "trajectory": summary,
-                    "artifact": {"name": request.artifact_name,
-                                 "id": result.artifact_id},
-                    "kit_version": KIT_VERSION,
-                })
-            except (Exception, SystemExit) as post_exc:  # noqa: BLE001
-                # post() reports HTTP failures via SystemExit; letting that
-                # escape would print "pr evidence withheld" for an artifact
-                # that actually published (review find).
-                health_event("pr-evidence",
-                             f"summary post failed: {str(post_exc)[:120]}")
         if not automatic:
             print(result.status)
     except (Exception, SystemExit) as exc:
@@ -4020,6 +4281,10 @@ def publish_pr(argv):
 
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "primary-flush":
+        # Internal: the detached primary-delivery worker spawned after enqueue.
+        primary_flush()
+        return
     if cmd == "mirror-flush":
         # Internal: the detached mirror-delivery worker mirror_fanout spawns.
         mirror_flush()
@@ -4031,6 +4296,11 @@ def main():
     try:
         if os.path.getsize(MIRROR_QUEUE_PATH) > 0:
             _spawn_mirror_worker()
+    except OSError:
+        pass
+    try:
+        if os.path.getsize(PRIMARY_QUEUE_PATH) > 0:
+            _spawn_primary_worker()
     except OSError:
         pass
     if cmd == "init":
@@ -4183,11 +4453,14 @@ def main():
             health_event("post-quality", _warns[0])
     except Exception:
         pass
-    session = post(message, metadata, uploads)
+    accepted = post(message, metadata, uploads)
+    if not accepted:
+        return
     _advance_room_marker()  # next exhaust window starts where this one ended
-    mention_peek()
     record_session("post", areas=(metadata or {}).get("areas"))
-    session_nudge((metadata or {}).get("areas"))
+    nudge = session_nudge((metadata or {}).get("areas"))
+    if nudge:
+        print(f"room reminder: {nudge}", file=sys.stderr)
     mirror_fanout(message, metadata, uploads)
 
 
@@ -4202,8 +4475,8 @@ def _run_never_blocking():
     because a non-zero exit invites the agent to treat the room as a task it
     must fix — which is the one thing the room must never cause. The message
     says so explicitly, so a coding agent reads it and moves on instead of
-    debugging us. Writes still say loudly that the post did not land (a lost
-    post is worth knowing about); they just don't derail the session.
+    debugging us. Writes are durably queued before this boundary, so transient
+    delivery failure stays silent and the next worker retries it.
     """
     # Superseded install location is an operator-health fact, not coding work.
     if os.path.abspath(__file__).startswith(

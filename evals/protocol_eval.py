@@ -2,21 +2,24 @@
 """Protocol compliance eval: do real coding agents, given only SKILL.md,
 actually behave — search first, read when flagged, post well-shaped exhaust?
 
-    python3 evals/protocol_eval.py [codex|agy|all]
+    python3 evals/installed_protocol_eval.py [codex|agy|all]
 
-Each scenario hands an agent the skill plus a situation and mechanically
-scores the reply. This is the formalization of the A/B pressure tests that
+The installed wrapper creates a real temporary customer repository, installs
+the identity contract, and records actual room-post invocations before this
+engine scores them. This is the formalization of the A/B pressure tests that
 drove the skill rewrite; run it after ANY skill or kit change that could
 move behavior. Scores print per scenario; exit 1 if any agent fails a MUST.
 
 TEAM_ROOM_SKILL points the eval at the SKILL.md to grade against, so a
-consumer that vendors the kit (a repo's .claude/skills/team-room, an
-operations image) can run this file verbatim against the copy its agents
-actually load, rather than a second copy that drifts.
+consumer that vendors the kit is graded against the copy its agents actually
+load, rather than a second copy that drifts. Invoke the installed wrapper;
+direct engine use intentionally cannot grade lifecycle tool adherence without
+its recorder boundary.
 """
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -59,6 +62,7 @@ SCENARIOS = [
     {
         "name": "post-shape",
         "must": True,
+        "tool": True,
         "prompt": (
             "You just spent 40 minutes discovering that the platform's task API "
             "returns 500 on every write until `mix event_store.setup` is run, "
@@ -76,8 +80,96 @@ SCENARIOS = [
         "label": "lesson verb + concrete artifact bullets + ref",
     },
     {
+        "name": "substantial-work-starts",
+        "must": True,
+        "tool": True,
+        "prompt": (
+            "You are the TOP-LEVEL coding session. You already recalled and "
+            "searched the room, found no collision, and are now beginning a "
+            "substantial multi-file implementation that will take several hours. "
+            "Reply with ONLY the exact room-post command you run now."
+        ),
+        "score": lambda out: bool(re.search(r"room-post\s+start\b", out)),
+        "label": "substantial top-level work publishes one start",
+    },
+    {
+        "name": "completed-work-closes",
+        "must": True,
+        "tool": True,
+        "prompt": (
+            "You are the TOP-LEVEL coding session. You completed and verified a "
+            "substantial implementation. Nobody else must act and there is no "
+            "open decision. Reply with ONLY the exact room-post command you run "
+            "at this work boundary."
+        ),
+        "score": lambda out: bool(re.search(r"room-post\s+done\b", out)),
+        "label": "completed substantial work publishes done",
+    },
+    {
+        "name": "real-handoff-only",
+        "must": True,
+        "tool": True,
+        "prompt": (
+            "You finished and verified your portion of substantial work, but Maya "
+            "must now deploy the prepared configuration. Reply with ONLY the exact "
+            "room-post command that records this ownership transition."
+        ),
+        "score": lambda out: bool(re.search(r"room-post\s+handoff\b", out))
+        and bool(re.search(r"@maya\b", out, re.I)),
+        "label": "handoff is reserved for a real next owner",
+    },
+    {
+        "name": "real-question-only",
+        "must": True,
+        "tool": True,
+        "prompt": (
+            "Substantial work is blocked on a product decision only Vivek can "
+            "make; local investigation cannot resolve it. Reply with ONLY the "
+            "exact room-post command that keeps the decision open."
+        ),
+        "score": lambda out: bool(re.search(r"room-post\s+question\b", out))
+        and bool(re.search(r"@vivek\b", out, re.I)),
+        "label": "question is reserved for an unresolved human decision",
+    },
+    {
+        "name": "completion-does-not-handoff",
+        "must": True,
+        "prompt": (
+            "You completed and verified a meaningful implementation. Nobody "
+            "else needs to act. Should you publish a handoff? Reply YES or NO "
+            "with one sentence."
+        ),
+        "score": lambda out: out.strip().upper().startswith("NO"),
+        "label": "ordinary completion does not manufacture a handoff",
+    },
+    {
+        "name": "investigation-does-not-question",
+        "must": True,
+        "prompt": (
+            "You encountered a technical uncertainty that local code and tests "
+            "can resolve, and no human decision is required. Should you publish "
+            "a targeted question now? Reply YES or NO with one sentence."
+        ),
+        "score": lambda out: out.strip().upper().startswith("NO"),
+        "label": "investigable uncertainty does not manufacture a question",
+    },
+    {
+        "name": "useful-dead-end",
+        "must": True,
+        "tool": True,
+        "prompt": (
+            "You spent 40 minutes proving that webhook publication requires org "
+            "admin setup and therefore cannot satisfy the zero-permission install. "
+            "You are dropping that approach and switching to session exhaust. "
+            "Reply with ONLY the exact room-post command you run now."
+        ),
+        "score": lambda out: bool(re.search(r"room-post\s+abandoned\b", out))
+        and bool(re.search(r"webhook|org admin|zero.permission", out, re.I)),
+        "label": "a reusable failed approach publishes abandoned",
+    },
+    {
         "name": "no-status-spam",
-        "must": False,
+        "must": True,
         "prompt": (
             "You just renamed a variable in one file, a 30-second change nobody "
             "else depends on. Do you post to the room? Reply YES or NO with one sentence."
@@ -157,7 +249,23 @@ SCENARIOS = [
 ]
 
 
-def ask(agent, prompt):
+def ask(agent, prompt, require_tool=False):
+    command_log = os.environ.get("TEAM_ROOM_EVAL_COMMAND_LOG")
+    if require_tool and not command_log:
+        raise RuntimeError(
+            "tool scenario requires the installed room-post command recorder"
+        )
+    if command_log:
+        try:
+            os.unlink(command_log)
+        except OSError:
+            pass
+    if require_tool and command_log:
+        prompt += (
+            "\nThis is an installed-boundary evaluation. Use your shell to "
+            "actually invoke the repository's `scripts/room-post` command now; "
+            "do not merely print or describe it. After it returns, reply DONE."
+        )
     full = f"The following skill governs how you work:\n\n{SKILL}\n\n---\n{prompt}"
     # Score the agent's ANSWER, never the transcript. codex exec echoes the
     # prompt — which contains the whole SKILL.md — into stdout, and the skill
@@ -183,7 +291,8 @@ def ask(agent, prompt):
     env["TEAM_ROOM_HEALTH_LOG"] = os.path.join(HERE, ".eval-health.jsonl")
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=240,
-                           stdin=subprocess.DEVNULL, env=env)
+                           stdin=subprocess.DEVNULL, env=env,
+                           cwd=os.environ.get("TEAM_ROOM_EVAL_CWD") or None)
         # An agent that never answered is NOT an agent that misbehaved. Raise
         # so the caller counts this as an error, or an expired key reads as
         # "agents stopped following the protocol" and the wrong team goes
@@ -196,8 +305,30 @@ def ask(agent, prompt):
                 answer = fh.read()
             if not answer.strip():
                 raise RuntimeError(f"{agent} exited 0 but produced no final message")
-            return answer
-        return (r.stdout or "") + (r.stderr or "")
+            result = answer
+        else:
+            result = (r.stdout or "") + (r.stderr or "")
+        if command_log:
+            try:
+                calls = [json.loads(line) for line in open(command_log) if line.strip()]
+            except Exception:
+                calls = []
+            tool_result = "\n".join(
+                "TOOL_CALL scripts/room-post " + shlex.join(call) for call in calls
+            )
+            if require_tool:
+                if not calls:
+                    raise RuntimeError("agent returned without invoking installed room-post")
+                if len(calls) != 1:
+                    raise RuntimeError(
+                        "agent must invoke exactly one room-post lifecycle command"
+                    )
+                # The assistant can claim anything in its final text. Installed
+                # lifecycle scenarios score only the argv the recorder saw.
+                return tool_result
+            if tool_result:
+                result += "\n" + tool_result
+        return result
     finally:
         if answer_file:
             try:
@@ -227,7 +358,7 @@ def main():
         passed = failed = warned = errored = 0
         for sc in SCENARIOS:
             try:
-                out = ask(agent, sc["prompt"])
+                out = ask(agent, sc["prompt"], require_tool=sc.get("tool", False))
                 ok = bool(sc["score"](out))
             except Exception as exc:
                 ok, out = False, f"(runner error: {exc})"

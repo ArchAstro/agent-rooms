@@ -58,7 +58,7 @@ mkdir -p "$S/h5/.archastro/agent-rooms/evidence/routines"
 printf 'stale review runtime\n' >"$S/h5/.archastro/agent-rooms/evidence/review.py"
 printf '{}\n' >"$S/h5/.archastro/agent-rooms/evidence/routines/pr-evidence-review.json"
 HOME="$S/h5" node "$ROOT/bin/install.mjs" --machine >/dev/null
-PYTHONPATH="$S/h5/.archastro/agent-rooms" python3 -c 'import evidence; from evidence.adapters.first_party import FirstPartyAdapter; from evidence.publisher import ArtifactClient; from evidence.schema import __name__; assert not hasattr(ArtifactClient, "invoke_routine")' || fail "machine evidence import failed"
+PYTHONPATH="$S/h5/.archastro/agent-rooms" python3 -c 'import evidence; from evidence.adapters.first_party import FirstPartyAdapter; from evidence.publisher import ArtifactClient; from evidence.schema import __name__; from evidence.summary import trajectory_summary; assert callable(trajectory_summary); assert not hasattr(ArtifactClient, "invoke_routine")' || fail "machine evidence import failed"
 [ -f "$S/h5/.archastro/agent-rooms/evidence/schema/pr-evidence-v1.json" ] || fail "machine evidence schema missing"
 [ ! -e "$S/h5/.archastro/agent-rooms/evidence/review.py" ] || fail "machine review runtime survived upgrade"
 [ ! -e "$S/h5/.archastro/agent-rooms/evidence/routines/pr-evidence-review.json" ] || fail "machine review recipe survived upgrade"
@@ -73,7 +73,7 @@ mkdir -p "$S/repo/.claude/skills/team-room/evidence/routines"
 printf 'stale review runtime\n' >"$S/repo/.claude/skills/team-room/evidence/review.py"
 printf '{}\n' >"$S/repo/.claude/skills/team-room/evidence/routines/pr-evidence-review.json"
 HOME="$S/h5" node "$ROOT/bin/install.mjs" --repo "$S/repo" >/dev/null
-PYTHONPATH="$S/repo/.claude/skills/team-room" python3 -c 'import evidence; from evidence.adapters.first_party import FirstPartyAdapter; from evidence.bundle import build_bundle' || fail "repo evidence import failed"
+PYTHONPATH="$S/repo/.claude/skills/team-room" python3 -c 'import evidence; from evidence.adapters.first_party import FirstPartyAdapter; from evidence.bundle import build_bundle; from evidence.summary import trajectory_summary; assert callable(trajectory_summary)' || fail "repo evidence import failed"
 [ -f "$S/repo/.claude/skills/team-room/evidence/schema/pr-evidence-v1.json" ] || fail "repo evidence schema missing"
 [ ! -e "$S/repo/.claude/skills/team-room/evidence/review.py" ] || fail "repo review runtime survived upgrade"
 [ ! -e "$S/repo/.claude/skills/team-room/evidence/routines/pr-evidence-review.json" ] || fail "repo review recipe survived upgrade"
@@ -124,5 +124,61 @@ assert packed.isdisjoint(forbidden), packed & forbidden
 assert not any("__pycache__" in path or path.endswith(".pyc") for path in packed)
 PY
 echo "PASS publish-only package output"
+
+# Case 7: an established multi-harness repo keeps every harness's own
+# instructions while each always-loaded identity receives exactly one managed
+# Room contract. Real customer repositories already have these files; relying
+# on symlinks only works for empty demos.
+mkdir -p "$S/repo-identities"
+git init -q "$S/repo-identities"
+git -C "$S/repo-identities" config user.email ci@test
+git -C "$S/repo-identities" config user.name ci
+printf 'shared agent rules\n' >"$S/repo-identities/AGENTS.md"
+printf 'claude-specific rules\n' >"$S/repo-identities/CLAUDE.md"
+printf 'gemini-specific rules\n' >"$S/repo-identities/GEMINI.md"
+git -C "$S/repo-identities" add AGENTS.md CLAUDE.md GEMINI.md
+git -C "$S/repo-identities" commit -q -m initial
+HOME="$S/h5" node "$ROOT/bin/install.mjs" --repo "$S/repo-identities" >/dev/null
+python3 - "$S/repo-identities" <<'PY' || fail "existing harness identities were not activated"
+import pathlib
+import sys
+
+repo = pathlib.Path(sys.argv[1])
+expected = {
+    "AGENTS.md": "shared agent rules",
+    "CLAUDE.md": "claude-specific rules",
+    "GEMINI.md": "gemini-specific rules",
+}
+for name, customer_text in expected.items():
+    path = repo / name
+    assert not path.is_symlink(), (name, "customer identity replaced by symlink")
+    text = path.read_text()
+    assert customer_text in text, (name, "customer instructions lost")
+    assert text.count("<!-- agent-rooms:start -->") == 1, (name, "missing or duplicate start marker")
+    assert text.count("<!-- agent-rooms:end -->") == 1, (name, "missing or duplicate end marker")
+PY
+echo "PASS existing harness identities activated"
+
+# Case 8: identity symlinks stay inside the repository's trust boundary. An
+# internal dangling link can be completed safely; an external customer link is
+# preserved without rewriting its target outside the install root.
+mkdir -p "$S/repo-symlinks/docs"
+git init -q "$S/repo-symlinks"
+git -C "$S/repo-symlinks" config user.email ci@test
+git -C "$S/repo-symlinks" config user.name ci
+printf 'shared rules\n' >"$S/repo-symlinks/AGENTS.md"
+printf 'external claude rules\n' >"$S/external-claude.md"
+ln -s "$S/external-claude.md" "$S/repo-symlinks/docs/claude.md"
+ln -s "docs/claude.md" "$S/repo-symlinks/CLAUDE.md"
+ln -s "docs/gemini.md" "$S/repo-symlinks/GEMINI.md"
+git -C "$S/repo-symlinks" add AGENTS.md CLAUDE.md GEMINI.md
+git -C "$S/repo-symlinks" commit -q -m initial
+symlink_output="$(HOME="$S/h5" node "$ROOT/bin/install.mjs" --repo "$S/repo-symlinks" 2>&1)"
+[ "$(cat "$S/external-claude.md")" = "external claude rules" ] || fail "external identity symlink target was modified"
+[ -L "$S/repo-symlinks/CLAUDE.md" ] || fail "external identity symlink was replaced"
+[[ "$symlink_output" == *"outside the repository"* ]] || fail "external identity symlink was skipped silently"
+[ -L "$S/repo-symlinks/GEMINI.md" ] || fail "internal identity symlink was replaced"
+grep -q '<!-- agent-rooms:start -->' "$S/repo-symlinks/docs/gemini.md" || fail "internal dangling identity symlink was not activated"
+echo "PASS identity symlink boundary"
 
 echo "installer battery: all green"
