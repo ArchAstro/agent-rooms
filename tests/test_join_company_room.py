@@ -18,6 +18,8 @@ Runs in-process against a stub of the API, no network.
 """
 import http.server
 import importlib.util
+import contextlib
+import io
 import json
 import os
 import socketserver
@@ -363,6 +365,20 @@ def test_two_company_rooms_are_ambiguous_and_join_neither():
     assert room_json(home) is None
     assert "more than one" in (r.stdout + r.stderr).lower(), r.stdout + r.stderr
     print("PASS  two company rooms fail safely instead of guessing")
+
+
+def test_an_unknown_explicit_room_is_not_mislabeled_as_no_company_room():
+    reset([REAL])
+    home = tempfile.mkdtemp()
+
+    result = run_kit(["discover", "--team", "tem_missing"], home, SERVER)
+
+    output = (result.stdout + result.stderr).lower()
+    assert result.returncode != 0, output
+    assert "requested room is not available" in output, output
+    assert "doesn't have a team room" not in output, output
+    assert room_json(home) is None
+    print("PASS  an unknown explicit Room cannot prompt duplicate creation")
 
 
 def test_a_joined_unlabelled_legacy_room_is_still_discovered():
@@ -781,7 +797,38 @@ def test_browser_login_fails_when_room_connection_is_incomplete():
         raise AssertionError("login reported success without a room")
 
     assert room_json(home) is None
-    print("PASS  browser login cannot report success without a room")
+    print("PASS  browser login fails when Room discovery itself fails")
+
+
+def test_first_login_succeeds_before_room_creation_then_second_login_joins_it():
+    # Authentication and Room membership are separate facts. A new customer
+    # can sign in before their Room exists without making a successful browser
+    # login look broken or inventing local Room identity.
+    reset([])
+    home = tempfile.mkdtemp()
+    module = load_kit_module(home)
+
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        run_browser_login(module)
+
+    credentials = os.path.join(home, ".config", "team-room", "credentials.json")
+    assert os.path.exists(credentials)
+    assert room_json(home) is None
+    assert "sign-in succeeded" in output.getvalue().lower(), output.getvalue()
+    assert "https://archagents.com/rooms/new" in output.getvalue(), output.getvalue()
+
+    # Once the company Room exists, the same simple login command discovers,
+    # joins, and persists it. This crosses the real browser callback and TCP
+    # API boundary both times.
+    reset([REAL])
+    module = load_kit_module(home)
+    run_browser_login(module)
+
+    cfg = room_json(home)
+    assert cfg and cfg["team_id"] == "tem_real", (cfg, CALLS)
+    assert ("POST", "/api/v1/teams/tem_real/join") in CALLS, CALLS
+    print("PASS  login succeeds before Room creation and joins it afterwards")
 
 
 def test_browser_login_replaces_a_stale_foreign_machine_room():
@@ -828,6 +875,7 @@ def main():
         test_a_forged_room_is_not_joined()
         test_environment_cannot_choose_the_company_to_join()
         test_two_company_rooms_are_ambiguous_and_join_neither()
+        test_an_unknown_explicit_room_is_not_mislabeled_as_no_company_room()
         test_a_joined_unlabelled_legacy_room_is_still_discovered()
         test_browser_login_beats_a_courier_token_for_discovery()
         test_a_malformed_room_is_an_error_not_no_room()
@@ -844,6 +892,7 @@ def main():
         test_bound_courier_never_falls_back_to_a_different_principal()
         test_repo_controlled_app_slug_cannot_inject_a_second_callback()
         test_browser_login_fails_when_room_connection_is_incomplete()
+        test_first_login_succeeds_before_room_creation_then_second_login_joins_it()
         test_browser_login_replaces_a_stale_foreign_machine_room()
         test_browser_login_joins_an_org_valid_pinned_room()
     print("\nall join tests passed")

@@ -13,6 +13,47 @@ git config --global user.name ci || true
 
 fail() { echo "FAIL: $1"; exit 1; }
 
+# Case 0: the simplest customer path is the default. Running the installer
+# without flags from inside a real repository installs only into the machine
+# home, activates the global harness contract, and leaves the repository
+# byte-for-byte untouched. --machine remains the compatibility alias for the
+# same installation.
+mkdir -p "$S/repo-default" "$S/h0/.codex" "$S/h0/.cursor" "$S/h0/.gemini" "$S/h0-alias/.codex"
+git init -q "$S/repo-default"
+git -C "$S/repo-default" config user.email ci@test
+git -C "$S/repo-default" config user.name ci
+printf 'customer repository\n' >"$S/repo-default/README.md"
+mkdir -p "$S/repo-default/.claude/skills/team-room"
+printf '{"thread_id":"attacker-thread","team_id":"attacker-team","server":"https://attacker.invalid","portal":"https://archagents.com","app_slug":"agentnetwork","publishable_key":"public"}\n' >"$S/repo-default/.claude/skills/team-room/room.json"
+git -C "$S/repo-default" add README.md .claude/skills/team-room/room.json
+git -C "$S/repo-default" commit -q -m initial
+default_output="$(cd "$S/repo-default" && HOME="$S/h0" node "$ROOT/bin/install.mjs")"
+HOME="$S/h0-alias" node "$ROOT/bin/install.mjs" --machine >/dev/null
+[ -f "$S/h0/.archastro/agent-rooms/room_post.py" ] || fail "default did not install the machine kit"
+[ -x "$S/h0/.local/bin/room-post" ] || fail "default did not install the machine command"
+[ ! -e "$S/h0/.config/team-room/room.json" ] || fail "default trusted Room identity from the current repository"
+grep -q "Every top-level, nontrivial coding session" "$S/h0/.codex/AGENTS.md" || fail "default machine contract is not active across repositories"
+grep -q '~/.archastro/agent-rooms/SKILL.md' "$S/h0/.gemini/GEMINI.md" || fail "skill-less harness cannot find the machine protocol"
+grep -q "Use when Agent Rooms is installed" "$S/h0/.codex/skills/team-room/SKILL.md" || fail "installed skill still requires repository activation"
+grep -q '~/.local/bin/room-post' "$S/h0/.codex/AGENTS.md" || fail "machine contract relies on customer PATH setup"
+grep -q '~/.local/bin/room-post brief' "$S/h0/.codex/skills/team-room/SKILL.md" || fail "machine skill relies on customer PATH setup"
+HOME="$S/h0" PATH=/usr/bin:/bin "$S/h0/.local/bin/room-post" --help >/dev/null || fail "installed command does not run from a clean customer PATH"
+python3 - "$S/h0/.cursor/plugins/local/agent-rooms/.cursor-plugin/plugin.json" "$ROOT/package.json" <<'PY' || fail "Cursor plugin version drifted from the kit"
+import json, sys
+plugin = json.load(open(sys.argv[1]))
+package = json.load(open(sys.argv[2]))
+assert plugin["version"] == package["version"], (plugin, package)
+PY
+grep -Fxq 'npx github:ArchAstro/agent-rooms' "$ROOT/README.md" || fail "README omits the no-flag machine install"
+[[ "$default_output" == *'~/.local/bin/room-post login'* ]] || fail "default install omits the reliable next login step"
+[ -z "$(git -C "$S/repo-default" status --porcelain=v1 --untracked-files=all)" ] || fail "default install modified the current repository"
+cmp -s "$S/h0/.archastro/agent-rooms/manifest.json" "$S/h0-alias/.archastro/agent-rooms/manifest.json" || fail "default and --machine install different kits"
+mkdir -p "$S/h0-help"
+help_output="$(HOME="$S/h0-help" node "$ROOT/bin/install.mjs" --help)"
+[ ! -e "$S/h0-help/.archastro/agent-rooms" ] || fail "--help performed an installation"
+[[ "$help_output" == *"(no flags)"* ]] || fail "--help omits the default install"
+echo "PASS default machine install"
+
 # Case 1: fossil install with legacy identity migrates and forwards.
 mkdir -p "$S/h1/.archastro/team-room" "$S/h1/.local/bin" "$S/h1/.claude"
 cp "$ROOT/skills/team-room/room_post.py" "$S/h1/.archastro/team-room/"
@@ -23,8 +64,7 @@ grep -q "orwarder" "$S/h1/.archastro/team-room/room_post.py" || fail "legacy not
 ! grep -q "re-run: npx" "$S/h1/.local/bin/room-post" || fail "machine shim narrates fallback maintenance"
 [ -f "$S/h1/.config/team-room/room.json" ] || fail "identity not migrated"
 [ -f "$S/h1/.claude/skills/team-room/reference.md" ] || fail "reference.md missing from harness skill"
-grep -q "does not activate Agent" "$S/h1/.claude/CLAUDE.md" || fail "machine instructions imply activation"
-! grep -q "Before starting work" "$S/h1/.claude/CLAUDE.md" || fail "machine capability mandates participation"
+grep -q "Every top-level, nontrivial coding session" "$S/h1/.claude/CLAUDE.md" || fail "machine instructions do not activate Agent Rooms"
 echo "PASS fossil heal"
 
 # Case 2: hand-healed symlink survives; kit is not overwritten.
@@ -50,7 +90,8 @@ install_output="$(HOME="$S/h4" node "$ROOT/bin/install.mjs" --machine)"
 [ ! -f "$S/h4/.config/team-room/room.json" ] || fail "identity invented"
 [ -f "$S/h4/.archastro/agent-rooms/room_post.py" ] || fail "kit not installed"
 [[ "$install_output" != *"room-post subscribe"* ]] || fail "installer recommends removed subscribe command"
-[[ "$install_output" == *"--repo"* ]] || fail "installer omits the real repository opt-in path"
+[[ "$install_output" != *"--repo"* ]] || fail "machine install diverts the user into repository vendoring"
+[[ "$install_output" == *"room-post login"* ]] || fail "machine install omits its only required next step"
 echo "PASS zero-config install"
 
 # Case 5: upgrades remove the deferred review runtime while every publication
