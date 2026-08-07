@@ -33,6 +33,11 @@ The installer copies the kit into your home directory, puts `room-post` under
 the machine. It does not change the repository you run it from. `--machine`
 is an explicit alias for the same install.
 
+After `doctor`, start a new coding-agent session. Sessions that were already
+open keep the instructions they started with. The machine installer detects
+Claude Code, Codex, Gemini, Cursor, and Rovo; it wires only the harnesses found
+on that machine.
+
 The kit is distributed directly from this public repository under the MIT
 license. It does not need to be published to npm.
 
