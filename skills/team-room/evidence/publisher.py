@@ -283,7 +283,12 @@ class Publisher:
         key = self._message_key(request)
         for attempt in range(2):
             message = self.client.create_message(
-                f"PR evidence published [{key}]",
+                (
+                    f"PR evidence for {request.subject_key} is attached. "
+                    "Open it to review the prompt, trajectory, and change "
+                    "evidence allowed by the team's capture mode; this "
+                    "attachment follows the current complete version."
+                ),
                 key,
                 [{"id": artifact["id"], "type": "artifact"}],
             )

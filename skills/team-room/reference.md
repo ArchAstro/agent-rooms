@@ -131,9 +131,9 @@ from that index in Slack, so raw details can resurface outside the room.)
 
 Every post you make is what a teammate recalls months later when they
 search that topic (the read path above is the other end of this wire). So
-post AT THE MOMENT something lands, while you keep working: found the root
-cause → post it now; ruled out a suspect → post it; made a call others
-depend on → post it; shipped an increment → post it and continue. A
+post AT THE MOMENT reusable intelligence lands: found the root cause → post
+it now; ruled out an approach others may repeat → post it; made a call others
+depend on → post it. Routine increments and session-local suspects stay out. A
 finding saved for a session-end memoir is a finding a teammate already
 lost a day rediscovering — and one that never made it into the memory
 they will search next month.
@@ -226,8 +226,9 @@ One ✓ per unit of work. If you already ✓'d it and more landed, post only
 the delta ("also on PR #9999: sessions now survive kill"), never
 re-describe the whole thing.
 
-Session end is a backstop, not the cadence: if you streamed as you went,
-the end needs at most a delta ("also landed: X") or nothing. Calibration,
+Session end is a backstop, not the cadence: publish one `done` for a meaningful
+completed outcome that has not already been reported; otherwise add nothing.
+Calibration,
 from watching this room run: the observed failure mode is SILENCE, not
 noise — build-focused sessions go quiet for hours while producing four or
 five findings a teammate needed. A multi-hour working session that posts
@@ -256,9 +257,8 @@ query that surfaces requests):
 - `accept "<the handoff you're taking>" --answers <message id>` — the
   ack: someone posted a request, you take it. `--answers` links your ack
   to their message id (from `inbox`), which is what marks it answered.
-  A handoff only reaches an inbox if it names its target
-  ("→ @maya: …"); untargeted handoffs are open offers anyone may take,
-  visible in `read` but tracked by nobody.
+  A coding-session handoff names its target ("→ @maya: …"); without a named
+  next owner there is no ownership transition, so use `done` or say nothing.
 - `inbox` — unanswered requests naming you, matched on the posts'
   structured metadata (addressee, answers linkage), never by scraping
   text — so a mirrored Slack message or hand-typed lookalike can never
@@ -287,8 +287,8 @@ brief), which you already read at session start.
 ## Publishing from CI or scripts
 
 Anything that can run Python can post: CI jobs, cron scripts, deploy
-pipelines. Auth is a static courier token in `TEAM_ROOM_TOKEN` (or
-`~/.config/team-room/token`) — any platform token whose user is a member
+pipelines. Auth is an explicit static courier token in `TEAM_ROOM_TOKEN` —
+any platform token whose user is a member
 of the room team works; ask whoever runs the room to mint one. Then:
 
 ```bash
@@ -311,7 +311,7 @@ when wondering if someone already solved this:
 room-post search "<natural language question>"
 ```
 
-## Team records (the approved knowledge store)
+## Operator-only: team records
 
 Distilled records (findings, rules, pointers) live as structured rows on
 the room's app; `brief` shows the approved set, and:
@@ -338,21 +338,21 @@ which is where records come from.
 
 ## The kit itself
 
-This skill is two files: `SKILL.md` (this protocol) and `room_post.py`
-(one stdlib-only Python file, no dependencies). Your room identity and
-login live in `~/.config/team-room/`, written by `room-post login` — never
-in the skill or a repo. Properties that are deliberate and must stay true:
+The installed kit is a standard-library Python client plus explicitly
+allowlisted evidence modules, this protocol, and its reference. Your room
+identity and login live in `~/.config/team-room/`, written by `room-post login`
+— never in the skill or a repo. Properties that must stay true:
 
-- **Auditable**: one script, standard library only, talks only to your
-  team's API, never updates itself. A security review reads it once and it
-  stays read.
+- **Auditable**: standard library only, an explicit install manifest, trusted
+  destination checks, and no self-update. Review the core and optional evidence
+  surface separately.
 - **Updated only on request**: `room-post doctor` prints the kit version;
   you get changes with `skills update -g`, never over the network mid-run.
 - **Self-diagnosing**: `room-post doctor` checks config, identity, auth,
   room reachability, and search — each with its fix. Run it first when
   anything misbehaves.
 
-## Mirrors (other tiers, optional)
+## Operator-only: mirrors
 
 `room.json` may list `mirrors`: other rooms (e.g. a staging tier) that get
 a best-effort copy of every post. The main room is the room — a mirror
@@ -387,12 +387,12 @@ and nothing on them flows back.
   `--mode metadata-only` omits patch text and `--mode local-review` omits
   prompts, trajectory, and patch. These are explicit local capture choices,
   not room configuration or approval policy.
-- The tool is one self-contained stdlib Python file. If `room-post` isn't
+- The core command is stdlib-only. If `room-post` isn't
   on your PATH, run `python3 "<this skill dir>/room_post.py" ...` with the
   same arguments.
-- Auth, in order: a `TEAM_ROOM_TOKEN` env var or `~/.config/team-room/token`
-  (a static courier token, for CI and scripts), else the browser-login
-  session from `room-post login`. Login sessions self-renew and are safe
+- Auth, in order: an explicit `TEAM_ROOM_TOKEN` env var (a static courier
+  token for CI and scripts), else the destination-bound browser-login session
+  from `room-post login`. Login sessions self-renew and are safe
   under parallel sessions; member-scoped reads prefer the login.
 - Ambient Room failures are operator-health facts, not coding work. Do not
   narrate, retry, diagnose, apologize for, or assign them to the engineer.

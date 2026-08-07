@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.parse
 import urllib.request
 import uuid
@@ -218,7 +219,10 @@ def run_kit(args, home, server, extra_env=None):
                 "ROOM_SERVER": server,
                 "TEAM_ROOM_TRUST_SERVER": "1",
                 "TEAM_ROOM_TOKEN": "static-stub-token",
-                "TEAM_ROOM_HEALTH_LOG": os.path.join(home, "health.jsonl")})
+                "TEAM_ROOM_HEALTH_LOG": os.path.join(home, "health.jsonl"),
+                "TEAM_ROOM_PRIMARY_REQUEST_TIMEOUT": "0.1",
+                "TEAM_ROOM_PRIMARY_TOTAL_BUDGET": "0.2",
+                "TEAM_ROOM_PRIMARY_RETRY_DELAY": "1.0"})
     env.pop("ROOM_JSON", None)
     env.pop("TEAM_ROOM_ORG_ID", None)
     with open(os.path.join(home, ".gitconfig"), "w") as f:
@@ -228,8 +232,39 @@ def run_kit(args, home, server, extra_env=None):
             env.pop(key, None)
         else:
             env[key] = value
-    return subprocess.run([sys.executable, KIT, *args], env=env,
-                          capture_output=True, text=True, timeout=60)
+    result = subprocess.run([sys.executable, KIT, *args], env=env,
+                            capture_output=True, text=True, timeout=60)
+    # Posting is intentionally detached. Wait for this HOME's worker to finish
+    # before the next scenario resets shared server observations; otherwise a
+    # prior failure retries inside the following test.
+    outbox = os.path.join(home, ".config", "team-room", "outbox")
+    queues = [
+        os.path.join(outbox, name)
+        for name in os.listdir(outbox)
+        if name.endswith(".jsonl")
+    ] if os.path.isdir(outbox) else []
+    if queues:
+        import fcntl
+        queue = queues[0]
+        worker_lock = queue + ".lock"
+        saw_worker = False
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            lock = open(worker_lock, "w")
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                saw_worker = True
+                lock.close()
+                time.sleep(0.01)
+                continue
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            lock.close()
+            queue_empty = not os.path.exists(queue) or os.path.getsize(queue) == 0
+            if queue_empty or saw_worker:
+                break
+            time.sleep(0.01)
+    return result
 
 
 def room_json(home):
@@ -633,7 +668,6 @@ def test_first_post_ignores_a_stale_courier_token_file_after_human_login():
 
     assert posted.returncode == 0, posted.stdout + posted.stderr
     assert [attempt["token"] for attempt in MESSAGE_ATTEMPTS] == [
-        "courier-token",
         "human-token",
     ], MESSAGE_ATTEMPTS
     assert all(
@@ -641,7 +675,7 @@ def test_first_post_ignores_a_stale_courier_token_file_after_human_login():
         and attempt["body"]["user"] == "usr_teammate"
         for attempt in MESSAGE_ATTEMPTS
     ), MESSAGE_ATTEMPTS
-    print("PASS  a stale courier token file cannot break the human's first post")
+    print("PASS  an unscoped legacy token file is ignored")
 
 
 def test_an_authorized_courier_posts_once_without_using_the_human_login():

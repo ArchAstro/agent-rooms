@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 KIT = os.path.join(HERE, "..", "skills", "team-room", "room_post.py")
@@ -114,6 +115,16 @@ def run_kit(args, home, server, extra_env=None):
                           capture_output=True, text=True, timeout=60)
 
 
+def wait_for_post(after, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if any(method == "POST" and path.endswith("/messages")
+               for method, path in CALLS[after:]):
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"detached worker did not post: {CALLS[after:]}")
+
+
 def main():
     with socketserver.TCPServer(("127.0.0.1", 0), Stub) as srv:
         port = srv.server_address[1]
@@ -121,7 +132,8 @@ def main():
         server = f"http://127.0.0.1:{port}"
         home = tempfile.mkdtemp()
 
-        # 1. a post lands and confirms with the verb echo
+        # 1. a post returns silently after durable enqueue, then lands through
+        # the detached worker without occupying the engineer's foreground.
         help_result = run_kit(["--help"], home, server)
         assert "bounded evidence package" in help_result.stdout and "room-post pr publish" in help_result.stdout, help_result.stdout
         assert "room-post pr review" not in help_result.stdout, help_result.stdout
@@ -321,12 +333,19 @@ def main():
             server,
         )
         assert result.returncode == 0, result.stdout + result.stderr
-        assert "posted" in result.stdout, result.stdout + result.stderr
+        deadline = threading.Event()
+        for _ in range(100):
+            if any(
+                method == "POST" and path.endswith("/messages")
+                for method, path in CALLS[len(before):]
+            ):
+                break
+            deadline.wait(0.01)
         assert any(
             method == "POST" and path.endswith("/messages")
             for method, path in CALLS[len(before):]
         ), CALLS[len(before):]
-        print("PASS  dry-run text used as data cannot suppress a real post")
+        print("PASS  dry-run text used as data cannot suppress queued delivery")
 
         missing_attachment = os.path.join(offline, "does-not-exist.png")
         result = subprocess.run(
@@ -371,11 +390,13 @@ def main():
         ), CALLS[len(before):]
         print("PASS  a missing record is not mislabeled as a Room outage")
 
+        before_post = len(CALLS)
         r = run_kit(["done", "contract post", "-r", "#1"], home, server)
-        assert "posted" in r.stdout and "done" in r.stdout, r.stdout + r.stderr
         assert r.returncode == 0
+        assert r.stdout == "", r.stdout
         assert r.stderr == "", r.stderr
-        print("PASS  post lands, verb echoed")
+        wait_for_post(before_post)
+        print("PASS  post queues silently and detached worker delivers")
 
         # 2. records pagination follows has_next and terminates
         r = run_kit(["records"], home, server)
@@ -391,14 +412,18 @@ def main():
 
         r = run_kit(["search", "help"], home, server)
         assert "lesson" in r.stdout and "usage:" not in r.stdout.lower(), r.stdout
+        before_post = len(CALLS)
         r = run_kit(["done", "help", "-r", "#2"], home, server)
-        assert "posted" in r.stdout, r.stdout + r.stderr
+        assert r.returncode == 0 and r.stdout == "", r.stdout + r.stderr
+        wait_for_post(before_post)
+        before_post = len(CALLS)
         r = run_kit(
             ["done", "Help text is valid post data", "-b", "--help", "-r", "#3"],
             home,
             server,
         )
-        assert "posted" in r.stdout, r.stdout + r.stderr
+        assert r.returncode == 0 and r.stdout == "", r.stdout + r.stderr
+        wait_for_post(before_post)
         print("PASS  bare help remains valid command data")
 
         r = run_kit(["read", "1"], home, server)
@@ -435,8 +460,8 @@ def main():
                  "TEAM_ROOM_HEALTH_LOG": os.path.join(disconnected, "health.jsonl")},
             capture_output=True, text=True, timeout=10,
         )
-        assert r.returncode == 0 and r.stdout == "room-status: unavailable\n" and r.stderr == "", r.stdout + r.stderr
-        print("PASS  disconnected ambient commands stay quiet and truthful")
+        assert r.returncode == 0 and r.stdout == "room-status: login-required\n" and r.stderr == "", r.stdout + r.stderr
+        print("PASS  a fresh install requests one-time login without blocking")
 
     print("OK contract")
 

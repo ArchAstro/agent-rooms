@@ -11,12 +11,14 @@ agent misbehaved" from "the agent never ran". No agent is invoked here —
 these are the seams the runner depends on.
 """
 import os
+import json
 import subprocess
 import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EVAL = os.path.join(HERE, "..", "evals", "protocol_eval.py")
+INSTALLED_EVAL = os.path.join(HERE, "..", "evals", "installed_protocol_eval.py")
 
 PASS = FAIL = 0
 
@@ -60,20 +62,37 @@ mod = load_eval()
 check("without the override it falls back to the repo's own skill",
       "room-post" in mod.SKILL)
 
+# The customer-facing proof invokes the real installer and returns the
+# always-loaded identities it produced, rather than grading source prose from
+# this checkout.
+probe = subprocess.run(
+    [sys.executable, INSTALLED_EVAL, "--probe"],
+    capture_output=True,
+    text=True,
+    timeout=60,
+)
+installed = json.loads(probe.stdout) if probe.returncode == 0 else {}
+check("installed evaluator grades the generated multi-harness contract",
+      probe.returncode == 0
+      and "substantial work begins" in installed.get("contract", "").lower()
+      and "customer Claude rules" in installed.get("claude", "")
+      and "customer Gemini rules" in installed.get("gemini", ""))
+
 # --- the result line separates misbehavior from non-execution ------------
 # The runner publishes different incidents for these two, so they can never
 # collapse into one number.
-line = mod.result_line("codex", 8, 0, 0, 0)
+scenario_count = len(mod.SCENARIOS)
+line = mod.result_line("codex", scenario_count, 0, 0, 0)
 check("a clean run reports all passes",
-      line == "RESULT agent=codex pass=8 fail=0 warn=0 error=0")
+      line == f"RESULT agent=codex pass={scenario_count} fail=0 warn=0 error=0")
 
 regressed = mod.result_line("codex", 6, 2, 0, 0)
 check("a behavioral regression reports failures with no errors",
       "fail=2" in regressed and "error=0" in regressed)
 
-never_ran = mod.result_line("codex", 0, 8, 0, 8)
+never_ran = mod.result_line("codex", 0, scenario_count, 0, scenario_count)
 check("an agent that never answered reports errors alongside the failures",
-      "error=8" in never_ran)
+      f"error={scenario_count}" in never_ran)
 
 # --- a missing skill file fails loudly, never silently grades nothing ----
 with tempfile.TemporaryDirectory() as tmp:
@@ -120,6 +139,67 @@ try:
 except RuntimeError as exc:
     check("an empty final message raises rather than scoring the transcript",
           "no final message" in str(exc))
+
+# Installed lifecycle evals score the recorder, never an assistant claiming it
+# ran a command. A missing call is an execution error; a conflicting final
+# answer cannot override the argv actually observed.
+os.environ.pop("TEAM_ROOM_EVAL_COMMAND_LOG", None)
+mod.subprocess.run = lambda *a, **k: _FakeCompleted(0)
+try:
+    mod.ask("codex", "start substantial work", require_tool=True)
+    check("tool scenarios require an installed command recorder", False)
+except RuntimeError as exc:
+    check("tool scenarios require an installed command recorder",
+          "recorder" in str(exc))
+
+with tempfile.TemporaryDirectory() as tmp:
+    command_log = os.path.join(tmp, "calls.jsonl")
+    os.environ["TEAM_ROOM_EVAL_COMMAND_LOG"] = command_log
+
+    def fake_agent_without_tool(cmd, **_kwargs):
+        answer_path = cmd[cmd.index("-o") + 1]
+        with open(answer_path, "w") as handle:
+            handle.write('scripts/room-post start "claimed only"')
+        return _FakeCompleted(0)
+
+    mod.subprocess.run = fake_agent_without_tool
+    try:
+        mod.ask("codex", "start substantial work", require_tool=True)
+        check("installed eval fails when no command was invoked", False)
+    except RuntimeError as exc:
+        check("installed eval fails when no command was invoked",
+              "without invoking" in str(exc))
+
+    def fake_agent_with_tool(cmd, **_kwargs):
+        answer_path = cmd[cmd.index("-o") + 1]
+        with open(answer_path, "w") as handle:
+            handle.write('scripts/room-post start "wrong final claim"')
+        with open(command_log, "w") as handle:
+            handle.write('["done", "observed outcome"]\n')
+        return _FakeCompleted(0)
+
+    mod.subprocess.run = fake_agent_with_tool
+    observed = mod.ask("codex", "finish substantial work", require_tool=True)
+    check("installed eval scores recorded argv instead of final prose",
+          "TOOL_CALL scripts/room-post done" in observed
+          and "wrong final claim" not in observed)
+
+    def fake_agent_with_extra_tool(cmd, **_kwargs):
+        answer_path = cmd[cmd.index("-o") + 1]
+        with open(answer_path, "w") as handle:
+            handle.write("DONE")
+        with open(command_log, "w") as handle:
+            handle.write('["start", "one"]\n["done", "two"]\n')
+        return _FakeCompleted(0)
+
+    mod.subprocess.run = fake_agent_with_extra_tool
+    try:
+        mod.ask("codex", "start substantial work", require_tool=True)
+        check("tool scenarios reject extra lifecycle invocations", False)
+    except RuntimeError as exc:
+        check("tool scenarios reject extra lifecycle invocations",
+              "exactly one" in str(exc))
+    os.environ.pop("TEAM_ROOM_EVAL_COMMAND_LOG", None)
 
 # --- the skill's own words can never satisfy a scorer --------------------
 # codex echoes the prompt (which embeds the whole SKILL.md) into stdout, and

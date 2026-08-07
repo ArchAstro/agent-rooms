@@ -390,6 +390,10 @@ def test_two_agent_sessions_publish_one_current_artifact_over_tcp_without_github
         assert [c["session_id"] for c in content["chapters"]] == ["session-one", "session-two"]
         assert sum(bool(m.get("attachments")) for m in ContractServer.messages) == 1
         assert len(ContractServer.messages) == 1
+        message = ContractServer.messages[0]["content"].lower()
+        assert all(word in message for word in (
+            "prompt", "trajectory", "change evidence", "current complete version"
+        )), message
 
         before = len(ContractServer.writes)
         warm = run_publish(repo, home, endpoint, base, second, "session-two")
