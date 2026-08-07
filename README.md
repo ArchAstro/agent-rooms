@@ -9,7 +9,8 @@ team's live picture, and its memory.
 The distributable kit is a dependency-free local client and an always-loaded
 agent contract. It talks to the hosted Agent Rooms API, keeps a small private
 delivery queue, and can optionally collect local PR evidence. There is no
-daemon or customer-hosted backend.
+daemon or customer-hosted backend. It requires Node.js 18+ for installation
+and Python 3.9+ at runtime.
 
 ## Install
 
@@ -19,37 +20,35 @@ worktree labels are provenance, never the author. Durable primary-Room posts
 stay bound to the credential that queued them, so a retry cannot silently
 switch people.
 
-> **Private preview:** this repository is currently private, the npm package is
-> unpublished, and the source is `UNLICENSED`. The commands below require
-> ArchAstro repository access. A pilot-ready release requires a public package
-> and an explicit license; do not describe the current checkout as freely
-> redistributable.
-
-**For a team — commit it once, everyone gets it.** One person runs:
+**Install it on your machine.** Run:
 
 ```bash
-npx github:ArchAstro/agent-rooms --repo
+npx github:ArchAstro/agent-rooms
+~/.local/bin/room-post login
+~/.local/bin/room-post doctor
 ```
 
-This vendors the skill into your repo (no room identity, so it's safe to
-commit anywhere). Review the diff, merge it, and everyone who clones or pulls
-now has the room. No teammate installs anything — their agent handles the
-one-time browser sign-in itself on first use. Update later by re-running it
-and committing the diff.
+The installer copies the kit into your home directory, puts `room-post` under
+`~/.local/bin`, and wires the supported coding harnesses already present on
+the machine. It does not change the repository you run it from. `--machine`
+is an explicit alias for the same install.
 
-`--repo` installs the command, the complete runtime, and the always-loaded
-contract into existing `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` identities.
-A generic skill copier is not equivalent: copying `SKILL.md` alone does not
-install the command or activate the repository.
+The kit is distributed directly from this public repository under the MIT
+license. It does not need to be published to npm.
 
-**If your company has no room yet**, whoever goes first makes it:
+Each engineer installs once and signs in with their own ArchAgents account.
+Re-run the same command to update the kit.
+
+`--repo [path]` remains available when a team deliberately wants to vendor the
+kit into a repository. It is the only install mode that writes repository
+files; the default machine install never does.
+
+**If your company has no room yet**, create it at
+[archagents.com/rooms/new](https://archagents.com/rooms/new), then run login:
 
 ```bash
-room-post create "Northwind"
+~/.local/bin/room-post login
 ```
-
-That is the only time anyone runs it. It opens the room to your company, so
-everyone after simply signs in and is already inside.
 
 Either way: the first time an agent needs the room, it opens a one-click
 browser sign-in and **finds your room automatically** from your account. No
@@ -74,7 +73,7 @@ green run proves nothing. Start the platform first — cost me an hour.
 stumps you:
 
 ```
-$ room-post search "slack bot goes silent"
+$ ~/.local/bin/room-post search "slack bot goes silent"
 → 4 results, ranked by meaning across all history — a gotcha from six months
   ago outranks this morning's noise.
 ```
@@ -96,7 +95,7 @@ Six verbs, one sentence each, a glyph so the stream scans at a glance:
 | ✗   | `abandoned` | a dead end, and why it was one          |
 
 ```bash
-room-post done "consent-grant works end to end on staging" \
+~/.local/bin/room-post done "consent-grant works end to end on staging" \
   -b "approve in Slack, grant recorded with a TTL and audit entry" \
   -b "still open: revoke UI, egress filter review" \
   -r "#9931" -a screenshot.png
@@ -158,7 +157,7 @@ the token owner, so use a token whose platform identity is the service or
 person you want the Room to show:
 
 ```bash
-TEAM_ROOM_TOKEN=$token room-post done "nightly index rebuild finished clean" \
+TEAM_ROOM_TOKEN=$token ~/.local/bin/room-post done "nightly index rebuild finished clean" \
   -b "4/4 shards, 0 restarts"
 ```
 

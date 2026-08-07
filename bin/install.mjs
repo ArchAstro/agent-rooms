@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Agent Rooms installer. Two install paths, one kit:
 //
-//   npx @archastro/agent-rooms --repo [path]    vendor the kit into a repo
-//   npx @archastro/agent-rooms --machine        install machine-wide
+//   npx github:ArchAstro/agent-rooms                  install machine-wide
+//   npx github:ArchAstro/agent-rooms --machine        same, explicit compatibility form
+//   npx github:ArchAstro/agent-rooms --repo [path]    vendor the kit into a repo
 //
 // The kit is a stdlib-only Python command plus bounded evidence modules — this
 // installer only copies allowlisted files and wires instruction files. It never phones
@@ -64,10 +65,11 @@ function fail(msg) {
 }
 
 function parseArgs(argv) {
-  const args = { flags: {}, mode: null, repoPath: null, yes: false, allowPublic: false };
+  const args = { flags: {}, mode: "machine", repoPath: null, yes: false, allowPublic: false, help: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === "--machine") args.mode = "machine";
+    if (a === "--help" || a === "-h") args.help = true;
+    else if (a === "--machine") args.mode = "machine";
     else if (a === "--repo") {
       args.mode = "repo";
       if (argv[i + 1] && !argv[i + 1].startsWith("--")) args.repoPath = argv[++i];
@@ -100,16 +102,6 @@ function loadRoomConfig(flags, fallbackPath) {
   if (fallbackPath && existsSync(fallbackPath)) {
     console.log(`keeping existing room config: ${fallbackPath}`);
     return JSON.parse(readFileSync(fallbackPath, "utf8"));
-  }
-  // Run from inside a repo that already carries the kit (e.g. your
-  // team's main repo) and the room config is right there — use it.
-  const cwdTop = gitTopLevel(process.cwd());
-  if (cwdTop) {
-    const inRepo = join(cwdTop, ".claude", "skills", "team-room", "room.json");
-    if (existsSync(inRepo)) {
-      console.log(`using room config from this repo: ${inRepo}`);
-      return JSON.parse(readFileSync(inRepo, "utf8"));
-    }
   }
   if (flags.allowMissingIdentity) return null;
   fail(
@@ -152,10 +144,11 @@ function upsertMarkedBlock(filePath, block) {
 
 const MACHINE_SECTION = `## Agent Rooms (machine-level)
 
-This machine has the \`room-post\` capability, but that does not activate Agent
-Rooms in every repository. Participate only when the repository explicitly
-installs its own Room kit or a human has enabled that repository. Follow the
-installed team-room skill there.`;
+Every top-level, nontrivial coding session on this machine uses the shared team
+room. Before work, read and follow
+\`~/.archastro/agent-rooms/SKILL.md\`; run its commands through
+\`~/.local/bin/room-post\`. Room failures never block the work or become an
+engineering task.`;
 
 function repoSection(kitDir) {
   return `## Team Room (all agent sessions)
@@ -238,18 +231,17 @@ function detectHarnesses() {
 
 /**
  * Install the SKILL.md into one harness's skills directory, machine
- * flavor: command references become the PATH-installed `room-post`, and
+ * flavor: command references use the installer's stable home-relative path.
  * Rovo copies get their frontmatter name rewritten to the prefixed dir
  * name (same transform the CLI's setup applies).
  */
 function installSkill(h) {
   if (!h.skillsDir) return false;
-  // The canonical SKILL.md already speaks in bare `room-post` (the PATH
-  // shim this flavor installs), so no command rewrite is needed here. That
-  // also fixes the plain `npx skills add` channel, which copies the skill
-  // verbatim and used to ship `scripts/room-post` commands that only exist
-  // in vendoring repos.
-  let text = readFileSync(join(KIT_SRC, "SKILL.md"), "utf8");
+  // A clean macOS shell does not necessarily include ~/.local/bin in PATH.
+  // Machine-installed agents therefore use the shim's stable home-relative
+  // path instead of relying on shell startup configuration.
+  let text = readFileSync(join(KIT_SRC, "SKILL.md"), "utf8")
+    .replace(/\broom-post\b/g, "~/.local/bin/room-post");
   if (h.rovoRename)
     text = text.replace(/^name:\s*.*$/m, `name: ${h.rovoRename}`);
   mkdirSync(h.skillsDir, { recursive: true });
@@ -262,7 +254,7 @@ function installSkill(h) {
     mkdirSync(metaDir, { recursive: true });
     writeFileSync(
       join(metaDir, "plugin.json"),
-      JSON.stringify({ name: "agent-rooms", version: "0.1.0", description: "Agent Rooms team-room skill" }, null, 2) + "\n"
+      JSON.stringify({ name: "agent-rooms", version: PKG_VERSION, description: "Agent Rooms team-room skill" }, null, 2) + "\n"
     );
   }
   return true;
@@ -429,10 +421,8 @@ function installMachine(args) {
     );
 
   console.log(`\nkit: ${kitDir}`);
-  console.log(`command: ${shim}  (ensure ~/.local/bin is on PATH)`);
-  console.log("\nNo repo is subscribed by this install. To opt a repository in, run:");
-  console.log("  npx github:ArchAstro/agent-rooms --repo /path/to/repo");
-  console.log("Next: `room-post login` (one browser click), then `room-post doctor`.");
+  console.log(`command: ${shim}`);
+  console.log("Next: `~/.local/bin/room-post login` (one browser click), then `~/.local/bin/room-post doctor`.");
 }
 
 function gitTopLevel(p) {
@@ -566,11 +556,12 @@ function installRepo(args) {
 }
 
 const args = parseArgs(process.argv.slice(2));
-if (!args.mode) {
+if (args.help) {
   console.log("agent-rooms installer\n");
+  console.log("  (no flags)        install machine-wide, for use across all your repos");
   console.log("  --repo [path]     vendor the skill into a git repo (the team install:");
   console.log("                    one commit, and everyone who clones the repo has it)");
-  console.log("  --machine         install machine-wide, for use across all your repos");
+  console.log("  --machine         explicit alias for the default machine install");
   console.log("");
   console.log("  --repo commits no room identity — each member runs `room-post login`");
   console.log("  once to connect their own account. --machine writes identity to");

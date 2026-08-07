@@ -51,6 +51,8 @@ the login; refresh is single-flight via a file lock so parallel sessions
 cannot race the rotating refresh token.
 """
 
+from __future__ import annotations
+
 import base64
 import contextlib
 import hashlib
@@ -2757,11 +2759,16 @@ def discover_and_configure(token: str, chosen_team: str | None = None):
         return False
     if chosen_team:
         rooms = [r for r in rooms if r[1] == chosen_team]
+        if not rooms:
+            print("the requested Room is not available to this account. "
+                  "Nothing was joined or changed.")
+            return False
     if not rooms:
-        print("your company doesn't have a team room yet.\n"
-              "  room-post create           # make it, and everyone after you "
-              "is joined automatically")
-        return False
+        print(
+            "your company doesn't have a team room yet. Create or join one "
+            "at https://archagents.com/rooms/new."
+        )
+        return None
     if len(rooms) == 1:
         name, tid, thid = rooms[0]
         if pinned:
@@ -3845,12 +3852,17 @@ def login(mirror: dict | None = None, best_effort: bool = False,
     # First login with no room configured: find your team room from your
     # identity and save it, so there's nothing else to set up.
     if not mirror:
-        if not discover_and_configure(result["access_token"]):
+        room_status = discover_and_configure(result["access_token"])
+        if room_status is False:
             die(
                 "sign-in succeeded, but no room was connected. "
                 "Nothing can post yet; fix the room issue above and run "
                 "`room-post discover`."
             )
+        if room_status is None:
+            print("Sign-in succeeded. Run `room-post login` again after the "
+                  "Room exists.")
+            return
     if not mirror:
         print("Team Room connected. Posting now works from this machine.")
 
@@ -4138,7 +4150,7 @@ def doctor():
         if "orwarder" not in head:
             print(f"warn superseded kit still present at {legacy_dir} — anything "
                   "pointing there runs frozen code. Re-run: "
-                  "npx github:ArchAstro/agent-rooms --machine (it forwards it)")
+                  "npx github:ArchAstro/agent-rooms (it forwards it)")
 
     # Health history: everything the kit absorbed to protect sessions in
     # the last week. This is the anti-silent-failure ledger — a healthy

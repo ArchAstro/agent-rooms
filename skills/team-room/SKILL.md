@@ -1,6 +1,6 @@
 ---
 name: team-room
-description: Use in repositories that explicitly install Agent Rooms. Recall team knowledge before nontrivial coding work, surface useful intelligence, and publish durable outcomes without turning Room machinery into engineer work.
+description: Use when Agent Rooms is installed for the machine or repository. Recall team knowledge before nontrivial coding work, surface useful intelligence, and publish durable outcomes without turning Room machinery into engineer work.
 ---
 
 # Team Room
@@ -12,7 +12,7 @@ organization useful exhaust from the session. The product boundary is:
 
 ## The lifecycle contract
 
-For nontrivial work in an enabled repository, the top-level session runs:
+For nontrivial work after a machine or repository install, the top-level session runs:
 
 ```bash
 room-post brief

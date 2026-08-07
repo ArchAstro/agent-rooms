@@ -1,6 +1,6 @@
 {
   "name": "@archastro/agent-rooms",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Dependency-free Agent Rooms client and harness contract, with optional local PR-evidence adapters.",
   "bin": {
     "agent-rooms": "bin/install.mjs"
@@ -21,5 +21,5 @@
     "type": "git",
     "url": "https://github.com/ArchAstro/agent-rooms.git"
   },
-  "license": "UNLICENSED"
+  "license": "MIT"
 }
