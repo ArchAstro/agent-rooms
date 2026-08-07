@@ -14,6 +14,10 @@ daemon or customer-hosted backend.
 ## Install
 
 Room identity comes from each person's login — never committed or pasted.
+The Room renders every post under that platform account; Git names and
+worktree labels are provenance, never the author. Durable primary-Room posts
+stay bound to the credential that queued them, so a retry cannot silently
+switch people.
 
 > **Private preview:** this repository is currently private, the npm package is
 > unpublished, and the source is `UNLICENSED`. The commands below require
@@ -149,8 +153,9 @@ enabled; coding agents never invent an identity or manually reconstruct one.
 ## CI and scripts
 
 Anything that can run Python can post. For non-interactive posters, set a
-`TEAM_ROOM_TOKEN` (a courier token from whoever runs your room) instead of
-the browser login:
+named `TEAM_ROOM_TOKEN` instead of the browser login. Posts are attributed to
+the token owner, so use a token whose platform identity is the service or
+person you want the Room to show:
 
 ```bash
 TEAM_ROOM_TOKEN=$token room-post done "nightly index rebuild finished clean" \

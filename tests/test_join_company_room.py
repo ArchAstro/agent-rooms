@@ -617,7 +617,7 @@ def test_browser_login_ends_with_a_usable_company_room():
     print("PASS  browser login ends with a usable room and first post")
 
 
-def test_first_post_falls_back_to_the_human_login_when_a_courier_is_for_another_room():
+def test_first_post_preserves_its_courier_author_when_delivery_is_rejected():
     reset()
     home = tempfile.mkdtemp()
     module = load_kit_module(home)
@@ -634,7 +634,6 @@ def test_first_post_falls_back_to_the_human_login_when_a_courier_is_for_another_
     assert posted.returncode == 0, posted.stdout + posted.stderr
     assert [attempt["token"] for attempt in MESSAGE_ATTEMPTS] == [
         "courier-token",
-        "human-token",
     ], MESSAGE_ATTEMPTS
     assert all(
         "/apps/app/threads/thr_real/messages" in attempt["path"]
@@ -642,10 +641,10 @@ def test_first_post_falls_back_to_the_human_login_when_a_courier_is_for_another_
     ), MESSAGE_ATTEMPTS
     assert all(
         attempt["body"]["user"] == "usr_teammate"
-        and attempt["body"]["content"].endswith(": first Stripe pilot post")
+        and attempt["body"]["content"] == "✓ first Stripe pilot post"
         for attempt in MESSAGE_ATTEMPTS
     ), MESSAGE_ATTEMPTS
-    print("PASS  a foreign courier cannot make the human's first post fail")
+    print("PASS  a rejected named token never changes the queued post's author")
 
 
 def test_first_post_ignores_a_stale_courier_token_file_after_human_login():
@@ -700,12 +699,8 @@ def test_an_authorized_courier_posts_once_without_using_the_human_login():
     print("PASS  an authorized courier remains the single posting principal")
 
 
-def test_courier_fallback_is_narrow_and_bounded():
-    for status, expected_tokens in (
-        (401, ["courier-token", "human-token"]),
-        (404, ["courier-token", "human-token"]),
-        (500, ["courier-token"]),
-    ):
+def test_bound_courier_never_falls_back_to_a_different_principal():
+    for status in (401, 404, 500):
         reset()
         Stub.courier_message_status = status
         home = tempfile.mkdtemp()
@@ -719,7 +714,9 @@ def test_courier_fallback_is_narrow_and_bounded():
             {"TEAM_ROOM_TOKEN": "courier-token"},
         )
 
-        assert [attempt["token"] for attempt in MESSAGE_ATTEMPTS] == expected_tokens, (
+        assert [attempt["token"] for attempt in MESSAGE_ATTEMPTS] == [
+            "courier-token"
+        ], (
             status,
             MESSAGE_ATTEMPTS,
         )
@@ -740,9 +737,8 @@ def test_courier_fallback_is_narrow_and_bounded():
 
     assert [attempt["token"] for attempt in MESSAGE_ATTEMPTS] == [
         "courier-token",
-        "human-token",
     ], MESSAGE_ATTEMPTS
-    print("PASS  courier fallback covers auth mismatch without retry loops")
+    print("PASS  bound couriers never fall back to another principal")
 
 
 def test_repo_controlled_app_slug_cannot_inject_a_second_callback():
@@ -842,10 +838,10 @@ def main():
         test_corrupt_human_credentials_do_not_fall_back_to_a_courier()
         test_untrusted_discovery_server_never_receives_the_token()
         test_browser_login_ends_with_a_usable_company_room()
-        test_first_post_falls_back_to_the_human_login_when_a_courier_is_for_another_room()
+        test_first_post_preserves_its_courier_author_when_delivery_is_rejected()
         test_first_post_ignores_a_stale_courier_token_file_after_human_login()
         test_an_authorized_courier_posts_once_without_using_the_human_login()
-        test_courier_fallback_is_narrow_and_bounded()
+        test_bound_courier_never_falls_back_to_a_different_principal()
         test_repo_controlled_app_slug_cannot_inject_a_second_callback()
         test_browser_login_fails_when_room_connection_is_incomplete()
         test_browser_login_replaces_a_stale_foreign_machine_room()

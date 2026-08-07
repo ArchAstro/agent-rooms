@@ -24,6 +24,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 KIT = os.path.join(HERE, "..", "skills", "team-room", "room_post.py")
 
 CALLS = []
+POST_BODIES = []
 
 
 class Stub(http.server.BaseHTTPRequestHandler):
@@ -61,9 +62,13 @@ class Stub(http.server.BaseHTTPRequestHandler):
                  "content": "@vivek please look at the deploy",
                  "created_at": "2026-07-26T15:00:00"} for i in range(n)]})
         elif "/users/me" in self.path:
-            self._json(200, {"app_id": "app_stub"})
+            self._json(200, {
+                "id": "usr_token_owner",
+                "app_id": "app_stub",
+                "full_name": "Token Owner",
+            })
         elif "/threads/thr_stub" in self.path and "/messages" not in self.path:
-            # CONTRACT: identity resolution matches a member by git email
+            # Thread details remain available for ordinary Room reads.
             self._json(200, {"members": [
                 {"user": {"id": "usr_stub", "email": "contract@stub.test",
                           "full_name": "Stub User"}}]})
@@ -82,6 +87,7 @@ class Stub(http.server.BaseHTTPRequestHandler):
             # CONTRACT: post accepts content+metadata, returns {data:{id}};
             # the kit's metadata must ride through intact
             assert body.get("content"), "post without content"
+            POST_BODIES.append(body)
             self._json(200, {"data": {"id": "msg_stub_1"}})
         elif "/auth/refresh" in self.path:
             # CONTRACT: refresh tokens ROTATE — the kit must persist the
@@ -107,7 +113,8 @@ def run_kit(args, home, server, extra_env=None):
                 "TEAM_ROOM_TOKEN": "static-stub-token",
                 "TEAM_ROOM_HEALTH_LOG": os.path.join(home, "health.jsonl")})
     # The sandbox HOME needs a git identity matching the stub's member —
-    # identity resolution matches members by the machine's git email.
+    # Git identity deliberately conflicts with the token owner; posting must
+    # still use the authenticated platform principal.
     with open(os.path.join(home, ".gitconfig"), "w") as f:
         f.write("[user]\n\temail = contract@stub.test\n\tname = Stub User\n")
     env.update(extra_env or {})
@@ -391,12 +398,31 @@ def main():
         print("PASS  a missing record is not mislabeled as a Room outage")
 
         before_post = len(CALLS)
+        before_body = len(POST_BODIES)
         r = run_kit(["done", "contract post", "-r", "#1"], home, server)
         assert r.returncode == 0
         assert r.stdout == "", r.stdout
         assert r.stderr == "", r.stderr
         wait_for_post(before_post)
-        print("PASS  post queues silently and detached worker delivers")
+        deadline = time.monotonic() + 2
+        while len(POST_BODIES) == before_body and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(POST_BODIES) == before_body + 1, POST_BODIES[before_body:]
+        posted = POST_BODIES[before_body]
+        assert posted["user"] == "usr_token_owner", posted
+        assert posted["content"].startswith("✓ contract post"), posted
+        assert "Stub User" not in posted["content"], posted
+        assert posted["metadata"]["human"] == "Token Owner", posted
+        assert posted["metadata"]["author_user_id"] == "usr_token_owner", posted
+        identity_reads = [
+            path
+            for method, path in CALLS[before_post:]
+            if method == "GET"
+            and "/threads/thr_stub" in path
+            and "/messages" not in path
+        ]
+        assert identity_reads == [], identity_reads
+        print("PASS  post uses the token owner without Git-derived attribution")
 
         # 2. records pagination follows has_next and terminates
         r = run_kit(["records"], home, server)

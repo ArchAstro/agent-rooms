@@ -28,8 +28,8 @@ jobs:
           for f in tests/test_*.py; do
             echo "== $f"; python3 "$f"
           done
-      - name: installer sandbox battery
-        run: bash tests/installer_battery.sh
+      - name: installer sandbox and Git isolation battery
+        run: bash tests/test_installer_git_isolation.sh
 
   macos:
     name: macOS app

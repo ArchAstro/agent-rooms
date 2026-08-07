@@ -8,6 +8,7 @@ same idempotency key, the server observes one logical message, and the queue
 drains.
 """
 
+import hashlib
 import http.server
 import importlib.util
 import json
@@ -323,24 +324,31 @@ def test_flush_auth_and_post_share_one_request_budget():
 
     def slow_auth(timeout=None):
         observed.append(("auth", timeout))
-        time.sleep(0.08)
+        time.sleep(0.04)
         return None, None, None, {
             "accessToken": "token",
             "appId": "app",
             "userId": "user",
         }
 
+    def slow_profile(*_args, **kwargs):
+        observed.append(("profile", kwargs["timeout"]))
+        time.sleep(0.05)
+        return {"id": "user", "app_id": "app", "name": "User"}
+
     def record_post(*_args, **kwargs):
         observed.append(("post", kwargs["timeout"]))
         return {"id": "message"}
 
     rp.authed_session = slow_auth
+    rp.http_get = slow_profile
     rp._post_once = record_post
     rp.PRIMARY_FLUSH_REQUEST_TIMEOUT = 1.0
-    rp._deliver_primary(entry("budgeted"), 0.10)
+    rp._deliver_primary(entry("budgeted"), 0.12)
 
-    assert observed[0][0] == "auth" and 0 < observed[0][1] <= 0.10, observed
-    assert observed[1][0] == "post" and 0 < observed[1][1] < 0.05, observed
+    assert observed[0][0] == "auth" and 0 < observed[0][1] <= 0.12, observed
+    assert observed[1][0] == "profile" and 0 < observed[1][1] < 0.09, observed
+    assert observed[2][0] == "post" and 0 < observed[2][1] < 0.04, observed
 
 
 def test_new_posts_cannot_overtake_an_existing_backlog():
@@ -392,6 +400,13 @@ def test_valid_but_malformed_entries_are_removed_without_blocking_followers():
         "[]\n"
         + json.dumps({"at": time.time(), "message": "missing identity"})
         + "\n"
+        + json.dumps({**entry("bad binding"), "author_binding": "bad"})
+        + "\n"
+        + json.dumps({
+            **entry("bad fingerprint"),
+            "author_binding": {"kind": "static", "credential_sha256": "tiny"},
+        })
+        + "\n"
         + json.dumps(entry("valid"))
         + "\n"
     )
@@ -403,7 +418,7 @@ def test_valid_but_malformed_entries_are_removed_without_blocking_followers():
 
     assert delivered == ["valid"], delivered
     assert queue_entries(path) == []
-    assert sum(reason == "invalid entry" for _category, reason in health) == 2
+    assert sum(reason == "invalid entry" for _category, reason in health) == 4
 
 
 def test_enqueue_repairs_existing_queue_permissions():
@@ -462,6 +477,142 @@ def test_worker_falls_back_from_rejected_courier_to_human_login():
     rp._deliver_primary(entry("auth fallback"), 0.5)
 
     assert attempts == ["courier", "human"], attempts
+
+
+def test_new_static_posts_cannot_change_author_during_durable_delivery():
+    reset_room_post()
+    path = isolated_queue()
+    rp._trusted_servers = lambda: {rp.PRODUCTION_SERVER}
+    previous = os.environ.get("TEAM_ROOM_TOKEN")
+    try:
+        os.environ["TEAM_ROOM_TOKEN"] = "token-owner-a"
+        assert rp.post("bound author") is True
+        queued = queue_entries(path)
+        assert len(queued) == 1, queued
+        binding = queued[0].get("author_binding")
+        assert binding == {
+            "kind": "static",
+            "credential_sha256": hashlib.sha256(
+                b"token-owner-a"
+            ).hexdigest(),
+        }, binding
+        assert "token-owner-a" not in Path(path).read_text()
+
+        # A later shell may carry a different named token. The durable entry
+        # must wait for its original credential instead of silently changing
+        # the platform author.
+        os.environ["TEAM_ROOM_TOKEN"] = "token-owner-b"
+        delivered = []
+        rp._post_once = lambda *_args, **_kwargs: delivered.append(True)
+        try:
+            rp._deliver_primary(queued[0], 0.5)
+        except RuntimeError as exc:
+            assert "credential changed" in str(exc), exc
+        else:
+            raise AssertionError("a different token delivered the queued post")
+        assert delivered == []
+    finally:
+        if previous is None:
+            os.environ.pop("TEAM_ROOM_TOKEN", None)
+        else:
+            os.environ["TEAM_ROOM_TOKEN"] = previous
+
+
+def test_new_browser_posts_cannot_change_author_after_relogin():
+    reset_room_post()
+    path = isolated_queue()
+    rp._trusted_servers = lambda: {rp.PRODUCTION_SERVER}
+    temp = tempfile.mkdtemp()
+    rp.ROOM_CREDS_PATH = os.path.join(temp, "credentials.json")
+    Path(rp.ROOM_CREDS_PATH).write_text(json.dumps({
+        "server": rp.PRODUCTION_SERVER,
+        "orgSessions": {"app": {
+            "accessToken": "browser-a",
+            "refreshToken": "refresh-a",
+            "expiresAt": int((time.time() + 3600) * 1000),
+            "appId": "app",
+            "userId": "user-a",
+        }},
+    }))
+    previous = os.environ.pop("TEAM_ROOM_TOKEN", None)
+    try:
+        assert rp.post("browser-bound author") is True
+        queued = queue_entries(path)
+        assert queued[0].get("author_binding") == {
+            "kind": "browser",
+            "user_id": "user-a",
+        }, queued
+        rp.login_session = lambda timeout=None: (
+            {},
+            "app",
+            rp.ROOM_CREDS_PATH,
+            {
+                "accessToken": "browser-b",
+                "appId": "app",
+                "userId": "user-b",
+            },
+        )
+        delivered = []
+        rp._post_once = lambda *_args, **_kwargs: delivered.append(True)
+        try:
+            rp._deliver_primary(queued[0], 0.5)
+        except RuntimeError as exc:
+            assert "credential changed" in str(exc), exc
+        else:
+            raise AssertionError("a different login delivered the queued post")
+        assert delivered == []
+    finally:
+        if previous is not None:
+            os.environ["TEAM_ROOM_TOKEN"] = previous
+
+
+def test_browser_delivery_replaces_git_author_metadata_with_platform_profile():
+    reset_room_post()
+    session = {
+        "accessToken": "browser-token",
+        "appId": "app",
+        "userId": "user-platform",
+    }
+    rp.http_get = lambda *_args, **_kwargs: {
+        "id": "user-platform",
+        "app_id": "app",
+        "name": "Platform Person",
+    }
+
+    metadata = rp._platform_author_metadata(
+        session,
+        {"post_type": "done", "human": "Wrong Git Name"},
+        timeout=0.5,
+    )
+
+    assert metadata["human"] == "Platform Person", metadata
+    assert metadata["author_user_id"] == "user-platform", metadata
+    assert session["principalName"] == "Platform Person", session
+
+
+def test_browser_delivery_rejects_a_profile_that_disagrees_with_the_session():
+    reset_room_post()
+    session = {
+        "accessToken": "browser-token",
+        "appId": "app",
+        "userId": "stored-user",
+    }
+    rp.http_get = lambda *_args, **_kwargs: {
+        "id": "token-owner",
+        "app_id": "app",
+        "name": "Token Owner",
+    }
+
+    try:
+        rp._platform_author_metadata(
+            session,
+            {"post_type": "done", "human": "Stored User"},
+            timeout=0.5,
+        )
+    except RuntimeError as exc:
+        assert "does not match" in str(exc), exc
+    else:
+        raise AssertionError("a mismatched token and stored user were accepted")
 
 
 def test_primary_outboxes_and_credentials_are_bound_to_one_room():
@@ -649,6 +800,10 @@ if __name__ == "__main__":
     test_enqueue_repairs_existing_queue_permissions()
     test_failed_enqueue_does_not_advance_exhaust_or_mirror()
     test_worker_falls_back_from_rejected_courier_to_human_login()
+    test_new_static_posts_cannot_change_author_during_durable_delivery()
+    test_new_browser_posts_cannot_change_author_after_relogin()
+    test_browser_delivery_replaces_git_author_metadata_with_platform_profile()
+    test_browser_delivery_rejects_a_profile_that_disagrees_with_the_session()
     test_primary_outboxes_and_credentials_are_bound_to_one_room()
     test_invalid_worker_budget_environment_cannot_break_the_cli()
     test_permanently_invalid_payload_cannot_block_later_room_posts()
@@ -667,6 +822,7 @@ if __name__ == "__main__":
     print("PASS  primary queue permissions self-heal")
     print("PASS  failed enqueue preserves exhaust and mirror state")
     print("PASS  primary worker falls back to human login")
+    print("PASS  new primary entries cannot change authors across retries")
     print("PASS  primary outboxes and credentials are room-bound")
     print("PASS  invalid worker budgets fall back safely")
     print("PASS  permanently invalid payloads cannot block later posts")

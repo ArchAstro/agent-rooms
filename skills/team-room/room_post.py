@@ -54,6 +54,7 @@ cannot race the rotating refresh token.
 import base64
 import contextlib
 import hashlib
+import hmac
 import io
 import json
 import math
@@ -718,7 +719,7 @@ def _guard_config_origin(kind: str, value: str, trusted: set):
 # TEAM_ROOM_TRUST_SERVER exists for test harnesses pointing at fakes; setting
 # it in a real environment removes every configured-origin exfiltration guard.
 _guard_config_origin("server", PRODUCTION_SERVER, _trusted_servers())
-KIT_VERSION = "2026.08.03"
+KIT_VERSION = "2026.08.07"
 CLIENT_SOURCE = "rooms-skill"
 ROOM_APP_NAME = "ArchAgents"
 
@@ -766,14 +767,6 @@ _guard_config_origin("portal", PORTAL_URL, _trusted_portals())
 ROOM_CREDS_PATH = os.path.expanduser("~/.config/team-room/credentials.json")
 ROOM_TOKEN_PATH = os.path.expanduser("~/.config/team-room/token")
 ROOM_LOCK_PATH = os.path.expanduser("~/.config/team-room/.lock")
-_IDENTITY_SCOPE = hashlib.sha256(
-    f"{PRODUCTION_SERVER}\0{THREAD_ID}".encode()
-).hexdigest()[:24]
-IDENTITY_CACHE_PATH = os.path.expanduser(
-    f"~/.config/team-room/identities/{_IDENTITY_SCOPE}.json"
-)
-
-
 # Mirrors: optional extra rooms (other deployment tiers) that receive a
 # best-effort COPY of every post. The prod room is the room; a mirror
 # being down, unauthenticated, or missing never affects a post. Each
@@ -981,11 +974,6 @@ def worktree_short() -> str:
     elif not repo_base or wt == repo_base:
         short = "main"
     return short
-
-
-def identity_tag() -> str:
-    short = worktree_short()
-    return f"{human_name()} ({short})" if short else human_name()
 
 
 def linkable_rev(path: str) -> str:
@@ -1587,7 +1575,7 @@ def build_message(post_type, headline, bullets, refs) -> str:
     remote = git("remote", "get-url", "origin")
     remote = remote.replace("git@github.com:", "https://github.com/")
     remote = remote[:-4] if remote.endswith(".git") else remote
-    msg = f"{PREFIXES[post_type]} {identity_tag()}: {framed_headline(post_type, headline)}"
+    msg = f"{PREFIXES[post_type]} {framed_headline(post_type, headline)}"
     for b in bullets:
         msg += f"\n- {b}"
     if refs:
@@ -1625,27 +1613,17 @@ def authed_session(timeout: float = 30):
     tok = static_token()
     if tok:
         deadline = time.monotonic() + timeout
-        uid = resolve_sender_for_token(
-            tok, timeout=max(0.01, deadline - time.monotonic())
+        uid, app_id, principal_name = resolve_token_principal(
+            tok,
+            timeout=max(0.01, deadline - time.monotonic()),
         )
-        try:
-            cached = json.load(open(IDENTITY_CACHE_PATH))
-            app_id = (
-                cached.get("app_id")
-                if cached.get("server") == PRODUCTION_SERVER
-                and cached.get("thread_id") == THREAD_ID
-                else None
-            )
-        except Exception:
-            app_id = None
-        if not app_id:
-            me = http_get(
-                f"{PRODUCTION_SERVER}/api/v1/users/me",
-                tok,
-                timeout=max(0.01, deadline - time.monotonic()),
-            )
-            app_id = me.get("app_id") or me.get("app")
-        session = {"accessToken": tok, "appId": app_id, "userId": uid, "static": True}
+        session = {
+            "accessToken": tok,
+            "appId": app_id,
+            "userId": uid,
+            "principalName": principal_name,
+            "static": True,
+        }
         return None, None, None, session
     creds, key, creds_path = load_session()
     session = creds["orgSessions"][key]
@@ -1720,59 +1698,30 @@ def static_token():
     return tok or None
 
 
-def resolve_sender_for_token(token: str, timeout: float = 8) -> str:
-    """With a courier token, posts are attributed to the human resolved by
-    matching git email against the room's members; falls back to whoever
-    the token itself is (the courier), which the membership rule allows."""
-    deadline = time.monotonic() + timeout
-    email = git(
-        "config",
-        "user.email",
-        timeout=max(0.01, min(1.0, deadline - time.monotonic())),
-    ).lower()
+def resolve_token_principal(
+    token: str, timeout: float = 8
+) -> tuple[str, str, str]:
+    """Resolve a static token only to its own platform principal and app."""
     try:
-        cached = json.load(open(IDENTITY_CACHE_PATH))
-        if (
-            cached.get("email") == email
-            and cached.get("server") == PRODUCTION_SERVER
-            and cached.get("thread_id") == THREAD_ID
-        ):
-            return cached["user_id"]
+        me = http_get(
+            f"{PRODUCTION_SERVER}/api/v1/users/me",
+            token,
+            timeout=timeout,
+        )
     except Exception:
-        pass
-    me = None
-    url = f"{PRODUCTION_SERVER}/api/v1/users/me"
-    try:
-        me = http_get(url, token, timeout=max(0.01, deadline - time.monotonic()))
-    except Exception:
-        pass
-    # Match a human room member by email via the thread's member list.
-    app_id = (me or {}).get("app_id") or (me or {}).get("app")
-    if app_id and email:
-        try:
-            t = http_get(
-                f"{PRODUCTION_SERVER}/protected/api/v1/developer/apps/"
-                f"{app_id}/threads/{THREAD_ID}", token,
-                timeout=max(0.01, deadline - time.monotonic()))
-            for m in t.get("members") or []:
-                u = m.get("user") or {}
-                if (u.get("email") or "").lower() == email and u.get("id"):
-                    ident = {
-                        "email": email,
-                        "user_id": u["id"],
-                        "app_id": app_id,
-                        "server": PRODUCTION_SERVER,
-                        "thread_id": THREAD_ID,
-                    }
-                    os.makedirs(os.path.dirname(IDENTITY_CACHE_PATH), exist_ok=True)
-                    json.dump(ident, open(IDENTITY_CACHE_PATH, "w"))
-                    return u["id"]
-        except Exception:
-            pass
+        me = None
     uid = (me or {}).get("id") or (me or {}).get("user_id")
-    if uid:
-        return uid
-    die("could not resolve an identity for the token; run `room-post login` instead", 3)
+    app_id = (me or {}).get("app_id") or (me or {}).get("app")
+    name = (
+        (me or {}).get("full_name")
+        or (me or {}).get("name")
+        or (me or {}).get("alias")
+        or (me or {}).get("email")
+        or uid
+    )
+    if uid and app_id:
+        return uid, app_id, name
+    die("could not resolve the token owner; run `room-post login` instead", 3)
 
 
 def load_session():
@@ -3036,7 +2985,7 @@ def _post_once(
 
 
 def post(message: str, metadata: dict | None = None, uploads: list | None = None):
-    return _primary_enqueue({
+    entry = {
         "at": time.time(),
         "key": f"room-post:{os.urandom(16).hex()}",
         "server": PRODUCTION_SERVER,
@@ -3044,7 +2993,37 @@ def post(message: str, metadata: dict | None = None, uploads: list | None = None
         "message": message,
         "metadata": metadata or None,
         "uploads": uploads or None,
-    })
+    }
+    binding = _enqueue_author_binding()
+    if binding:
+        entry["author_binding"] = binding
+    return _primary_enqueue(entry)
+
+
+def _enqueue_author_binding() -> dict | None:
+    """Bind a durable post to the credential selected when it was queued.
+
+    Static tokens are represented only by a one-way fingerprint; browser
+    sessions carry the already-local platform user ID. No network call is
+    added to the foreground post path.
+    """
+    token = static_token()
+    if token:
+        return {
+            "kind": "static",
+            "credential_sha256": hashlib.sha256(token.encode()).hexdigest(),
+        }
+    try:
+        creds = json.load(open(ROOM_CREDS_PATH))
+        if creds.get("server") != PRODUCTION_SERVER:
+            return None
+        key = next(iter(creds["orgSessions"]))
+        user_id = creds["orgSessions"][key].get("userId")
+        if user_id:
+            return {"kind": "browser", "user_id": user_id}
+    except Exception:
+        pass
+    return None
 
 
 def _fsync_parent(path: str):
@@ -3167,9 +3146,39 @@ def _deliver_primary(entry: dict, remaining: float):
     if not os.environ.get("TEAM_ROOM_TRUST_SERVER") and server not in _trusted_servers():
         raise ValueError("untrusted primary target server")
     deadline = time.monotonic() + remaining
-    creds, key, creds_path, session = authed_session(
-        timeout=max(0.01, min(PRIMARY_FLUSH_REQUEST_TIMEOUT, deadline - time.monotonic()))
+    auth_timeout = max(
+        0.01,
+        min(PRIMARY_FLUSH_REQUEST_TIMEOUT, deadline - time.monotonic()),
     )
+    binding = entry.get("author_binding")
+    legacy_unbound = not binding
+    if binding and binding.get("kind") == "static":
+        token = static_token()
+        expected = binding.get("credential_sha256") or ""
+        actual = hashlib.sha256((token or "").encode()).hexdigest()
+        if not token or not hmac.compare_digest(expected, actual):
+            raise RuntimeError("queued post credential changed; preserving its author")
+        user_id, app_id, principal_name = resolve_token_principal(
+            token, timeout=auth_timeout
+        )
+        creds, key, creds_path = None, None, None
+        session = {
+            "accessToken": token,
+            "appId": app_id,
+            "userId": user_id,
+            "principalName": principal_name,
+            "static": True,
+        }
+    elif binding and binding.get("kind") == "browser":
+        resolved = login_session(timeout=auth_timeout)
+        if not resolved or resolved[3].get("userId") != binding.get("user_id"):
+            raise RuntimeError("queued post credential changed; preserving its author")
+        creds, key, creds_path, session = resolved
+    elif binding:
+        raise ValueError("invalid queued author binding")
+    else:
+        # Compatibility for entries queued by older kit versions.
+        creds, key, creds_path, session = authed_session(timeout=auth_timeout)
     courier_fallback_attempted = False
     refresh_attempted = False
     while True:
@@ -3178,10 +3187,22 @@ def _deliver_primary(entry: dict, remaining: float):
             min(PRIMARY_FLUSH_REQUEST_TIMEOUT, deadline - time.monotonic()),
         )
         try:
+            post_metadata = _platform_author_metadata(
+                session,
+                entry.get("metadata"),
+                timeout=request_timeout,
+            )
+            remaining_after_profile = deadline - time.monotonic()
+            if remaining_after_profile <= 0:
+                raise TimeoutError("primary delivery budget exhausted by profile lookup")
+            request_timeout = min(
+                PRIMARY_FLUSH_REQUEST_TIMEOUT,
+                remaining_after_profile,
+            )
             return _post_once(
                 session,
                 entry["message"],
-                entry.get("metadata"),
+                post_metadata,
                 entry.get("uploads"),
                 timeout=request_timeout,
                 idempotency_key=entry["key"],
@@ -3192,6 +3213,7 @@ def _deliver_primary(entry: dict, remaining: float):
             if (
                 session.get("static")
                 and exc.code in (401, 403, 404)
+                and legacy_unbound
                 and not courier_fallback_attempted
             ):
                 courier_fallback_attempted = True
@@ -3211,6 +3233,46 @@ def _deliver_primary(entry: dict, remaining: float):
                 )
                 continue
             raise
+
+
+def _platform_author_metadata(
+    session: dict, metadata: dict | None, *, timeout: float
+) -> dict:
+    """Replace local author hints with the authenticated platform principal.
+
+    Profile enrichment is best-effort for browser sessions: sender ID is
+    always canonical, and a profile outage removes the Git-derived name rather
+    than blocking delivery or publishing a conflicting author.
+    """
+    enriched = dict(metadata or {})
+    user_id = session["userId"]
+    name = session.get("principalName")
+    if not name:
+        try:
+            me = http_get(
+                f"{PRODUCTION_SERVER}/api/v1/users/me",
+                session["accessToken"],
+                timeout=timeout,
+            )
+        except Exception:
+            me = None
+        if me is not None:
+            resolved_id = me.get("id") or me.get("user_id")
+            if resolved_id != user_id:
+                raise RuntimeError("platform profile does not match post author")
+            name = (
+                me.get("full_name")
+                or me.get("name")
+                or me.get("alias")
+                or me.get("email")
+            )
+            if name:
+                session["principalName"] = name
+    enriched.pop("human", None)
+    enriched["author_user_id"] = user_id
+    if name:
+        enriched["human"] = name
+    return enriched
 
 
 def primary_flush():
@@ -3257,6 +3319,29 @@ def primary_flush():
         lock.close()
 
 
+def _valid_author_binding(binding) -> bool:
+    if binding is None:
+        return True  # compatibility with entries from older kit versions
+    if not isinstance(binding, dict):
+        return False
+    if binding.get("kind") == "static":
+        digest = binding.get("credential_sha256")
+        return (
+            set(binding) == {"kind", "credential_sha256"}
+            and isinstance(digest, str)
+            and len(digest) == 64
+            and all(char in "0123456789abcdef" for char in digest)
+        )
+    if binding.get("kind") == "browser":
+        user_id = binding.get("user_id")
+        return (
+            set(binding) == {"kind", "user_id"}
+            and isinstance(user_id, str)
+            and bool(user_id)
+        )
+    return False
+
+
 def _primary_drain_pass(deadline: float) -> bool:
     progressed = False
     for line in _primary_queue_read():
@@ -3276,6 +3361,7 @@ def _primary_drain_pass(deadline: float) -> bool:
             or not isinstance(entry.get("at"), (int, float))
             or any(not isinstance(entry.get(field), str) or not entry.get(field)
                    for field in required[1:])
+            or not _valid_author_binding(entry.get("author_binding"))
         ):
             health_event("primary-outbox", "invalid entry")
             _primary_queue_rewrite(line, None)
@@ -4136,7 +4222,7 @@ def _trajectory_line(summary: dict) -> str:
                      f"across {diff.get('files', 0)} files")
     tail = ", ".join(parts) if parts else "summary attached"
     subject = f"PR #{pr}" if pr else "this change"
-    return (f"✓ {identity_tag()}: published how {subject} was built: {tail}.")
+    return f"✓ published how {subject} was built: {tail}."
 
 
 def publish_pr(argv):
