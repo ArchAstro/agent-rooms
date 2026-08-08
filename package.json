@@ -1,6 +1,6 @@
 {
   "name": "@archastro/agent-rooms",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Dependency-free Agent Rooms client and harness contract, with optional local PR-evidence adapters.",
   "bin": {
     "agent-rooms": "bin/install.mjs"

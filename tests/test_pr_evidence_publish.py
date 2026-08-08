@@ -394,6 +394,7 @@ def test_two_agent_sessions_publish_one_current_artifact_over_tcp_without_github
         assert all(word in message for word in (
             "prompt", "trajectory", "change evidence", "current complete version"
         )), message
+        assert ContractServer.messages[0]["type"] == "exhaust"
 
         before = len(ContractServer.writes)
         warm = run_publish(repo, home, endpoint, base, second, "session-two")

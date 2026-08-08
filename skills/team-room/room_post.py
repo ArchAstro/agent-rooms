@@ -721,7 +721,7 @@ def _guard_config_origin(kind: str, value: str, trusted: set):
 # TEAM_ROOM_TRUST_SERVER exists for test harnesses pointing at fakes; setting
 # it in a real environment removes every configured-origin exfiltration guard.
 _guard_config_origin("server", PRODUCTION_SERVER, _trusted_servers())
-KIT_VERSION = "2026.08.07"
+KIT_VERSION = "2026.08.07.1"
 CLIENT_SOURCE = "rooms-skill"
 ROOM_APP_NAME = "ArchAgents"
 
@@ -750,6 +750,20 @@ PREFIXES = {
     "approve": "?",
     "accept": "▶",
 }
+
+# Participate routines should wake for conversation, not for the continuous
+# machine exhaust that gives the room memory. The platform matches this
+# first-class message field before spending a model call.
+CONVERSATIONAL_POST_TYPES = {"handoff", "question", "notify", "approve"}
+
+
+def message_type_for(metadata: dict | None) -> str | None:
+    if not isinstance(metadata, dict):
+        return None
+    post_type = metadata.get("post_type")
+    if not post_type or post_type in CONVERSATIONAL_POST_TYPES:
+        return None
+    return "exhaust"
 
 # Verbs that require a @name addressee on the FIRST LINE of the headline.
 ADDRESSED_TYPES = {"notify", "approve"}
@@ -2986,6 +3000,9 @@ def _post_once(
         body["idempotency_key"] = idempotency_key
     if metadata:
         body["metadata"] = metadata
+    message_type = message_type_for(metadata)
+    if message_type:
+        body["type"] = message_type
     if uploads:
         body["uploads"] = uploads
     return http_json(url, body, token=session["accessToken"], timeout=timeout)
@@ -3597,6 +3614,9 @@ def _deliver_to_target(target: dict, entry: dict, sessions: dict, remaining: flo
     }
     if entry.get("metadata"):
         body["metadata"] = entry["metadata"]
+    message_type = message_type_for(entry.get("metadata"))
+    if message_type:
+        body["type"] = message_type
     if entry.get("uploads"):
         body["uploads"] = entry["uploads"]
     http_json(
@@ -4531,7 +4551,18 @@ def main():
         try:
             metadata = build_metadata(post_type, refs, addressee, answers)
         except Exception:
-            metadata = None  # exhaust enrichment must never block a post
+            # Derived exhaust may fail, but these protocol fields are the
+            # message's meaning. Keeping them also preserves the first-class
+            # exhaust/conversation boundary used by participate routines.
+            metadata = {
+                key: value
+                for key, value in {
+                    "post_type": post_type,
+                    "addressee": addressee,
+                    "answers": answers,
+                }.items()
+                if value
+            }
     if dry:
         print(message)
         if uploads:
