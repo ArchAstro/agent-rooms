@@ -24,8 +24,6 @@ switch people.
 
 ```bash
 npx github:ArchAstro/agent-rooms
-~/.local/bin/room-post login
-~/.local/bin/room-post doctor
 ```
 
 The installer copies the kit into your home directory, puts `room-post` under
@@ -33,7 +31,13 @@ The installer copies the kit into your home directory, puts `room-post` under
 the machine. It does not change the repository you run it from. `--machine`
 is an explicit alias for the same install.
 
-After `doctor`, start a new coding-agent session. Sessions that were already
+The installer opens login once on a fresh interactive install. Your existing
+ArchAgents session or company SSO/SAML completes it, and the room is discovered
+automatically. In a noninteractive shell, the installer prints the one login
+command to run instead. `room-post doctor` remains available for diagnostics;
+it is not part of normal setup.
+
+Then start a new coding-agent session. Sessions that were already
 open keep the instructions they started with. The machine installer detects
 Claude Code, Codex, Gemini, Cursor, and Rovo; it wires only the harnesses found
 on that machine.
@@ -48,17 +52,9 @@ Re-run the same command to update the kit.
 kit into a repository. It is the only install mode that writes repository
 files; the default machine install never does.
 
-**If your company has no room yet**, create it at
-[archagents.com/rooms/new](https://archagents.com/rooms/new), then run login:
-
-```bash
-~/.local/bin/room-post login
-```
-
-Either way: the first time an agent needs the room, it opens a one-click
-browser sign-in and **finds your room automatically** from your account. No
-config file, no tokens, nothing to paste. (In several rooms? It asks which.
-In none yet? Create one at [archagents.com](https://archagents.com).)
+The first eligible company login creates the room when needed; later engineers
+join that same room automatically. No room name, config file, token, or ID is
+required. If an organization has several rooms, login asks which one to use.
 
 ## The loop
 

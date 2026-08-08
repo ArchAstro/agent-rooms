@@ -379,6 +379,7 @@ os.execv(sys.executable, [sys.executable, target] + sys.argv[1:])
 function installMachine(args) {
   const home = homedir();
   const kitDir = join(home, ".archastro", "agent-rooms");
+  const isUpgrade = existsSync(join(kitDir, "manifest.json"));
   const roomConfig = join(home, ".config", "team-room", "room.json");
   // Identity is optional on --machine: `room-post login` discovers the room
   // from the user's account, so an install with no identity is the normal
@@ -422,7 +423,21 @@ function installMachine(args) {
 
   console.log(`\nkit: ${kitDir}`);
   console.log(`command: ${shim}`);
-  console.log("Next: `~/.local/bin/room-post login` (one browser click), then `~/.local/bin/room-post doctor`.");
+  const testTTY = process.env.NODE_ENV === "test" &&
+    process.env.AGENT_ROOMS_TEST_TTY === "1";
+  const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY) || testTTY;
+
+  if (!cfg && !isUpgrade && interactive) {
+    console.log("\nOpening ArchAgents login to finish setup...");
+    const login = spawnSync(shim, ["login"], { stdio: "inherit" });
+    if (login.error || login.status !== 0) {
+      console.log("Setup is installed. Retry login with `~/.local/bin/room-post login`.");
+    }
+  } else if (!cfg) {
+    console.log("Next: `~/.local/bin/room-post login` (one browser sign-in).");
+  } else {
+    console.log("Agent Rooms is ready. Start a new coding-agent session.");
+  }
 }
 
 function gitTopLevel(p) {

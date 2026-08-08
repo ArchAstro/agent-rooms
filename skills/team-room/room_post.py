@@ -2779,8 +2779,8 @@ def discover_and_configure(token: str, chosen_team: str | None = None):
             return False
     if not rooms:
         print(
-            "your company doesn't have a team room yet. Create or join one "
-            "at https://archagents.com/rooms/new."
+            "your company room is not available yet. Server-side setup may "
+            "still be finishing; retry `room-post login` in a moment."
         )
         return None
     if len(rooms) == 1:
@@ -3880,8 +3880,7 @@ def login(mirror: dict | None = None, best_effort: bool = False,
                 "`room-post discover`."
             )
         if room_status is None:
-            print("Sign-in succeeded. Run `room-post login` again after the "
-                  "Room exists.")
+            print("Sign-in succeeded. Run `room-post login` again in a moment.")
             return
     if not mirror:
         print("Team Room connected. Posting now works from this machine.")

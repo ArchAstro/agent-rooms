@@ -5,6 +5,7 @@
 # markers it would have corrupted, identity it must not invent.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+NODE_BIN="$(command -v node)"
 S="$(mktemp -d)"
 trap 'rm -rf "$S"' EXIT
 export GIT_CONFIG_GLOBAL="$S/test-global-gitconfig"
@@ -53,6 +54,27 @@ help_output="$(HOME="$S/h0-help" node "$ROOT/bin/install.mjs" --help)"
 [ ! -e "$S/h0-help/.archastro/agent-rooms" ] || fail "--help performed an installation"
 [[ "$help_output" == *"(no flags)"* ]] || fail "--help omits the default install"
 echo "PASS default machine install"
+
+# Case 0b: a genuinely fresh interactive install completes onboarding by
+# launching login itself. Upgrades do not reopen the browser. NODE_ENV=test
+# enables the TTY seam so this remains hermetic in CI; the fake python records
+# the installed shim invocation and never touches the network.
+mkdir -p "$S/h0-interactive" "$S/fake-bin"
+cat >"$S/fake-bin/python3" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >>"$AGENT_ROOMS_LOGIN_RECORD"
+exit 0
+SH
+chmod +x "$S/fake-bin/python3"
+export AGENT_ROOMS_LOGIN_RECORD="$S/login-record"
+NODE_ENV=test AGENT_ROOMS_TEST_TTY=1 HOME="$S/h0-interactive" PATH="$S/fake-bin:/usr/bin:/bin" \
+  "$NODE_BIN" "$ROOT/bin/install.mjs" >/dev/null
+grep -q 'room_post.py login' "$S/login-record" || fail "fresh interactive install did not launch login"
+rm "$S/login-record"
+NODE_ENV=test AGENT_ROOMS_TEST_TTY=1 HOME="$S/h0-interactive" PATH="$S/fake-bin:/usr/bin:/bin" \
+  "$NODE_BIN" "$ROOT/bin/install.mjs" >/dev/null
+[ ! -e "$S/login-record" ] || fail "upgrade reopened login"
+echo "PASS interactive onboarding"
 
 # Case 1: fossil install with legacy identity migrates and forwards.
 mkdir -p "$S/h1/.archastro/team-room" "$S/h1/.local/bin" "$S/h1/.claude"
