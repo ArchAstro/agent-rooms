@@ -113,7 +113,12 @@ class ArtifactClient:
             timeout=1,
         )
     def create_message(self, content: str, idempotency_key: str, attachments: list[dict[str, str]] | None = None):
-        body: dict[str, Any] = {"content": content, "user": self.user_id, "idempotency_key": idempotency_key}
+        body: dict[str, Any] = {
+            "content": content,
+            "user": self.user_id,
+            "idempotency_key": idempotency_key,
+            "type": "exhaust",
+        }
         if attachments: body["attachments"] = attachments
         return self._call(
             "POST",
