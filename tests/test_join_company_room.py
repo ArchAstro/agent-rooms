@@ -582,7 +582,7 @@ def load_kit_module(home, room_json_path=None):
             os.environ["TEAM_ROOM_TRUST_SERVER"] = old_trust
 
 
-def run_browser_login(module):
+def run_browser_login(module, capture=None):
     import webbrowser
 
     old_open = webbrowser.open
@@ -592,7 +592,9 @@ def run_browser_login(module):
         opened.append(url)
         def visit():
             with urllib.request.urlopen(url, timeout=5) as response:
-                response.read()
+                body = response.read().decode()
+                if capture is not None:
+                    capture.update(body=body, headers=dict(response.headers))
         threading.Thread(target=visit, daemon=True).start()
         return True
 
@@ -603,6 +605,23 @@ def run_browser_login(module):
         webbrowser.open = old_open
     assert len(opened) == 1, opened
     return opened[0]
+
+
+def test_browser_login_scrubs_credentials_from_the_success_page():
+    # A fresh machine reaches the same login path used by the real installer.
+    reset()
+    home = tempfile.mkdtemp()
+    module = load_kit_module(home)
+    capture = {}
+
+    # Cross the browser redirect and real loopback HTTP callback boundaries.
+    run_browser_login(module, capture)
+
+    # The rendered page must hide credentials before loading visible content
+    # and must keep the callback response out of caches and referrers.
+    assert 'history.replaceState(null, "", location.pathname)' in capture["body"]
+    assert capture["headers"]["Cache-Control"] == "no-store"
+    assert capture["headers"]["Referrer-Policy"] == "no-referrer"
 
 
 def test_browser_login_ends_with_a_usable_company_room():
@@ -886,6 +905,7 @@ def main():
         test_identity_outage_is_not_reported_as_no_company_room()
         test_corrupt_human_credentials_do_not_fall_back_to_a_courier()
         test_untrusted_discovery_server_never_receives_the_token()
+        test_browser_login_scrubs_credentials_from_the_success_page()
         test_browser_login_ends_with_a_usable_company_room()
         test_first_post_preserves_its_courier_author_when_delivery_is_rejected()
         test_first_post_ignores_a_stale_courier_token_file_after_human_login()

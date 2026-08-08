@@ -3729,6 +3729,7 @@ def login_page_html(ok: bool) -> str:
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>{title} · ArchAgents</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<script>history.replaceState(null, "", location.pathname)</script>
 <style>
   body {{ margin: 0; background: #faf9f6; color: #1c1917;
     font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -3802,6 +3803,8 @@ def login(mirror: dict | None = None, best_effort: bool = False,
                 result.update(flat)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
             self.end_headers()
             self.wfile.write(login_page_html(ok).encode())
             if result:
