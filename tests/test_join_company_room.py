@@ -800,10 +800,10 @@ def test_browser_login_fails_when_room_connection_is_incomplete():
     print("PASS  browser login fails when Room discovery itself fails")
 
 
-def test_first_login_succeeds_before_room_creation_then_second_login_joins_it():
-    # Authentication and Room membership are separate facts. A new customer
-    # can sign in before their Room exists without making a successful browser
-    # login look broken or inventing local Room identity.
+def test_first_login_without_a_room_gives_one_safe_retry_command():
+    # The server normally creates the company room before handing credentials
+    # back. If that asynchronous setup has not become discoverable yet, the
+    # client must not send the engineer to a manual room-creation flow.
     reset([])
     home = tempfile.mkdtemp()
     module = load_kit_module(home)
@@ -816,7 +816,8 @@ def test_first_login_succeeds_before_room_creation_then_second_login_joins_it():
     assert os.path.exists(credentials)
     assert room_json(home) is None
     assert "sign-in succeeded" in output.getvalue().lower(), output.getvalue()
-    assert "https://archagents.com/rooms/new" in output.getvalue(), output.getvalue()
+    assert "room-post login" in output.getvalue(), output.getvalue()
+    assert "rooms/new" not in output.getvalue(), output.getvalue()
 
     # Once the company Room exists, the same simple login command discovers,
     # joins, and persists it. This crosses the real browser callback and TCP
@@ -828,7 +829,7 @@ def test_first_login_succeeds_before_room_creation_then_second_login_joins_it():
     cfg = room_json(home)
     assert cfg and cfg["team_id"] == "tem_real", (cfg, CALLS)
     assert ("POST", "/api/v1/teams/tem_real/join") in CALLS, CALLS
-    print("PASS  login succeeds before Room creation and joins it afterwards")
+    print("PASS  login retries safely while server-side Room creation finishes")
 
 
 def test_browser_login_replaces_a_stale_foreign_machine_room():
@@ -892,7 +893,7 @@ def main():
         test_bound_courier_never_falls_back_to_a_different_principal()
         test_repo_controlled_app_slug_cannot_inject_a_second_callback()
         test_browser_login_fails_when_room_connection_is_incomplete()
-        test_first_login_succeeds_before_room_creation_then_second_login_joins_it()
+        test_first_login_without_a_room_gives_one_safe_retry_command()
         test_browser_login_replaces_a_stale_foreign_machine_room()
         test_browser_login_joins_an_org_valid_pinned_room()
     print("\nall join tests passed")
