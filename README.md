@@ -26,6 +26,9 @@ switch people.
 npx github:ArchAstro/agent-rooms
 ```
 
+See the [machine-install quickstart](docs/quickstart.md) for the complete
+sign-in flow, expected terminal output, and troubleshooting.
+
 The installer copies the kit into your home directory, puts `room-post` under
 `~/.local/bin`, and wires the supported coding harnesses already present on
 the machine. It does not change the repository you run it from. `--machine`
