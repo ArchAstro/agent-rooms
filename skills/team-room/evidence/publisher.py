@@ -42,6 +42,8 @@ class PublishResult:
     artifact_id: str | None = None
     version: int | None = None
     stats: Mapping[str, int] | None = None
+    content: Mapping[str, Any] | None = None
+    summary_error: str | None = None
 
 
 class ArtifactClient:
@@ -112,7 +114,7 @@ class ArtifactClient:
             + urllib.parse.quote(message_id, safe=""),
             timeout=1,
         )
-    def create_message(self, content: str, idempotency_key: str, attachments: list[dict[str, str]] | None = None):
+    def create_message(self, content: str, idempotency_key: str, attachments: list[dict[str, str]] | None = None, metadata: Mapping[str, Any] | None = None):
         body: dict[str, Any] = {
             "content": content,
             "user": self.user_id,
@@ -120,16 +122,29 @@ class ArtifactClient:
             "type": "exhaust",
         }
         if attachments: body["attachments"] = attachments
+        if metadata: body["metadata"] = dict(metadata)
         return self._call(
             "POST",
             self.app_base + "/threads/" + urllib.parse.quote(self.thread_id, safe="") + "/messages",
             body,
             timeout=2,
         )
+    def update_message(self, message_id: str, content: str, metadata: Mapping[str, Any], message_type: str = "exhaust"):
+        return self._call(
+            "PUT",
+            self.app_base
+            + "/threads/"
+            + urllib.parse.quote(self.thread_id, safe="")
+            + "/messages/"
+            + urllib.parse.quote(message_id, safe=""),
+            {"content": content, "metadata": dict(metadata), "type": message_type},
+            timeout=2,
+        )
 class Publisher:
-    def __init__(self, client: Any, state_path: Path, policy: Policy, ancestor: Callable[[str, str], bool] | None = None):
+    def __init__(self, client: Any, state_path: Path, policy: Policy, ancestor: Callable[[str, str], bool] | None = None, summary_factory: Callable[[Mapping[str, Any], str], Mapping[str, Any]] | None = None):
         self.client, self.state_path, self.policy = client, state_path, policy
         self.ancestor = ancestor or (lambda _old, _new: False)
+        self.summary_factory = summary_factory
         self.team_id, self.thread_id = getattr(client, "team_id", None), getattr(client, "thread_id", None)
 
     def _remote(self, artifact: Mapping[str, Any], name: str, subject: str) -> dict[str, Any]:
@@ -176,7 +191,7 @@ class Publisher:
         except (OSError, UnicodeError, ValueError):
             return None
 
-    def _save_state(self, request: PublishRequest, artifact: Mapping[str, Any], content: Mapping[str, Any], pending: str | None = None, message_id: str | None = None):
+    def _save_state(self, request: PublishRequest, artifact: Mapping[str, Any], content: Mapping[str, Any], pending: str | None = None, message_id: str | None = None, summary_message_id: str | None = None, summary_hash: str | None = None):
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         import fcntl
         with self.state_path.with_suffix(self.state_path.suffix + ".global.lock").open("a+") as lock:
@@ -190,7 +205,8 @@ class Publisher:
                     time.sleep(0.01)
             try:
                 state = self._state()
-                state[request.subject_key] = {"artifact_id": artifact["id"], "message_id": message_id or state.get(request.subject_key, {}).get("message_id"), "artifact_version": artifact["version"], "head_sha": request.head_sha, "content_hash": semantic_hash(content), "message_pending": pending}
+                previous = state.get(request.subject_key, {})
+                state[request.subject_key] = {"artifact_id": artifact["id"], "message_id": message_id or previous.get("message_id"), "summary_message_id": summary_message_id or previous.get("summary_message_id"), "summary_hash": summary_hash or previous.get("summary_hash"), "artifact_version": artifact["version"], "head_sha": request.head_sha, "content_hash": semantic_hash(content), "message_pending": pending}
                 fd, temp = tempfile.mkstemp(prefix=self.state_path.name + ".", dir=self.state_path.parent)
                 try:
                     with os.fdopen(fd, "w", encoding="utf-8") as out:
@@ -241,6 +257,9 @@ class Publisher:
 
     def _message_key(self, request: PublishRequest) -> str:
         return "pr-evidence:initial:" + request.subject_key
+
+    def _summary_key(self, request: PublishRequest) -> str:
+        return "pr-evidence:summary:" + request.subject_key
 
     @staticmethod
     def _attachment_key(value: object) -> str | None:
@@ -313,6 +332,70 @@ class Publisher:
                 # idempotent retry keeps PR creation fast and duplicate-free.
                 time.sleep(0.25)
         raise ArtifactValidationError("initial PR evidence attachment did not materialize")
+
+    @staticmethod
+    def _message_value(message: Any) -> Mapping[str, Any] | None:
+        if not isinstance(message, Mapping):
+            return None
+        nested = message.get("data", message)
+        return nested if isinstance(nested, Mapping) else None
+
+    def _summary_message(self, request: PublishRequest, result: PublishResult) -> None:
+        if self.summary_factory is None or result.content is None or result.artifact_id is None:
+            return
+        desired = dict(self.summary_factory(result.content, result.artifact_id))
+        content = desired.get("content")
+        metadata = desired.get("metadata")
+        message_type = desired.get("type", "exhaust")
+        if not isinstance(content, str) or not isinstance(metadata, Mapping) or not isinstance(message_type, str):
+            raise ArtifactValidationError("summary factory returned an invalid message")
+        desired_hash = semantic_hash({"content": content, "metadata": metadata, "type": message_type})
+        state = self._state().get(request.subject_key, {})
+        message = None
+        trusted_id = state.get("summary_message_id") if isinstance(state, Mapping) else None
+        if isinstance(trusted_id, str) and trusted_id:
+            try:
+                message = self.client.show_message(trusted_id)
+            except Exception:
+                message = None
+        recovered = False
+        if message is None:
+            key = self._summary_key(request)
+            message = next(
+                (
+                    item for item in self.client.list_messages()
+                    if isinstance(item, Mapping) and item.get("idempotency_key") == key
+                ),
+                None,
+            )
+            recovered = message is not None
+        value = self._message_value(message)
+        message_id = self._message_id(message)
+        matches = (
+            value is not None
+            and value.get("content") == content
+            and value.get("metadata") == metadata
+            and value.get("type") == message_type
+        )
+        if message_id is None:
+            message = self.client.create_message(
+                content,
+                self._summary_key(request),
+                metadata=metadata,
+            )
+            message_id = self._message_id(message)
+        elif recovered or not matches:
+            message = self.client.update_message(message_id, content, metadata, message_type)
+            message_id = self._message_id(message) or message_id
+        if not isinstance(message_id, str) or not message_id:
+            raise ArtifactValidationError("summary message did not return an id")
+        self._save_state(
+            request,
+            {"id": result.artifact_id, "version": result.version},
+            result.content,
+            summary_message_id=message_id,
+            summary_hash=desired_hash,
+        )
 
     def _current_after_initial_message(self, request: PublishRequest, artifact: Mapping[str, Any]) -> dict[str, Any]:
         """Do not turn an attachment effect into false ownership of a newer current pointer."""
@@ -440,7 +523,7 @@ class Publisher:
                 message = self._initial_message(request, created)
                 created = self._current_after_initial_message(request, created)
                 self._save_state(request, created, content, message_id=self._message_id(message))
-                return PublishResult("published", created["id"], created["version"])
+                return PublishResult("published", created["id"], created["version"], content=created["content"])
             remote = self._remote(artifact, request.artifact_name, request.subject_key)
             cold_attachment_needed = False
             existing_initial_message = None
@@ -488,7 +571,7 @@ class Publisher:
                 message = self._initial_message(request, remote)
                 remote = self._current_after_initial_message(request, remote)
                 self._save_state(request, remote, remote["content"], message_id=self._message_id(message))
-                return PublishResult("published", remote["id"], remote["version"])
+                return PublishResult("published", remote["id"], remote["version"], content=remote["content"])
             # The remote artifact may contain earlier full-capsule chapters.
             # Apply the effective local mode only after merge so no retained
             # chapter or derived convenience rendering can bypass it.
@@ -507,8 +590,8 @@ class Publisher:
                     message = self._initial_message(request, remote)
                     remote = self._current_after_initial_message(request, remote)
                     self._save_state(request, remote, remote["content"], message_id=self._message_id(message))
-                    return PublishResult("published", remote["id"], remote["version"])
-                return PublishResult("unchanged", remote["id"], remote["version"])
+                    return PublishResult("published", remote["id"], remote["version"], content=remote["content"])
+                return PublishResult("unchanged", remote["id"], remote["version"], content=remote["content"])
             for attempt in range(2):
                 try:
                     self._save_state(request, remote, merged, "update")
@@ -525,8 +608,8 @@ class Publisher:
                         message = self._initial_message(request, updated)
                         updated = self._current_after_initial_message(request, updated)
                         self._save_state(request, updated, merged, message_id=self._message_id(message))
-                        return PublishResult("published", updated["id"], updated["version"])
-                    return PublishResult("updated", updated["id"], updated["version"])
+                        return PublishResult("published", updated["id"], updated["version"], content=updated["content"])
+                    return PublishResult("updated", updated["id"], updated["version"], content=updated["content"])
                 except Exception as exc:
                     if not self._is_conflict(exc) or attempt: return self._queue(request, "version_conflict", remote)
                     remote = self._remote(self.client.show_artifact(remote["id"]), request.artifact_name, request.subject_key)
@@ -541,7 +624,7 @@ class Publisher:
                             remote["content"],
                             message_id=self._message_id(existing_initial_message),
                         )
-                        return PublishResult("unchanged", remote["id"], remote["version"])
+                        return PublishResult("unchanged", remote["id"], remote["version"], content=remote["content"])
             return self._queue(request, "version_conflict", remote)
         except Exception as exc:
             return self._queue(request, type(exc).__name__)
@@ -565,6 +648,17 @@ class Publisher:
                         self.state_path.with_name("pr-evidence-retry.json"),
                         request.subject_key,
                     )
+                    try:
+                        self._summary_message(request, result)
+                    except Exception as exc:
+                        result = PublishResult(
+                            result.status,
+                            result.artifact_id,
+                            result.version,
+                            result.stats,
+                            result.content,
+                            f"{type(exc).__name__}: {str(exc)[:160]}",
+                        )
                 return result
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
