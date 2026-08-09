@@ -721,7 +721,7 @@ def _guard_config_origin(kind: str, value: str, trusted: set):
 # TEAM_ROOM_TRUST_SERVER exists for test harnesses pointing at fakes; setting
 # it in a real environment removes every configured-origin exfiltration guard.
 _guard_config_origin("server", PRODUCTION_SERVER, _trusted_servers())
-KIT_VERSION = "2026.08.07.1"
+KIT_VERSION = "2026.08.09.1"
 CLIENT_SOURCE = "rooms-skill"
 ROOM_APP_NAME = "ArchAgents"
 
@@ -4276,6 +4276,7 @@ def publish_pr(argv):
         from evidence.model import Detection, ExecutionSpan, ProvenanceValue, Subject
         from evidence.policy import policy_for_mode
         from evidence.publisher import ArtifactClient, Publisher, PublishRequest
+        from evidence.summary import trajectory_summary
 
         args = _pr_publish_args(argv)
         supplied = {}
@@ -4373,8 +4374,30 @@ def publish_pr(argv):
         # declared local commit; neither branch name nor GitHub is consulted.
         request = PublishRequest(subject.key, deterministic_name(repository, number), base, head, source.session_id, content,
             args["replace_head_from"], args["from_artifact_version"], False)
-        publisher = Publisher(client, state_path, policy, ancestor=lambda old, new: is_ancestor(cwd, old, new))
+        def summary_message(current, artifact_id):
+            summary = trajectory_summary(current)
+            summary["capture_artifact"] = artifact_id
+            return {
+                "content": _trajectory_line(summary),
+                "type": "exhaust",
+                "metadata": {
+                    "post_type": "trajectory",
+                    "trajectory": summary,
+                    "artifact": {"id": artifact_id, "name": request.artifact_name},
+                    "kit_version": KIT_VERSION,
+                },
+            }
+
+        publisher = Publisher(
+            client,
+            state_path,
+            policy,
+            ancestor=lambda old, new: is_ancestor(cwd, old, new),
+            summary_factory=summary_message,
+        )
         result = publisher.publish(request)
+        if result.summary_error:
+            health_event("pr-evidence-summary", result.summary_error)
         if not automatic:
             print(result.status)
     except (Exception, SystemExit) as exc:

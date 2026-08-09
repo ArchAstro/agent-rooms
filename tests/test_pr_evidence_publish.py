@@ -27,7 +27,7 @@ class ContractServer(http.server.BaseHTTPRequestHandler):
     reads = []
     lose_create_response = False
     lose_initial_message_response = False
-    lose_update_message_response = False
+    lose_summary_message_response = False
     create_barrier = None
 
     def log_message(self, *_):
@@ -113,11 +113,11 @@ class ContractServer(http.server.BaseHTTPRequestHandler):
             lose = (
                 attachments and self.__class__.lose_initial_message_response
             ) or (
-                not attachments and self.__class__.lose_update_message_response
+                not attachments and self.__class__.lose_summary_message_response
             )
             if lose:
                 self.__class__.lose_initial_message_response = False
-                self.__class__.lose_update_message_response = False
+                self.__class__.lose_summary_message_response = False
                 self.close_connection = True
                 return
             self.reply(200, {"data": message})
@@ -127,6 +127,12 @@ class ContractServer(http.server.BaseHTTPRequestHandler):
     def do_PUT(self):
         self.assert_client_identity()
         body = self.body()
+        if self.path.startswith(self.api + "/threads/thread-test/messages/"):
+            message_id = self.path.rsplit("/", 1)[-1]
+            message = next(item for item in self.messages if item["id"] == message_id)
+            message.update(body)
+            self.reply(200, {"data": message})
+            return
         assert self.path.startswith(self.api + "/artifacts/")
         aid = self.path.rsplit("/", 1)[-1]
         artifact = self.artifacts[aid]
@@ -389,12 +395,24 @@ def test_two_agent_sessions_publish_one_current_artifact_over_tcp_without_github
         assert content["subject"]["head_sha"] == second
         assert [c["session_id"] for c in content["chapters"]] == ["session-one", "session-two"]
         assert sum(bool(m.get("attachments")) for m in ContractServer.messages) == 1
-        assert len(ContractServer.messages) == 1
+        assert len(ContractServer.messages) == 2
         message = ContractServer.messages[0]["content"].lower()
         assert all(word in message for word in (
             "prompt", "trajectory", "change evidence", "current complete version"
         )), message
         assert ContractServer.messages[0]["type"] == "exhaust"
+        summary_message = ContractServer.messages[1]
+        assert summary_message["type"] == "exhaust"
+        assert summary_message["metadata"]["post_type"] == "trajectory"
+        assert summary_message["metadata"]["trajectory"]["prompts"] == 2
+        assert summary_message["metadata"]["trajectory"]["capture_artifact"] == artifact["id"]
+        assert summary_message["idempotency_key"] == (
+            "pr-evidence:summary:github.com/owner/repository#7"
+        )
+        assert any(
+            method == "PUT" and path.endswith("/messages/" + summary_message["id"])
+            for method, path, _ in ContractServer.writes
+        )
 
         before = len(ContractServer.writes)
         warm = run_publish(repo, home, endpoint, base, second, "session-two")
@@ -474,12 +492,12 @@ def test_real_cli_redacts_credentials_before_the_room_http_write():
 
 
 def test_persisted_tcp_response_loss_recovers_each_logical_effect_once():
-    """Real CLI retries recover durable create and initial-attachment effects once."""
-    for loss in ("create", "initial"):
+    """Real CLI retries recover artifact, attachment, and summary effects once."""
+    for loss in ("create", "initial", "summary"):
         ContractServer.artifacts = {}; ContractServer.messages = []; ContractServer.writes = []; ContractServer.reads = []
         ContractServer.lose_create_response = loss == "create"
         ContractServer.lose_initial_message_response = loss == "initial"
-        ContractServer.lose_update_message_response = False
+        ContractServer.lose_summary_message_response = loss == "summary"
         with tempfile.TemporaryDirectory() as td, http.server.ThreadingHTTPServer(("127.0.0.1", 0), ContractServer) as srv:
             root = Path(td); repo = root / "repo"; repo.mkdir(); home = root / "home"; home.mkdir()
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
@@ -491,15 +509,17 @@ def test_persisted_tcp_response_loss_recovers_each_logical_effect_once():
             endpoint = f"http://127.0.0.1:{srv.server_address[1]}"
             first_try = run_publish(repo, home, endpoint, base, first, "session-one")
             assert first_try.returncode == 0
-            if loss in {"create", "initial"}:
+            if loss in {"create", "initial", "summary"}:
                 recovered = run_publish(repo, home, endpoint, base, first, "session-one")
-                assert recovered.returncode == 0 and "published" in recovered.stdout
+                assert recovered.returncode == 0
+                assert ("published" if loss != "summary" else "unchanged") in recovered.stdout
             else:
                 assert "published" in first_try.stdout
             assert len(ContractServer.artifacts) == 1
             assert sum(bool(message.get("attachments")) for message in ContractServer.messages) == 1
+            assert sum(message.get("metadata", {}).get("post_type") == "trajectory" for message in ContractServer.messages) == 1
 
-    print("PASS  persisted TCP response loss recovers create and one initial attachment once")
+    print("PASS  persisted TCP response loss recovers each logical effect once")
 
 
 def test_pr_creation_handoff_runs_the_real_cli_without_github_credentials():
