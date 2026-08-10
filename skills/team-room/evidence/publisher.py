@@ -49,7 +49,8 @@ class PublishResult:
 class ArtifactClient:
     """Exact bounded client for firstlanding's developer artifact API."""
     def __init__(self, server: str, app_id: str, team_id: str, thread_id: str, token: str, user_id: str):
-        self.app_base = server.rstrip("/") + f"/protected/api/v1/developer/apps/{app_id}"
+        self.server = server.rstrip("/")
+        self.app_base = self.server + f"/protected/api/v1/developer/apps/{app_id}"
         self.team_id, self.thread_id, self.token, self.user_id = team_id, thread_id, token, user_id
 
     def _call(
@@ -132,10 +133,8 @@ class ArtifactClient:
     def update_message(self, message_id: str, content: str, metadata: Mapping[str, Any], message_type: str = "exhaust"):
         return self._call(
             "PUT",
-            self.app_base
-            + "/threads/"
-            + urllib.parse.quote(self.thread_id, safe="")
-            + "/messages/"
+            self.server
+            + "/api/v1/thread_messages/"
             + urllib.parse.quote(message_id, safe=""),
             {"content": content, "metadata": dict(metadata), "type": message_type},
             timeout=2,

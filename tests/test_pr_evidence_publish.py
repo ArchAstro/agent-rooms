@@ -127,7 +127,7 @@ class ContractServer(http.server.BaseHTTPRequestHandler):
     def do_PUT(self):
         self.assert_client_identity()
         body = self.body()
-        if self.path.startswith(self.api + "/threads/thread-test/messages/"):
+        if self.path.startswith("/api/v1/thread_messages/"):
             message_id = self.path.rsplit("/", 1)[-1]
             message = next(item for item in self.messages if item["id"] == message_id)
             message.update(body)
@@ -410,7 +410,8 @@ def test_two_agent_sessions_publish_one_current_artifact_over_tcp_without_github
             "pr-evidence:summary:github.com/owner/repository#7"
         )
         assert any(
-            method == "PUT" and path.endswith("/messages/" + summary_message["id"])
+            method == "PUT"
+            and path == "/api/v1/thread_messages/" + summary_message["id"]
             for method, path, _ in ContractServer.writes
         )
 
