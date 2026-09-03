@@ -14,8 +14,10 @@ from one the caller may join, while an unlabelled fallback preserves older
 rooms. Joining is a single call the kit makes on their behalf; the person is
 never asked to do anything.
 
-Runs in-process against a stub of the API, no network.
+Runs the real login flow across a local HTTP API stub and loopback callback.
 """
+import base64
+import hashlib
 import http.server
 import importlib.util
 import contextlib
@@ -38,6 +40,8 @@ KIT = os.path.join(HERE, "..", "skills", "team-room", "room_post.py")
 CALLS = []
 MESSAGE_ATTEMPTS = []
 CLIENT_SOURCES = []
+AUTHORIZATION_REQUESTS = []
+EXCHANGE_REQUESTS = []
 
 MY_ORG = "org_mine"
 ROOM_LABEL = "archastro_team_room"
@@ -89,6 +93,7 @@ class Stub(http.server.BaseHTTPRequestHandler):
     fail_me_status = None
     courier_message_status = 403
     human_message_status = None
+    callback_mode = "code"
     threads = {
         "tem_real": [{"id": "thr_real", "title": "team room"}],
         "tem_forged": [{"id": "thr_forged", "title": "team room"}],
@@ -115,16 +120,34 @@ class Stub(http.server.BaseHTTPRequestHandler):
         if self.path.startswith("/org/cli-auth"):
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             callback = query["redirect_uri"][-1]
-            sep = "&" if "?" in callback else "?"
-            target = callback + sep + urllib.parse.urlencode({
-                "access_token": "human-token",
-                "refresh_token": "refresh",
-                "app": "app",
-                "org": MY_ORG,
-                "user": "usr_teammate",
-                "email": "teammate@northwind.test",
-                "expires_in": "900",
+            state = query["state"][-1]
+            code_challenge = query["code_challenge"][-1]
+            AUTHORIZATION_REQUESTS.append({
+                "state": state,
+                "code_challenge": code_challenge,
+                "redirect_uri": callback,
             })
+            sep = "&" if "?" in callback else "?"
+            if Stub.callback_mode == "wrong-state":
+                callback_params = {
+                    "code": "opaque-room-authorization-code",
+                    "state": "wrong-state",
+                }
+            elif Stub.callback_mode == "legacy-credentials":
+                callback_params = {
+                    "access_token": "legacy-access",
+                    "refresh_token": "legacy-refresh",
+                    "app": "app",
+                    "org": MY_ORG,
+                    "user": "usr_teammate",
+                    "state": state,
+                }
+            else:
+                callback_params = {
+                    "code": "opaque-room-authorization-code",
+                    "state": state,
+                }
+            target = callback + sep + urllib.parse.urlencode(callback_params)
             self.send_response(302)
             self.send_header("Location", target)
             self.end_headers()
@@ -189,7 +212,34 @@ class Stub(http.server.BaseHTTPRequestHandler):
         CALLS.append(("POST", self.path))
         CLIENT_SOURCES.append(("POST", self.path, self.headers.get("X-Client-Source")))
         token = (self.headers.get("Authorization") or "").removeprefix("Bearer ")
-        if self.path.endswith("/join"):
+        if self.path == "/api/org/cli-auth/exchange":
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length) or b"{}")
+            EXCHANGE_REQUESTS.append(body)
+            request = AUTHORIZATION_REQUESTS[-1]
+            actual_challenge = base64.urlsafe_b64encode(
+                hashlib.sha256(body["code_verifier"].encode("ascii")).digest()
+            ).rstrip(b"=").decode("ascii")
+            if (
+                body.get("token") != "opaque-room-authorization-code"
+                or body.get("state") != request["state"]
+                or actual_challenge != request["code_challenge"]
+            ):
+                self._json(400, {"error": "invalid_or_expired_token"})
+                return
+            self._json(200, {
+                "kind": "org",
+                "accessToken": "human-token",
+                "refreshToken": "refresh",
+                "expiresIn": 900,
+                "appId": "app",
+                "appName": "ArchAgents",
+                "orgId": MY_ORG,
+                "orgName": "Northwind",
+                "userId": "usr_teammate",
+                "email": "teammate@northwind.test",
+            })
+        elif self.path.endswith("/join"):
             Stub.joined.add(self.path.split("/api/v1/teams/")[1].split("/join")[0])
             # The real self-join endpoint succeeds with no response body.
             self.send_response(204)
@@ -281,6 +331,7 @@ def reset(teams=None, joined=None, threads=None):
     Stub.fail_me_status = None
     Stub.courier_message_status = 403
     Stub.human_message_status = None
+    Stub.callback_mode = "code"
     Stub.threads = dict({
         "tem_real": [{"id": "thr_real", "title": "team room"}],
         "tem_forged": [{"id": "thr_forged", "title": "team room"}],
@@ -291,6 +342,8 @@ def reset(teams=None, joined=None, threads=None):
     CALLS.clear()
     MESSAGE_ATTEMPTS.clear()
     CLIENT_SOURCES.clear()
+    AUTHORIZATION_REQUESTS.clear()
+    EXCHANGE_REQUESTS.clear()
 
 
 def test_room_skill_marks_every_platform_request_with_its_client_source():
@@ -582,7 +635,7 @@ def load_kit_module(home, room_json_path=None):
             os.environ["TEAM_ROOM_TRUST_SERVER"] = old_trust
 
 
-def run_browser_login(module, capture=None):
+def run_browser_login(module, capture=None, timeout=5):
     import webbrowser
 
     old_open = webbrowser.open
@@ -600,7 +653,7 @@ def run_browser_login(module, capture=None):
 
     webbrowser.open = open_callback
     try:
-        module.login(timeout=5)
+        module.login(timeout=timeout)
     finally:
         webbrowser.open = old_open
     assert len(opened) == 1, opened
@@ -624,17 +677,57 @@ def test_browser_login_scrubs_credentials_from_the_success_page():
     assert capture["headers"]["Referrer-Policy"] == "no-referrer"
 
 
+def test_browser_login_rejects_unbound_and_legacy_callbacks():
+    for callback_mode in ("wrong-state", "legacy-credentials"):
+        reset()
+        Stub.callback_mode = callback_mode
+        home = tempfile.mkdtemp()
+        module = load_kit_module(home)
+
+        try:
+            run_browser_login(module, timeout=0.2)
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError(f"{callback_mode} callback completed login")
+
+        credentials = os.path.join(
+            home, ".config", "team-room", "credentials.json"
+        )
+        assert not os.path.exists(credentials), callback_mode
+        assert EXCHANGE_REQUESTS == [], (callback_mode, EXCHANGE_REQUESTS)
+
+    print("PASS  browser login rejects unbound and legacy callbacks")
+
+
 def test_browser_login_ends_with_a_usable_company_room():
+    # Setup: launch the real browser-login path with no credentials or local
+    # room identity. The HTTP stub stands in for Agent Network and Platform.
     reset()
     home = tempfile.mkdtemp()
     module = load_kit_module(home)
 
-    run_browser_login(module)
+    # Browser and auth boundaries: follow the authorization redirect through
+    # the real loopback server, then require a state-bound PKCE exchange.
+    opened_url = run_browser_login(module)
+    authorization_url = urllib.parse.urlparse(opened_url)
+    authorization_query = urllib.parse.parse_qs(authorization_url.query)
+    assert len(authorization_query["state"][-1]) >= 32, authorization_query
+    assert len(authorization_query["code_challenge"][-1]) == 43, authorization_query
+    assert "code_verifier" not in authorization_query, authorization_query
+    assert len(EXCHANGE_REQUESTS) == 1, EXCHANGE_REQUESTS
+    exchange = EXCHANGE_REQUESTS[0]
+    assert exchange["token"] == "opaque-room-authorization-code", exchange
+    assert exchange["state"] == authorization_query["state"][-1], exchange
+    assert "human-token" not in opened_url and "refresh" not in opened_url
 
+    # Product outcome: the exchanged human identity discovers and joins the
+    # company room, persists securely, and publishes the first observable post.
     cfg = room_json(home)
     assert cfg and cfg["team_id"] == "tem_real", (cfg, CALLS)
     creds = os.path.join(home, ".config", "team-room", "credentials.json")
     assert os.path.exists(creds)
+    assert (os.stat(creds).st_mode & 0o777) == 0o600
     assert ("POST", "/api/v1/teams/tem_real/join") in CALLS, CALLS
 
     posted = run_kit(
@@ -906,6 +999,7 @@ def main():
         test_corrupt_human_credentials_do_not_fall_back_to_a_courier()
         test_untrusted_discovery_server_never_receives_the_token()
         test_browser_login_scrubs_credentials_from_the_success_page()
+        test_browser_login_rejects_unbound_and_legacy_callbacks()
         test_browser_login_ends_with_a_usable_company_room()
         test_first_post_preserves_its_courier_author_when_delivery_is_rejected()
         test_first_post_ignores_a_stale_courier_token_file_after_human_login()
