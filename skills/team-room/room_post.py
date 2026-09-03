@@ -721,7 +721,7 @@ def _guard_config_origin(kind: str, value: str, trusted: set):
 # TEAM_ROOM_TRUST_SERVER exists for test harnesses pointing at fakes; setting
 # it in a real environment removes every configured-origin exfiltration guard.
 _guard_config_origin("server", PRODUCTION_SERVER, _trusted_servers())
-KIT_VERSION = "2026.08.09.2"
+KIT_VERSION = "2026.09.03.1"
 CLIENT_SOURCE = "rooms-skill"
 ROOM_APP_NAME = "ArchAgents"
 
@@ -821,6 +821,73 @@ MIRROR_QUEUE_PATH = os.path.expanduser("~/.config/team-room/mirror-queue.jsonl")
 MIRROR_QUEUE_MAX_AGE_SECONDS = 7 * 86400
 MIRROR_FLUSH_REQUEST_TIMEOUT = 20.0
 MIRROR_FLUSH_TOTAL_BUDGET_SECONDS = 120.0
+
+# ArchDev mirror migration (tracker #11045 P0.6): a machine still publishing
+# only to the primary room gets a point-of-use prompt to connect the ArchDev
+# mirror. This is the ONE mirror concern that may become a human ask (see
+# SKILL.md): the setup is a browser sign-in no agent can complete alone. The
+# prompt is a post-success trailer — never an error, never blocking — and is
+# rate-limited per machine so a chatty session doesn't nag on every post.
+ARCHDEV_MIRROR_NAME = "archdev"
+ARCHDEV_NUDGE_STATE_PATH = os.path.expanduser(
+    "~/.config/team-room/archdev-nudge.json")
+ARCHDEV_NUDGE_INTERVAL_SECONDS = 4 * 3600
+
+
+def _archdev_mirror_configured() -> bool:
+    entry = any(
+        m.get("name") == ARCHDEV_MIRROR_NAME for m in MIRRORS)
+    credential = os.path.exists(
+        os.path.join(MIRRORS_DIR, f"{ARCHDEV_MIRROR_NAME}.json"))
+    return entry and credential
+
+
+def _archdev_setup_script() -> str | None:
+    # The vendored kit lives at <repo>/.claude/skills/team-room/room_post.py;
+    # only repos that ship the migration script nudge. The superseded
+    # ~/.archastro install (three levels of dirname land elsewhere) and repos
+    # without the script stay silent.
+    root = os.path.abspath(__file__)
+    for _ in range(4):
+        root = os.path.dirname(root)
+    candidate = os.path.join(root, "scripts", "room-mirror-archdev")
+    return candidate if os.path.isfile(candidate) else None
+
+
+def _maybe_archdev_migration_nudge() -> None:
+    try:
+        if os.environ.get("CI") or os.environ.get(
+                "TEAM_ROOM_SKIP_ARCHDEV_NUDGE"):
+            return
+        if _archdev_mirror_configured():
+            return
+        if not _archdev_setup_script():
+            return
+        now = time.time()
+        try:
+            state = json.load(open(ARCHDEV_NUDGE_STATE_PATH))
+        except Exception:
+            state = {}
+        last = state.get("last_nudge_at", 0)
+        if isinstance(last, (int, float)) and now - last <                 ARCHDEV_NUDGE_INTERVAL_SECONDS:
+            return
+        state["last_nudge_at"] = now
+        fd = os.open(ARCHDEV_NUDGE_STATE_PATH,
+                     os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(state, f)
+        print(
+            "[team-room] This machine doesn't mirror posts to the ArchDev "
+            "room yet (tracker #11045).\n"
+            "[team-room] Relay once to your human: run  "
+            "! scripts/room-mirror-archdev  — a one-time browser sign-in "
+            "connects it.",
+            file=sys.stderr,
+        )
+    except Exception:
+        # The nudge is advisory exhaust; it must never affect a post.
+        pass
+
 
 # Primary writes enqueue before any authentication or network work, then wake a
 # detached one-shot worker. Outboxes are destination-specific: a command run in
@@ -1532,14 +1599,23 @@ def build_metadata(post_type, refs, addressee=None, answers=None) -> dict:
     if answers:
         meta["answers"] = answers
     # Top-level areas the session is touching right now: dirty files plus
-    # the last few commits' files, folded to their first two path segments.
+    # the last few commits' files, folded to three path segments when the
+    # third is a directory (a dotted third segment is a file at depth two,
+    # which folds back to two). Two segments collapsed every Go service into
+    # "services/go" and every TS package into "src/ts", which blunted the
+    # rooms "My areas" lens to near-"All" for anyone active in a big bucket.
     files = set()
     for line in git("diff", "--name-only", "HEAD").splitlines():
         files.add(line.strip())
     for line in git("log", "--name-only", "--pretty=format:", "-3").splitlines():
         if line.strip():
             files.add(line.strip())
-    areas = sorted({"/".join(f.split("/")[:2]) for f in files if f})[:8]
+    def _area(path):
+        parts = path.split("/")
+        if len(parts) >= 3 and parts[2] and "." not in parts[2]:
+            return "/".join(parts[:3])
+        return "/".join(parts[:2])
+    areas = sorted({_area(f) for f in files if f})[:8]
     if areas:
         meta["areas"] = areas
     try:
@@ -3515,6 +3591,9 @@ def mirror_fanout(message: str, metadata: dict | None, uploads: list | None = No
                 "name": m["name"],
                 "server": m["server"],
                 "thread_id": m["thread_id"],
+                **({"team_id": m["team_id"]}
+                   if isinstance(m.get("team_id"), str) and m["team_id"]
+                   else {}),
             }
             for m in MIRRORS
             if m.get("thread_id")
@@ -3589,6 +3668,191 @@ def _mirror_queue_rewrite(consumed_line: str, replacement: str | None):
             fcntl.flock(f, fcntl.LOCK_UN)
 
 
+def _mirror_publish_pr_evidence(request, policy, cwd, summary_factory) -> None:
+    """Repeat a successful PR-evidence publication against each mirror room,
+    so the ArchDev room carries the same artifact, initial message, and
+    living summary during the dual-publish window (tracker #11045). The
+    publisher is target-agnostic; each mirror gets its own client, its own
+    state file (head ordering and summary-message ids must never cross
+    tiers), and the same request. Strictly best-effort AFTER the primary
+    publication: every failure is one health line, never a raised error —
+    the primary room's evidence is the contract."""
+    try:
+        from pathlib import Path
+        from evidence.git_pr import is_ancestor
+        from evidence.publisher import ArtifactClient, Publisher
+    except Exception:
+        return
+    for m in MIRRORS:
+        if not m.get("thread_id"):
+            continue
+        name = m["name"]
+        try:
+            session = _mirror_session(m, MIRROR_FLUSH_REQUEST_TIMEOUT)
+            if not session:
+                health_event(f"pr-evidence-mirror:{name}",
+                             "credentials unavailable")
+                continue
+            target = {"name": name, "server": m["server"],
+                      "thread_id": m["thread_id"],
+                      **({"team_id": m["team_id"]}
+                         if isinstance(m.get("team_id"), str) and m["team_id"]
+                         else {})}
+            team = _mirror_team_id(target, session,
+                                   MIRROR_FLUSH_REQUEST_TIMEOUT)
+            if not team:
+                health_event(f"pr-evidence-mirror:{name}",
+                             "mirror team unresolved")
+                continue
+            client = ArtifactClient(
+                m["server"], session["appId"], team, m["thread_id"],
+                session["accessToken"], session["userId"])
+            os.makedirs(MIRRORS_DIR, exist_ok=True)
+            state_path = Path(MIRRORS_DIR) / f"{name}-pr-evidence-state.json"
+            publisher = Publisher(
+                client,
+                state_path,
+                policy,
+                ancestor=lambda old, new: is_ancestor(cwd, old, new),
+                summary_factory=summary_factory,
+            )
+            result = publisher.publish(request)
+            if result.summary_error:
+                health_event(f"pr-evidence-mirror:{name}",
+                             f"summary {result.summary_error[:120]}")
+        except (Exception, SystemExit) as e:
+            health_event(f"pr-evidence-mirror:{name}",
+                         f"{type(e).__name__}: {str(e)[:120]}")
+
+
+def _presence_fields_from_entry(entry: dict) -> dict | None:
+    """The team-presence row a mirrored post implies, derived purely from the
+    post's own metadata exhaust (build_metadata stamps human/worktree/branch
+    on every post). None when the post carries no session identity — manual
+    or stripped posts never fabricate a presence row."""
+    md = entry.get("metadata") or {}
+    human = (md.get("human") or "").strip()
+    worktree = (md.get("worktree") or "").strip()
+    if not human or not worktree:
+        return None
+    headline = (entry.get("message") or "").strip().splitlines()[0].strip() \
+        if (entry.get("message") or "").strip() else ""
+    # The stream renders the glyph; the presence strip wants the sentence.
+    intent = headline.lstrip("✓▶⚠→✗?🔔 ").strip()
+    fields = {
+        "scope_id": f"{human.lower()}/{worktree}",
+        "human": human,
+        "worktree": worktree,
+    }
+    if md.get("branch"):
+        fields["branch"] = md["branch"]
+    if intent:
+        fields["intent"] = intent
+    if md.get("post_type"):
+        fields["last_post_type"] = md["post_type"]
+    return fields
+
+
+def _mirror_team_id(target: dict, session: dict, timeout: float) -> str | None:
+    """The mirror room's team, for team-owned presence rows. Prefer the id
+    recorded in the mirror entry (newer setups write it). Otherwise resolve
+    it once by scanning the mirror user's joined teams for the one whose
+    detail lists the mirror thread — the developer thread payload carries
+    `team: null`, so the thread cannot name its own team — and persist the
+    answer into the mirror entry so the scan never repeats on this machine."""
+    if target.get("team_id"):
+        return target["team_id"]
+    listing = http_get(
+        f"{target['server']}/api/v1/teams?membership=joined&page_size=25",
+        session["accessToken"],
+        timeout=timeout,
+    )
+    for team in (listing.get("data") or [])[:25]:
+        team_id = team.get("id")
+        if not team_id:
+            continue
+        detail = http_get(
+            f"{target['server']}/api/v1/teams/{team_id}",
+            session["accessToken"],
+            timeout=timeout,
+        )
+        detail = detail.get("data") or detail
+        threads = detail.get("threads") or []
+        if any(t.get("id") == target["thread_id"] for t in threads):
+            target["team_id"] = team_id
+            _persist_mirror_team_id(target["name"], team_id)
+            return team_id
+    return None
+
+
+def _persist_mirror_team_id(mirror_name: str, team_id: str) -> None:
+    """Write the resolved team id back into this machine's mirror entry so
+    the joined-teams scan happens at most once per machine. Best-effort:
+    config write failure just means the scan repeats next flush."""
+    try:
+        with open(ROOM_CONFIG_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        changed = False
+        for m in cfg.get("mirrors") or []:
+            if isinstance(m, dict) and m.get("name") == mirror_name \
+                    and not m.get("team_id"):
+                m["team_id"] = team_id
+                changed = True
+        if not changed:
+            return
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(ROOM_CONFIG_PATH))
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+        os.replace(tmp, ROOM_CONFIG_PATH)
+        os.chmod(ROOM_CONFIG_PATH, 0o600)
+    except Exception:
+        pass
+
+
+def _mirror_presence_upsert(target: dict, entry: dict, session: dict, remaining: float) -> None:
+    """Refresh the mirror team's team-presence row for this post's session,
+    so the mirror room's People view is live during the dual-publish window
+    (tracker #11045 P1 'reading substrate'). Strictly best-effort AFTER the
+    message copy landed: any failure is one health line, never a delivery
+    failure — the message is the contract, the presence row is exhaust."""
+    try:
+        fields = _presence_fields_from_entry(entry)
+        if not fields:
+            return
+        timeout = max(0.01, min(MIRROR_FLUSH_REQUEST_TIMEOUT, remaining))
+        team = _mirror_team_id(target, session, timeout)
+        if not team:
+            return
+        http_json(
+            f"{target['server']}/protected/api/v1/developer/apps/"
+            f"{session['appId']}/custom_objects",
+            {
+                "type": "team-presence",
+                "team": team,
+                "upsert": True,
+                "fields": fields,
+                # Team-owned objects need team ADMIN to modify; a presence
+                # row is only ever refreshed by its own author, so the
+                # create stamps an explicit self write grant that later
+                # upserts (and cleanup) pass through check_acl_modify.
+                "acl": {
+                    "grants": [
+                        {
+                            "principal_type": "user",
+                            "principal": session["userId"],
+                            "actions": ["write"],
+                        }
+                    ]
+                },
+            },
+            token=session["accessToken"],
+            timeout=timeout,
+        )
+    except Exception as e:
+        health_event(f"mirror:{target.get('name', '?')}",
+                     f"presence upsert {type(e).__name__}")
+
+
 def _deliver_to_target(target: dict, entry: dict, sessions: dict, remaining: float) -> bool:
     """One mirror copy, bounded by the caller's remaining budget. The
     idempotency key makes a retry after an ambiguous outcome (message
@@ -3626,6 +3890,7 @@ def _deliver_to_target(target: dict, entry: dict, sessions: dict, remaining: flo
         token=session["accessToken"],
         timeout=max(0.01, min(MIRROR_FLUSH_REQUEST_TIMEOUT, remaining)),
     )
+    _mirror_presence_upsert(target, entry, session, remaining)
     return True
 
 
@@ -3723,8 +3988,8 @@ def login_page_html(ok: bool) -> str:
         "Authentication is complete. Head back to your terminal while the "
         "kit securely connects your company room."
         if ok
-        else "The login response was missing its tokens. Close this tab and "
-        "run the login again from your terminal."
+        else "The login response was missing or did not match this terminal's "
+        "authorization request. Close this tab and run room-post login again."
     )
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>{title} · ArchAgents</title>
@@ -3787,20 +4052,29 @@ def login(mirror: dict | None = None, best_effort: bool = False,
     result = {}
     done = threading.Event()
     import secrets
-    expected_state = secrets.token_urlsafe(24)
+    state = secrets.token_urlsafe(32)
+    code_verifier = secrets.token_urlsafe(32)
+    code_challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(code_verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             flat = {k: v[0] for k, v in q.items()}
-            # State binds this callback to the login WE launched: it rides
-            # the callback PATH (so any redirect implementation preserves
-            # it), and anything else knocking on the local port is
-            # discarded — a hostile local page can't plant credentials.
+            # The callback path and returned OAuth state both bind this
+            # response to the login WE launched. Anything else knocking on
+            # the local port is discarded — a hostile local page cannot plant
+            # a code or terminate the real login attempt.
             path_only = urllib.parse.urlparse(self.path).path
-            ok = bool(flat.get("access_token")) and path_only.rstrip("/").endswith(expected_state)
+            path_ok = path_only == f"/callback/{state}"
+            returned_state = flat.get("state") or ""
+            state_ok = hmac.compare_digest(returned_state, state)
+            ok = bool(flat.get("code")) and path_ok and state_ok
             if ok:
-                result.update(flat)
+                result["code"] = flat["code"]
+            elif path_ok and state_ok:
+                result["error"] = flat.get("error") or "missing_code"
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
@@ -3816,10 +4090,12 @@ def login(mirror: dict | None = None, best_effort: bool = False,
     server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
     port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    cb = f"http://127.0.0.1:{port}/callback/{expected_state}"
+    cb = f"http://127.0.0.1:{port}/callback/{state}"
     url = f"{portal}/org/cli-auth?" + urllib.parse.urlencode({
         "slug": slug,
         "redirect_uri": cb,
+        "state": state,
+        "code_challenge": code_challenge,
     })
     print("Open this URL in your browser to authenticate the Team Room:\n")
     print(f"  {url}\n")
@@ -3835,29 +4111,63 @@ def login(mirror: dict | None = None, best_effort: bool = False,
             return
         die("login timed out after 5 minutes")
     server.shutdown()
-    required = ("access_token", "refresh_token", "app", "org", "user")
-    missing = [k for k in required if not result.get(k)]
-    if missing:
+    if not result.get("code"):
         if best_effort:
             print(f"  (login for '{mirror['name']}' came back incomplete; "
                   "skipping this tier.)")
             return
-        die(f"callback missing params: {missing}")
+        die("Team Room authorization did not complete. Run `room-post login` again.")
+    try:
+        authorized = http_json(
+            f"{portal}/api/org/cli-auth/exchange",
+            {
+                "token": result["code"],
+                "state": state,
+                "code_verifier": code_verifier,
+            },
+            timeout=30,
+        )
+    except urllib.error.HTTPError as e:
+        if best_effort:
+            print(f"  (login exchange for '{mirror['name']}' was rejected; "
+                  "skipping this tier.)")
+            return
+        if e.code == 503:
+            die("Team Room login is temporarily unavailable. Run `room-post login` again.")
+        die("Team Room authorization expired or was rejected. Run `room-post login` again.")
+    except Exception:
+        if best_effort:
+            print(f"  (login exchange for '{mirror['name']}' did not respond; "
+                  "skipping this tier.)")
+            return
+        die("Team Room login exchange did not respond. Run `room-post login` again.")
+
+    required = ("accessToken", "refreshToken", "appId", "orgId", "userId")
+    missing = [k for k in required if not authorized.get(k)]
+    if missing:
+        if best_effort:
+            print(f"  (login exchange for '{mirror['name']}' was incomplete; "
+                  "skipping this tier.)")
+            return
+        die("Team Room login exchange returned incomplete credentials. "
+            "Run `room-post login` again.")
     creds = {
         "server": server_url,
         "orgSessions": {
-            result["app"]: {
-                "accessToken": result["access_token"],
-                "refreshToken": result["refresh_token"],
-                "appId": result["app"],
-                "appName": result.get("app_name", ""),
+            authorized["appId"]: {
+                "accessToken": authorized["accessToken"],
+                "refreshToken": authorized["refreshToken"],
+                "appId": authorized["appId"],
+                "appName": authorized.get("appName", ""),
                 "appSlug": slug,
-                "orgId": result["org"],
-                "orgName": result.get("org_name", ""),
-                "userId": result["user"],
-                "email": result.get("email", ""),
+                "orgId": authorized["orgId"],
+                "orgName": authorized.get("orgName", ""),
+                "userId": authorized["userId"],
+                "email": authorized.get("email", ""),
+                **({"sandboxId": authorized["sandboxId"]}
+                   if authorized.get("sandboxId") else {}),
                 "expiresAt": int(time.time() * 1000)
-                + int(result.get("expires_in", 900)) * 1000,
+                + int(authorized.get("expiresIn", 900)) * 1000,
             }
         },
     }
@@ -3869,13 +4179,13 @@ def login(mirror: dict | None = None, best_effort: bool = False,
     os.chmod(creds_path, 0o600)
     where = f"mirror '{mirror['name']}'" if mirror else "Team Room"
     print(
-        f"{where} sign-in stored for {result.get('email', result['user'])} "
-        f"at {creds_path}."
+        f"{where} sign-in stored for "
+        f"{authorized.get('email') or authorized['userId']} at {creds_path}."
     )
     # First login with no room configured: find your team room from your
     # identity and save it, so there's nothing else to set up.
     if not mirror:
-        room_status = discover_and_configure(result["access_token"])
+        room_status = discover_and_configure(authorized["accessToken"])
         if room_status is False:
             die(
                 "sign-in succeeded, but no room was connected. "
@@ -4398,6 +4708,7 @@ def publish_pr(argv):
         result = publisher.publish(request)
         if result.summary_error:
             health_event("pr-evidence-summary", result.summary_error)
+        _mirror_publish_pr_evidence(request, policy, cwd, summary_message)
         if not automatic:
             print(result.status)
     except (Exception, SystemExit) as exc:
@@ -4616,6 +4927,7 @@ def main():
     if nudge:
         print(f"room reminder: {nudge}", file=sys.stderr)
     mirror_fanout(message, metadata, uploads)
+    _maybe_archdev_migration_nudge()
 
 
 # Commands that must NEVER interrupt a developer's session. `doctor` is
