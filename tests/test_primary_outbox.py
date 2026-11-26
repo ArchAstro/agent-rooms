@@ -464,6 +464,14 @@ def test_worker_falls_back_from_rejected_courier_to_human_login():
     human = {"accessToken": "human", "appId": "app", "userId": "human-user"}
     rp.authed_session = lambda timeout=None: (None, None, None, courier)
     rp.login_session = lambda timeout=None: ({}, "key", "path", human)
+    profiles = []
+
+    def profile(_url, token, **_kwargs):
+        profiles.append(token)
+        return {"id": f"{token}-user"}
+
+    # Profile enrichment shares the delivery budget; keep both identities local.
+    rp.http_get = profile
     attempts = []
 
     def reject_courier(session, *_args, **_kwargs):
@@ -476,6 +484,7 @@ def test_worker_falls_back_from_rejected_courier_to_human_login():
 
     rp._deliver_primary(entry("auth fallback"), 0.5)
 
+    assert profiles == ["courier", "human"], profiles
     assert attempts == ["courier", "human"], attempts
 
 
