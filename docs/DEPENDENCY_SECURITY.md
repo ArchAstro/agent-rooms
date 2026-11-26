@@ -87,11 +87,11 @@ advisories. IDs can be looked up at `https://osv.dev/list?q=<CVE-ID>`.
 ## Reproduce and CI gate
 
 ```sh
-# Canonical E2E: includes deterministic cases, then live GitHub/OSV requests.
-python3 tests/test_dependency_cves.py
+# Canonical E2E: deterministic cases, then live GitHub/OSV requests.
+LIVE_CVE_AUDIT=1 python3 tests/test_dependency_cves.py
 
-# Deterministic scanner cases only (no network).
-python3 -m unittest discover -s tests -p test_dependency_cves.py -v
+# Deterministic scanner cases only (no network); also the default without the env var.
+python3 tests/test_dependency_cves.py
 ```
 
 The canonical function is
@@ -103,12 +103,18 @@ and its latest release; it does not require a version bump for its own sake.
 Withdrawn advisories are ignored, CVE aliases are deduplicated, and advisories
 without CVE aliases retain their OSV IDs. Residuals are printed even on success.
 Inventory, network, API and incomplete/paginated-response errors fail rather
-than skip the scan. The check requires public GitHub and OSV access.
+than skip the scan; transient network, rate-limit and 5xx errors are retried
+with backoff first. The check requires public GitHub and OSV access. If
+`GITHUB_TOKEN` is set it is sent only to `api.github.com`.
 
-Automatic coverage is `.github/workflows/ci.yml` → `kit` → `unit suites`:
-its existing `tests/test_*.py` loop executes the live check on pull requests,
-pushes to main and manual runs. A live negative run against the old workflow
-pins failed with upgrade findings for all four Actions; the updated pins passed.
+Automatic coverage is split so PR CI does not depend on upstream releases
+or the network. `.github/workflows/ci.yml` → `kit` → `unit suites` runs only the
+deterministic cases on pull requests and pushes to main.
+`.github/workflows/dependency-cves.yml` runs the live check weekly and on manual
+dispatch, using `github.token` to authenticate GitHub API requests.
+A live negative run against the old workflow pins failed with upgrade findings
+for all four Actions; the updated pins passed.
 The deterministic cases also cover old-pin rejection, residual reporting,
 Swift advisory failure, production lockfile parsing, withdrawn/aliased
-advisories, unsupported inventory changes and API failures.
+advisories, unsupported inventory changes, API failures, retry behavior and
+GitHub-only token scoping.

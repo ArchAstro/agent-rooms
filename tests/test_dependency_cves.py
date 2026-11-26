@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """Live OSV audit of the pins in this repo; see docs/DEPENDENCY_SECURITY.md.
 
-Direct execution runs deterministic regression cases, then the live E2E.
-Use unittest discovery to run only the deterministic cases (no network).
+Direct execution runs the deterministic regression cases (no network). Set
+LIVE_CVE_AUDIT=1 to also run the live E2E; CI does so only from the scheduled
+and manual dependency-cves workflow, never on the per-PR path.
 """
 
 import json
+import os
 from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
+import time
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 
@@ -18,15 +23,34 @@ ROOT = Path(__file__).resolve().parents[1]
 OSV = "https://api.osv.dev/v1"
 
 
+RETRY_STATUSES = {403, 429, 500, 502, 503, 504}
+ATTEMPTS = 4
+
+
 def fetch_json(url, payload=None):
+    headers = {"Content-Type": "application/json", "User-Agent": "agent-rooms-cve-check"}
+    token = os.environ.get("GITHUB_TOKEN")
+    # Only ever send the token to the GitHub API host.
+    if token and urlsplit(url).hostname == "api.github.com":
+        headers["Authorization"] = f"Bearer {token}"
     request = Request(
         url,
         data=None if payload is None else json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", "User-Agent": "agent-rooms-cve-check"},
+        headers=headers,
     )
-    # Network, HTTP and JSON errors deliberately fail the check, not skip it.
-    with urlopen(request, timeout=45) as response:
-        return json.load(response)
+    # Transient network/rate-limit errors are retried with backoff; persistent
+    # network, HTTP and JSON errors deliberately fail the check, not skip it.
+    for attempt in range(ATTEMPTS):
+        try:
+            with urlopen(request, timeout=45) as response:
+                return json.load(response)
+        except HTTPError as error:
+            if error.code not in RETRY_STATUSES or attempt == ATTEMPTS - 1:
+                raise
+        except (URLError, TimeoutError):
+            if attempt == ATTEMPTS - 1:
+                raise
+        time.sleep(2 ** attempt * 5)
 
 
 def inventory(root):
@@ -261,9 +285,50 @@ class ScannerTests(unittest.TestCase):
         with self.assertRaisesRegex(OSError, "offline"):
             self.run_fixture(set(), set(), error=OSError("offline"))
 
+    def test_token_only_sent_to_github_api(self):
+        sent = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, *args):
+                return b"{}"
+
+        def opener(request, timeout):
+            sent.append((request.full_url, request.get_header("Authorization")))
+            return Response()
+
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "secret"}), patch(__name__ + ".urlopen", opener):
+            fetch_json("https://api.github.com/repos/a/b/releases/latest")
+            fetch_json(f"{OSV}/vulns/x")
+            fetch_json("https://raw.githubusercontent.com/a/b/c/package-lock.json")
+        self.assertEqual([auth for _, auth in sent], ["Bearer secret", None, None])
+
+    def test_transient_errors_retry_then_fail(self):
+        rate_limited = HTTPError("https://api.github.com/x", 403, "rate limited", {}, None)
+        with patch(__name__ + ".urlopen", side_effect=rate_limited) as opener, patch(
+            __name__ + ".time.sleep"
+        ) as sleep:
+            with self.assertRaises(HTTPError):
+                fetch_json("https://api.github.com/x")
+        self.assertEqual(opener.call_count, ATTEMPTS)
+        self.assertEqual(sleep.call_count, ATTEMPTS - 1)
+        not_found = HTTPError("https://api.github.com/x", 404, "missing", {}, None)
+        with patch(__name__ + ".urlopen", side_effect=not_found) as opener, patch(__name__ + ".time.sleep"):
+            with self.assertRaises(HTTPError):
+                fetch_json("https://api.github.com/x")
+        self.assertEqual(opener.call_count, 1)
+
 
 if __name__ == "__main__":
     result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(ScannerTests))
     if not result.wasSuccessful():
         raise SystemExit(1)
-    pinned_dependencies_have_no_known_cves()
+    if os.environ.get("LIVE_CVE_AUDIT") == "1":
+        pinned_dependencies_have_no_known_cves()
+    else:
+        print("SKIP live CVE audit (set LIVE_CVE_AUDIT=1; runs in dependency-cves workflow)", flush=True)
